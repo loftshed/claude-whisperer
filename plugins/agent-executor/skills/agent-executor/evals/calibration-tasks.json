@@ -1,0 +1,377 @@
+{
+  "schema": "agent-executor.calibration-manifest.v1",
+  "repository": null,
+  "purpose": "Representative executor task bank. Set a real starting revision and applicable context before initialization; do not benchmark a task whose requested behavior already exists.",
+  "tasks": [
+    {
+      "task_id": "agy_wire",
+      "category": "small_bug",
+      "objective": "Parse the actual AGY 1.2.6 nested stream envelope while preserving flat examples and plain report compatibility.",
+      "start_revision": null,
+      "acceptance_criteria": [
+        "Actual nested result yields its response, exact conversation ID, and lowercase terminal status.",
+        "An error terminal event cannot be reported as completed.",
+        "No workspace or report-contract regression."
+      ],
+      "allow_paths": [
+        "scripts/run_agent.py",
+        "scripts/usage.py"
+      ],
+      "split": "training",
+      "repeat": true,
+      "context_packet": {
+        "conventions": [
+          "Python standard library only; preserve existing runner audit and report contracts.",
+          "Do not mutate acceptance checks or change billing profiles."
+        ],
+        "decisions": [
+          "Native first; no ranking without acceptance evidence."
+        ],
+        "failed_attempts": [],
+        "evidence": [
+          "Live adapter check exposed event/result envelope and uppercase SUCCESS."
+        ]
+      },
+      "provenance": "Live adapter check exposed event/result envelope and uppercase SUCCESS."
+    },
+    {
+      "task_id": "process_recovery",
+      "category": "asynchronous_behavior",
+      "objective": "Recover live native or external processes without marking still-running work stopped or replaying it.",
+      "start_revision": null,
+      "acceptance_criteria": [
+        "An unchanged process birth identity remains active.",
+        "PID reuse or missing terminal artifacts preserve uncertainty.",
+        "An identical request ID never starts a second invocation."
+      ],
+      "allow_paths": [
+        "scripts/coordinator.py",
+        "scripts/native_bridge.py"
+      ],
+      "split": "training",
+      "repeat": true,
+      "context_packet": {
+        "conventions": [
+          "Python standard library only; preserve existing runner audit and report contracts.",
+          "Do not mutate acceptance checks or change billing profiles."
+        ],
+        "decisions": [
+          "Native first; no ranking without acceptance evidence."
+        ],
+        "failed_attempts": [],
+        "evidence": [
+          "Completion audit found missing active-handle recovery; a command-string birth race was reproduced."
+        ]
+      },
+      "provenance": "Completion audit found missing active-handle recovery; a command-string birth race was reproduced."
+    },
+    {
+      "task_id": "invocation_budget",
+      "category": "small_bug",
+      "objective": "Enforce a task-wide invocation allowance across implementation, consultations, failed attempts, and correction.",
+      "start_revision": null,
+      "acceptance_criteria": [
+        "Reserve quota durably before dispatch.",
+        "All invocation kinds count and uncertain launches retain their reservations.",
+        "Exhaustion prevents another invocation without claiming provider-dollar or subscription-quota enforcement."
+      ],
+      "allow_paths": [
+        "scripts/coordinator.py",
+        "scripts/conductor_policy.py"
+      ],
+      "split": "training",
+      "repeat": false,
+      "context_packet": {
+        "conventions": [
+          "Python standard library only; preserve existing runner audit and report contracts.",
+          "Do not mutate acceptance checks or change billing profiles."
+        ],
+        "decisions": [
+          "Native first; no ranking without acceptance evidence."
+        ],
+        "failed_attempts": [],
+        "evidence": [
+          "Coordinator 0.8 only bounded consultation/correction counts."
+        ]
+      },
+      "provenance": "Coordinator 0.8 only bounded consultation/correction counts."
+    },
+    {
+      "task_id": "evidence_excerpts",
+      "category": "multifile_change",
+      "objective": "Require host-captured source excerpts and installed version evidence before a consultation is supported.",
+      "start_revision": null,
+      "acceptance_criteria": [
+        "A missing or fabricated excerpt fails verification.",
+        "A worker verified flag cannot substitute for a host receipt.",
+        "Facts, inferences, observations, and unresolved gaps remain distinct."
+      ],
+      "allow_paths": [
+        "scripts/coordinator.py",
+        "scripts/evidence.py"
+      ],
+      "split": "training",
+      "repeat": false,
+      "context_packet": {
+        "conventions": [
+          "Python standard library only; preserve existing runner audit and report contracts.",
+          "Do not mutate acceptance checks or change billing profiles."
+        ],
+        "decisions": [
+          "Native first; no ranking without acceptance evidence."
+        ],
+        "failed_attempts": [],
+        "evidence": [
+          "Original coordinator checked declared metadata and hash only."
+        ]
+      },
+      "provenance": "Original coordinator checked declared metadata and hash only."
+    },
+    {
+      "task_id": "evidence_expiry",
+      "category": "repository_investigation",
+      "objective": "Make evidence invalidation cover changed local runtime/config files and disputed facts inside the cache window.",
+      "start_revision": null,
+      "acceptance_criteria": [
+        "Changed local files invalidate prior evidence.",
+        "Version conflicts and older-than-24-hour sources fail review.",
+        "Disputed facts require a capture after the question using timezone-aware comparisons."
+      ],
+      "allow_paths": [
+        "scripts/coordinator.py",
+        "scripts/evidence.py"
+      ],
+      "split": "held_out",
+      "repeat": false,
+      "context_packet": {
+        "conventions": [
+          "Python standard library only; preserve existing runner audit and report contracts.",
+          "Do not mutate acceptance checks or change billing profiles."
+        ],
+        "decisions": [
+          "Native first; no ranking without acceptance evidence."
+        ],
+        "failed_attempts": [],
+        "evidence": [
+          "Pointdexter design requires content and live applicability checks."
+        ]
+      },
+      "provenance": "Pointdexter design requires content and live applicability checks."
+    },
+    {
+      "task_id": "native_audit",
+      "category": "asynchronous_behavior",
+      "objective": "Bind native host work to a durable reservation and the existing worktree/history audit.",
+      "start_revision": null,
+      "acceptance_criteria": [
+        "Native work does not spawn a peer CLI.",
+        "The worktree lease covers generation and independent checks.",
+        "Same-session correction and crash recovery preserve exact handles."
+      ],
+      "allow_paths": [
+        "scripts/coordinator.py",
+        "scripts/native_bridge.py"
+      ],
+      "split": "training",
+      "repeat": false,
+      "context_packet": {
+        "conventions": [
+          "Python standard library only; preserve existing runner audit and report contracts.",
+          "Do not mutate acceptance checks or change billing profiles."
+        ],
+        "decisions": [
+          "Native first; no ranking without acceptance evidence."
+        ],
+        "failed_attempts": [],
+        "evidence": [
+          "Coordinator 0.8 rejected native dispatch without providing a bridge."
+        ]
+      },
+      "provenance": "Coordinator 0.8 rejected native dispatch without providing a bridge."
+    },
+    {
+      "task_id": "completion_ack",
+      "category": "multifile_change",
+      "objective": "Record exact completion events and require a durable review before acknowledgment.",
+      "start_revision": null,
+      "acceptance_criteria": [
+        "An event cannot be acknowledged before review.",
+        "A different event ID or changed result is rejected.",
+        "Retry of the exact acknowledged event is idempotent."
+      ],
+      "allow_paths": [
+        "scripts/coordinator.py"
+      ],
+      "split": "training",
+      "repeat": false,
+      "context_packet": {
+        "conventions": [
+          "Python standard library only; preserve existing runner audit and report contracts.",
+          "Do not mutate acceptance checks or change billing profiles."
+        ],
+        "decisions": [
+          "Native first; no ranking without acceptance evidence."
+        ],
+        "failed_attempts": [],
+        "evidence": [
+          "Standalone runner inbox was not bound to coordinator review."
+        ]
+      },
+      "provenance": "Standalone runner inbox was not bound to coordinator review."
+    },
+    {
+      "task_id": "usage_shape",
+      "category": "mechanical_edit",
+      "objective": "Add optional per-request context/cache metadata while retaining conservative provider accounting.",
+      "start_revision": null,
+      "acceptance_criteria": [
+        "Unknown cache TTL/write class remains null.",
+        "Step identities deduplicate repeated usage.",
+        "Cumulative results are never summed with per-step snapshots."
+      ],
+      "allow_paths": [
+        "scripts/usage.py"
+      ],
+      "split": "training",
+      "repeat": false,
+      "context_packet": {
+        "conventions": [
+          "Python standard library only; preserve existing runner audit and report contracts.",
+          "Do not mutate acceptance checks or change billing profiles."
+        ],
+        "decisions": [
+          "Native first; no ranking without acceptance evidence."
+        ],
+        "failed_attempts": [],
+        "evidence": [
+          "Design requires additive per-request and cache metadata."
+        ]
+      },
+      "provenance": "Design requires additive per-request and cache metadata."
+    },
+    {
+      "task_id": "decision_ledger",
+      "category": "repository_investigation",
+      "objective": "Keep reusable decisions separately from task progress, with applicability and invalidation.",
+      "start_revision": null,
+      "acceptance_criteria": [
+        "Record question, action, evidence, alternatives and reasons, owner, and invalidation.",
+        "Unverified conclusions cannot be promoted to reusable knowledge.",
+        "Invalidated evidence makes dependent decisions visibly stale."
+      ],
+      "allow_paths": [
+        "scripts/coordinator.py",
+        "scripts/conductor_policy.py",
+        "scripts/evidence.py"
+      ],
+      "split": "held_out",
+      "repeat": false,
+      "context_packet": {
+        "conventions": [
+          "Python standard library only; preserve existing runner audit and report contracts.",
+          "Do not mutate acceptance checks or change billing profiles."
+        ],
+        "decisions": [
+          "Native first; no ranking without acceptance evidence."
+        ],
+        "failed_attempts": [],
+        "evidence": [
+          "Prior decisions only recorded run ID and accept/reject choice."
+        ]
+      },
+      "provenance": "Prior decisions only recorded run ID and accept/reject choice."
+    },
+    {
+      "task_id": "profiles",
+      "category": "mechanical_edit",
+      "objective": "Implement provisional role profiles filtered by observed native/CLI access and billing authority.",
+      "start_revision": null,
+      "acceptance_criteria": [
+        "All nine researched models have concise task-specific prompting guidance.",
+        "Stale access and unauthorized personal Claude billing are excluded.",
+        "No public API tariff is treated as a quality ranking or subscription entitlement."
+      ],
+      "allow_paths": [
+        "references/profiles.json",
+        "scripts/conductor_policy.py"
+      ],
+      "split": "training",
+      "repeat": false,
+      "context_packet": {
+        "conventions": [
+          "Python standard library only; preserve existing runner audit and report contracts.",
+          "Do not mutate acceptance checks or change billing profiles."
+        ],
+        "decisions": [
+          "Native first; no ranking without acceptance evidence."
+        ],
+        "failed_attempts": [],
+        "evidence": [
+          "Dated tariff registry was not a role/access registry."
+        ]
+      },
+      "provenance": "Dated tariff registry was not a role/access registry."
+    },
+    {
+      "task_id": "reducer_review",
+      "category": "review",
+      "objective": "Review and correct the next-action policy for exhausted budgets, active work, disputed evidence, and one bounded correction.",
+      "start_revision": null,
+      "acceptance_criteria": [
+        "Overdue active native work requests interruption of its recorded handle.",
+        "Technical uncertainty requests evidence or bounded consultation.",
+        "Only genuinely missing authority or user intent requests user input."
+      ],
+      "allow_paths": [
+        "scripts/conductor_policy.py",
+        "scripts/coordinator.py"
+      ],
+      "split": "training",
+      "repeat": false,
+      "context_packet": {
+        "conventions": [
+          "Python standard library only; preserve existing runner audit and report contracts.",
+          "Do not mutate acceptance checks or change billing profiles."
+        ],
+        "decisions": [
+          "Native first; no ranking without acceptance evidence."
+        ],
+        "failed_attempts": [],
+        "evidence": [
+          "The design calls for a host-bound adaptive loop."
+        ]
+      },
+      "provenance": "The design calls for a host-bound adaptive loop."
+    },
+    {
+      "task_id": "calibration_review",
+      "category": "review",
+      "objective": "Review and harden a calibration ledger so incomplete or incomparable results cannot become a model ranking.",
+      "start_revision": null,
+      "acceptance_criteria": [
+        "Fix 12\u201320 tasks with starting revisions, criteria, held-out cases, and repeats before results.",
+        "Retain costs of unsuccessful attempts and missing measurements as unknown.",
+        "Reject changed criteria/revision, missing consultant attempts, and replaced unfavorable outcomes."
+      ],
+      "allow_paths": [
+        "scripts/calibration.py"
+      ],
+      "split": "held_out",
+      "repeat": false,
+      "context_packet": {
+        "conventions": [
+          "Python standard library only; preserve existing runner audit and report contracts.",
+          "Do not mutate acceptance checks or change billing profiles."
+        ],
+        "decisions": [
+          "Native first; no ranking without acceptance evidence."
+        ],
+        "failed_attempts": [],
+        "evidence": [
+          "Research calls for acceptance-based calibration rather than guidance-only simulations."
+        ]
+      },
+      "provenance": "Research calls for acceptance-based calibration rather than guidance-only simulations."
+    }
+  ]
+}

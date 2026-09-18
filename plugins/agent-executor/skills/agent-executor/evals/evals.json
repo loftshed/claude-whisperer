@@ -1,0 +1,140 @@
+{
+  "skill_name": "agent-executor",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "You are in Claude. Use $agent-executor to implement the approved, bounded cache-key plan. Pick a cost-conscious Codex profile and independently review its diff and focused tests.",
+      "expected_output": "The skill validates Luna from the live catalog, binds medium effort, preserves scope, supplies non-mutating runner-owned gates, and reviews the full delta. It does not repeat an identical passed gate without a reason.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Have agy and the current Gemini Flash High model perform this repetitive migration under src/jobs and tests/jobs. Give it full permissions but do not let it commit or switch branches.",
+      "expected_output": "The skill retrieves or reuses the valid model catalog, selects --engine agy with the exact current Flash High ID, declares both allowed prefixes, enforces Git-history identity checks, and does not treat executor-reported success as sufficient.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Use OpenCode with GLM-5.2 on high to execute docs/plans/result-migration.md. The implementation paths are already listed in that plan.",
+      "expected_output": "The skill selects openrouter/z-ai/glm-5.2 with --variant high, scopes every approved path, disables sharing, audits the final-state delta, and supplies exact deterministic gates as runner-owned verification.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "Delegate this to DeepSeek V4 Flash through OpenCode, high reasoning. Keep the ignored handoff at plans/review.md and code changes under tools/review.",
+      "expected_output": "The skill selects openrouter/deepseek/deepseek-v4-flash with high variant, passes --allow-path tools/review and --track-path plans/review.md, and verifies both implementation and ignored deliverable.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "Ask Spark for a read-only second pass over the current diff and identify missed edge cases. Do not modify anything.",
+      "expected_output": "The skill applies the native boundary first. From a non-Codex host it discovers the exact requested Spark model and reports unavailability without silently substituting. Any dispatched review has empty mutation scope and no expected changes.",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "My worktree already has unrelated edits in src/user-owned.ts. Use the agent executor only under src/generated and tests/generated, and prove it preserved my work.",
+      "expected_output": "The skill fingerprints pre-existing dirty content, uses only the two approved prefixes, checks run_delta rather than all dirty paths, and fails on any scope violation.",
+      "files": []
+    },
+    {
+      "id": 7,
+      "prompt": "The executor exited zero but changed an unapproved file and printed no structured STATUS report. Tell me whether it succeeded.",
+      "expected_output": "The skill reports failure, prioritizes scope/history violations, treats malformed output as failure, and uses retained raw artifacts for diagnosis without accepting exit zero.",
+      "files": []
+    },
+    {
+      "id": 8,
+      "prompt": "The first OpenCode GLM pass was green, but your review found missing negative tests. Send one correction in that exact session with the same model and scope.",
+      "expected_output": "The skill writes a focused delta brief, resumes the exact recorded session with the same OpenCode model, high variant, and path scope, then independently verifies the correction.",
+      "files": []
+    },
+    {
+      "id": 9,
+      "prompt": "Show me every model currently available to Codex, Claude, Antigravity, and OpenCode. Do not spend model tokens just to discover the list.",
+      "expected_output": "The skill uses the cached normalized catalog or the explicit --refresh catalog command, prints exact IDs, and marks Claude discovery unsupported without running an invented Claude subcommand or prompt.",
+      "files": []
+    },
+    {
+      "id": 10,
+      "prompt": "Use model gemini-3.7-flash-high from the cache for this migration. If that ID is stale, find the valid model but do not run the migration twice.",
+      "expected_output": "The runner exact-checks the requested ID, refreshes once when it is absent from cache, fails with live suggestions if still unavailable, and never retries a mutating executor call automatically.",
+      "files": []
+    },
+    {
+      "id": 11,
+      "prompt": "Launch this migration detached from Antigravity without spending tokens polling it. I may come back through Claude or Codex, so make completion discoverable and tell me when it finishes.",
+      "expected_output": "The skill launches once with detached desktop delivery, retains AGENT_EVENT, uses one blocking events wait call when the current host can remain attached or one later inbox read after resumption, acknowledges only after result and diff review, and never spends model turns repeatedly polling status.",
+      "files": []
+    },
+    {
+      "id": 12,
+      "prompt": "I'm calling you from Antigravity. Have agy run the approved migration in the background, keep the chat usable, and review it as soon as it completes without checking every few seconds.",
+      "expected_output": "Gemini work from an Antigravity host uses native Gemini facilities. The skill does not wrap a native agent in the external runner. Native supervision delivers completion without model polling.",
+      "files": []
+    },
+    {
+      "id": 13,
+      "prompt": "These three detached executor jobs are already running and I have their AGENT_EVENT paths. Wait for all of them without burning context and show me each completion as it arrives.",
+      "expected_output": "The skill makes one events follow invocation with the three exact event paths, consumes compact JSONL signals until all requested jobs are terminal, does not acknowledge before reviewing each result and workspace delta, and treats timeout as an explicit nonzero failure rather than starting conversational polling.",
+      "files": []
+    },
+    {
+      "id": 14,
+      "prompt": "The executor exited zero and changed the expected files, but its structured STATUS says BLOCKER because a required API decision is missing. Its report also claims the tests passed. Is this done?",
+      "expected_output": "The runner parses the reported outcome as blocked, returns status blocked with a nonzero exit, skips runner-owned verification, preserves the blocker in the event signal, and the conductor does not present the task as complete.",
+      "files": []
+    },
+    {
+      "id": 15,
+      "prompt": "Delegate the implementation, but make the final focused test and lint results independent of what the model says. Avoid rerunning an identical expensive gate again during your review.",
+      "expected_output": "The conductor passes non-mutating test and lint commands as repeatable --verify-command arguments, uses a bounded --verify-timeout, reads the runner-captured results, inspects the final diff, and does not duplicate an already-passed identical gate without a concrete review reason.",
+      "files": []
+    },
+    {
+      "id": 16,
+      "prompt": "A runner-owned verification command passed but rewrote an allowed source file. Can you accept the delegated work?",
+      "expected_output": "The post-verification Git audit detects the final-state change, returns verification_mutation nonzero even though the path was allowed and the command exited zero, and requires review or correction before acceptance.",
+      "files": []
+    },
+    {
+      "id": 17,
+      "prompt": "The executor returned only a STATUS heading with COMPLETE underneath it. It exited zero and changed the expected file. Is that a valid structured handoff?",
+      "expected_output": "The runner rejects the incomplete five-heading contract as malformed_report, records the missing headings, skips runner-owned verification, and does not present the delegation as complete.",
+      "files": []
+    },
+    {
+      "id": 18,
+      "prompt": "You are in Codex. You have spent an hour diagnosing a cancellation race and know the rejected fixes. The worker just finished its audit with BLOCKED. I want one read-only Gemini 3.8 Flash Medium consultation on whether our installed client can still invoke a queued callback. We have its version, trace, and two call sites. Keep the implementation with the original owner.",
+      "expected_output": "Keeps implementation with the original owner. Limits the consultation to read-only work and one requested call. Checks applicable versioned evidence before using the answer.",
+      "files": [],
+      "expectations": [
+        "Keeps implementation with the original owner.",
+        "Limits the consultation to read-only work and one requested call.",
+        "Checks applicable versioned evidence before using the answer."
+      ]
+    },
+    {
+      "id": 19,
+      "prompt": "You are in Claude. A Codex Luna low run is BLOCKED but left only allowed changes. We now have a checked official source and a discriminating test result. Resume that exact task. Its old Codex usage snapshot was input=1000, cached=400, cache_write=100, output=200. The resumed snapshot is input=1600, cached=600, cache_write=200, output=300. Explain the correction contract and billable-token delta; no billing mode or actual charge is known.",
+      "expected_output": "Preserves exact session, low effort, scope, and the blocked result. Computes exclusive fresh/cache-read/cache-write/output deltas as 300/200/100/100. Leaves actual charges and billing mode unknown.",
+      "files": [],
+      "expectations": [
+        "Preserves exact session, low effort, scope, and the blocked result.",
+        "Computes exclusive fresh/cache-read/cache-write/output deltas as 300/200/100/100.",
+        "Leaves actual charges and billing mode unknown."
+      ]
+    },
+    {
+      "id": 20,
+      "prompt": "Our coordinator recorded request ID implement-7 before launch, then the host died. There is no terminal result. Please recover without doing the change twice. Once resolved, the next unrelated task is a small Luna edit from this Codex host. Explain what you can safely do now and which dispatch mechanism belongs to the next task.",
+      "expected_output": "Does not replay the uncertain request under the same or a new ID. Uses the coordinator recovery contract without assuming a detached event exists. Uses native Codex delegation for the later requested Luna task.",
+      "files": [],
+      "expectations": [
+        "Does not replay the uncertain request under the same or a new ID.",
+        "Uses the coordinator recovery contract without assuming a detached event exists.",
+        "Uses native Codex delegation for the later requested Luna task."
+      ]
+    }
+  ]
+}

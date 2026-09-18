@@ -1,0 +1,16 @@
+{
+  "name": "claude-whisperer",
+  "owner": {
+    "name": "loftshed"
+  },
+  "plugins": [
+    {
+      "name": "agent-executor",
+      "source": "./plugins/agent-executor",
+      "description": "Bounded agent execution, consultation, evidence, and audit."
+    }
+  ],
+  "metadata": {
+    "description": "Personal plugin marketplace and skill backup."
+  }
+}

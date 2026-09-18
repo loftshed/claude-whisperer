@@ -1,0 +1,124 @@
+{
+  "schema": "agent-executor.profiles.v1",
+  "verified_at": "2026-09-18",
+  "status": "workload_hypotheses_not_quality_rankings",
+  "instructions": "Use native host first. Access must be observed in that host, not inferred from public API availability. Effort candidates must be validated by the selected harness. Never switch Claude billing profiles implicitly. OpenCode preferences remain in the existing runner.",
+  "profiles": [
+    {
+      "id": "luna",
+      "model_ids": [
+        "gpt-5.6-luna"
+      ],
+      "roles": [
+        "mechanical",
+        "implementation"
+      ],
+      "effort_candidate": "medium",
+      "prompt_adjustment": "Give a bounded transformation, examples, and observable criteria. Expose ambiguity that changes the result."
+    },
+    {
+      "id": "terra",
+      "model_ids": [
+        "gpt-5.6-terra"
+      ],
+      "roles": [
+        "implementation"
+      ],
+      "effort_candidate": "medium",
+      "prompt_adjustment": "Give the goal, repository conventions, and criteria; leave routine implementation choices to the worker."
+    },
+    {
+      "id": "sol",
+      "model_ids": [
+        "gpt-5.6-sol"
+      ],
+      "roles": [
+        "implementation",
+        "consultation",
+        "pointdexter",
+        "review"
+      ],
+      "effort_candidate": "medium",
+      "prompt_adjustment": "State the outcome, review scope, and evidence needed to finish. Keep focused review within that scope."
+    },
+    {
+      "id": "astra",
+      "model_ids": [
+        "gpt-6-astra"
+      ],
+      "roles": [
+        "hard_task",
+        "conductor",
+        "consultation"
+      ],
+      "effort_candidate": "medium",
+      "prompt_adjustment": "Make completion and authorized autonomy explicit. Let the agent resolve routine choices with proportional verification."
+    },
+    {
+      "id": "flash",
+      "model_ids": [
+        "gemini-3.8-flash-low",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-high"
+      ],
+      "roles": [
+        "pointdexter",
+        "mechanical",
+        "implementation"
+      ],
+      "effort_candidate": "medium",
+      "prompt_adjustment": "Put relevant context before the specific question. Be direct and preserve opaque native tool state in its own harness."
+    },
+    {
+      "id": "sonnet",
+      "model_ids": [
+        "claude-sonnet-5"
+      ],
+      "roles": [
+        "conductor",
+        "implementation",
+        "pointdexter",
+        "consultation"
+      ],
+      "effort_candidate": "high",
+      "prompt_adjustment": "Specify the full intended scope and concise output shape. Use model-specific adaptive effort; evaluate medium when cost matters."
+    },
+    {
+      "id": "opus",
+      "model_ids": [
+        "claude-opus-5"
+      ],
+      "roles": [
+        "hard_task",
+        "conductor",
+        "review",
+        "consultation"
+      ],
+      "effort_candidate": "medium",
+      "prompt_adjustment": "Provide a complete spec and room to finish. Avoid repeated general audits or compulsory reviewer delegation."
+    },
+    {
+      "id": "fable",
+      "model_ids": [
+        "claude-fable-5-1"
+      ],
+      "roles": [
+        "challenge",
+        "hard_task"
+      ],
+      "effort_candidate": "medium",
+      "prompt_adjustment": "Batch independent reads and make targeted changes. Preserve native append-only history and opaque thinking blocks; allow adequate output."
+    },
+    {
+      "id": "haiku",
+      "model_ids": [
+        "claude-haiku-4-5-20251001"
+      ],
+      "roles": [
+        "optional_helper"
+      ],
+      "effort_candidate": "not_applicable",
+      "prompt_adjustment": "Use clear bounded instructions and examples. Do not apply Claude 5 adaptive effort controls to Haiku."
+    }
+  ]
+}
