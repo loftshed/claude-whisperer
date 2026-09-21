@@ -29,11 +29,23 @@ the rule relative to the caller:
   non-Gemini executor that is not otherwise native to that host.
 - A Claude host uses its native mechanism for Claude. It may use agent-executor for a non-Claude
   executor that is not otherwise native to that host.
+- An OpenCode host uses its native mechanism for OpenCode and OpenRouter models. It may use agent-executor
+  for a non-OpenCode executor (such as Codex for GPT models or Antigravity for Gemini models) that is not
+  otherwise native to that host.
+- Any external host (Codex, Claude, Antigravity) may use agent-executor with `--engine opencode` to delegate
+  to OpenCode and its configured model catalog (e.g. GLM-5.2, DeepSeek, Qwen).
 
 Do not route through agent-executor merely because its runner technically supports the same model
 family as the caller. Before model discovery or brief construction, identify the current harness
 and stop if the requested executor is native; hand the task to the native sub-agent facility
 instead.
+
+Make sure the "always prefer native" rule does not prevent an Antigravity/Gemini (`agy`) host from
+delegating to external frontier models like Claude Opus 5 directly via the first-party `claude` CLI
+(`claude -p ... --model claude-opus-5`). When a user explicitly requests Claude Opus (or Opus 5), or
+when internal host catalogs lack the model or face quota exhaustion, crossing the boundary to invoke
+the installed `claude` CLI directly is an authorized and intended cross-boundary execution path.
+
 
 ## Choose ownership before choosing a model
 
@@ -239,6 +251,19 @@ python3 <skill-directory>/scripts/run_agent.py \
   --expect-changes
 ```
 
+OpenCode GLM-5.2 delegation example:
+
+```bash
+python3 <skill-directory>/scripts/run_agent.py \
+  --cwd <absolute-repository-root> \
+  --task-spec <brief-spec.json> \
+  --engine opencode \
+  --model openrouter/z-ai/glm-5.2 \
+  --variant high \
+  --verify-command 'python3 -m unittest tests.test_jobs' \
+  --expect-changes
+```
+
 Portable detached example:
 
 ```bash
@@ -319,6 +344,10 @@ Remaining risks: <none or concise list>
 ```
 
 Never present delegation as successful when the runner failed, reported a blocker, expected changes were absent, the report was malformed, scope/history checks failed, the diff exceeded scope, or requested runner-owned verification did not pass.
+
+Deliver the completion report exactly once. The report ends the task: do not
+exchange acknowledgments, waves, or status echoes afterward, and do not repeat
+the summary turn over turn. A new user request starts new work.
 
 ## Skill development gate
 
