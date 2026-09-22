@@ -1,10 +1,19 @@
-# Claude Whisperer
+# Claude Wispr
 
-Private personal plugin marketplace and versioned skill backup. Currently contains `agent-executor`.
+Personal Claude Code plugin containing the `agent-executor` and `bailout` skills.
 
-Version 0.9.0 is a tested working checkpoint. Routing calibration is deferred to conserve usage; model profiles remain provisional. See the [checkpoint and resume notes](plugins/agent-executor/skills/agent-executor/references/design-completion.md).
+The plugin manifest and all skills live at the repository root:
 
 ```text
-/plugin marketplace add loftshed/claude-whisperer
-/plugin install agent-executor@claude-whisperer
+.claude-plugin/plugin.json
+skills/agent-executor/
+skills/bailout/
 ```
+
+Load the plugin from a checkout with:
+
+```bash
+claude --plugin-dir /path/to/claude-whisperer
+```
+
+Routing calibration is deferred to conserve usage; model profiles remain provisional. See the [checkpoint and resume notes](skills/agent-executor/references/design-completion.md).

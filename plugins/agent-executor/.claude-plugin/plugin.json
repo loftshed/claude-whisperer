@@ -1,8 +1,0 @@
-{
-  "name": "agent-executor",
-  "version": "0.9.0",
-  "description": "Bounded agent execution, consultation, evidence, and audit.",
-  "author": {
-    "name": "loftshed"
-  }
-}

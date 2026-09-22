@@ -1,0 +1,8 @@
+{
+  "name": "claude-wispr",
+  "version": "0.10.0",
+  "description": "Personal Claude Code plugin containing bounded agent execution and usage handoff skills.",
+  "author": {
+    "name": "loftshed"
+  }
+}
