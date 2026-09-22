@@ -1,0 +1,8 @@
+{
+  "name": "bailout",
+  "version": "1.0.0",
+  "description": "Write handoff files before Claude's five-hour usage allowance runs out.",
+  "author": {
+    "name": "loftshed"
+  }
+}

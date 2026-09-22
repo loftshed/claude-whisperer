@@ -8,6 +8,11 @@
       "name": "agent-executor",
       "source": "./plugins/agent-executor",
       "description": "Bounded agent execution, consultation, evidence, and audit."
+    },
+    {
+      "name": "bailout",
+      "source": "./plugins/bailout",
+      "description": "Write handoff files before Claude's five-hour usage allowance runs out."
     }
   ],
   "metadata": {
