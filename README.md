@@ -1,4 +1,4 @@
-# Claude Wispr
+# Claude Whisperer
 
 Personal Claude Code plugin containing the `agent-executor` and `bailout` skills.
 

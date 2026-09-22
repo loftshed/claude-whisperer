@@ -1,5 +1,5 @@
 {
-  "name": "claude-wispr",
+  "name": "claude-whisperer",
   "version": "0.10.0",
   "description": "Personal Claude Code plugin containing bounded agent execution and usage handoff skills.",
   "author": {
