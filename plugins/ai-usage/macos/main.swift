@@ -132,6 +132,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Menu bar sections
 
+    /// Text-style skull (U+2620 with the text variation selector) so it takes the level colour.
+    static let skull = "\u{2620}\u{FE0E}"
+
     private struct Entry { let label: String; let tag: String?; let value: String; let level: String; let stale: Bool }
     private struct Section { let header: String; let entries: [Entry] }
     private typealias BarModel = (sections: [Section], unavailable: [String])
@@ -140,14 +143,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let barLabelFont = NSFont.systemFont(ofSize: 10.5, weight: .medium)
     private let barTagFont = NSFont.systemFont(ofSize: 8, weight: .bold)
     private let barNumberFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .semibold)
+    // The skull glyph is drawn small by the symbol font; a larger size makes it read at a glance.
+    private let barSkullFont = NSFont.systemFont(ofSize: 14, weight: .regular)
+    private func valueFont(_ entry: Entry) -> NSFont { entry.value == AppDelegate.skull ? barSkullFont : barNumberFont }
 
     /// `ai-usage json` sections: one per limit window length ("5h", "wk", …), plus accounts with no data.
     private func barModel() -> BarModel {
         let sections = (snapshot?["sections"] as? [[String: Any]] ?? []).map { section -> Section in
             let entries = (section["entries"] as? [[String: Any]] ?? []).map { entry -> Entry in
                 let pct = entry["pct"] as? Double ?? 0
+                // Used up, or unusable because a longer limit is: a skull instead of a number.
+                let dead = (entry["exhausted"] as? Bool) == true || entry["blockedBy"] is String
                 return Entry(label: entry["label"] as? String ?? "?", tag: entry["tag"] as? String,
-                             value: String(Int(pct.rounded(.down))), level: entry["level"] as? String ?? level(for: pct),
+                             value: dead ? AppDelegate.skull : String(Int(pct.rounded(.down))),
+                             level: dead ? "out" : entry["level"] as? String ?? level(for: pct),
                              stale: (entry["stale"] as? Bool) == true)
             }
             return Section(header: (section["label"] as? String ?? "?").uppercased(), entries: entries)
@@ -166,7 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let entryGap: CGFloat = 6, labelGap: CGFloat = 2, sectionGap: CGFloat = 4
         func entryWidth(_ entry: Entry) -> CGFloat {
             width(entry.label, barLabelFont) + (entry.tag.map { width($0, barTagFont) + 1 } ?? 0) + labelGap
-                + width(entry.value, barNumberFont) + (entry.stale ? width("!", barNumberFont) : 0)
+                + width(entry.value, valueFont(entry)) + (entry.stale ? width("!", barNumberFont) : 0)
         }
         func sectionWidth(_ section: Section) -> CGFloat {
             2 * inset + width(section.header, barHeaderFont) + headerGap
@@ -199,7 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     cx += draw(entry.label, barLabelFont, .labelColor, at: cx)
                     if let tag = entry.tag { cx += 1 + draw(tag, barTagFont, NSColor.labelColor.withAlphaComponent(0.75), at: cx + 1, raise: -2) }
                     cx += labelGap
-                    cx += draw(entry.value, barNumberFont, levelText(color(for: entry.level)), at: cx)
+                    cx += draw(entry.value, valueFont(entry), levelText(color(for: entry.level)), at: cx)
                     if entry.stale { cx += draw("!", barNumberFont, .systemRed, at: cx) }
                 }
                 x += boxWidth
@@ -345,10 +354,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             for window in account["windows"] as? [[String: Any]] ?? [] {
                 let pct = window["remainingPct"] as? Double ?? 0
+                let blockedBy = window["blockedBy"] as? String
+                let dead = (window["exhausted"] as? Bool) == true || blockedBy != nil
                 let line = NSMutableAttributedString(attributedString: text("  " + pad(window["label"] as? String ?? "", 20)))
-                line.append(text(bar(pct) + " " + String(format: "%3d%%", Int(pct.rounded(.down))), mono, color(for: level(for: pct))))
+                let amount = dead ? "   " + AppDelegate.skull : String(format: "%3d%%", Int(pct.rounded(.down)))
+                line.append(text(bar(blockedBy == nil ? pct : 0) + " " + amount, mono, dead ? color(for: "out") : color(for: level(for: pct))))
                 var reset = "  not started"
-                if (window["resetSinceFetch"] as? Bool) == true {
+                if let blockedBy {
+                    reset = "  unusable until the \(blockedBy) limit resets"
+                } else if (window["resetSinceFetch"] as? Bool) == true {
                     reset = "  reset since last check"
                 } else if let r = window["resetsAt"] as? String, let date = AppDelegate.iso.date(from: r) {
                     reset = "  resets \(clock(date)) (\(relative(date)))"

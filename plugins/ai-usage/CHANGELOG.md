@@ -3,6 +3,15 @@
 All notable changes to this project. Versions follow [semver](https://semver.org); the `ai-usage json`
 schema (`ai-usage.snapshot.v1`) changes its suffix on any breaking change to its shape.
 
+## 0.5.0 (2026-09-25)
+
+- ☠ instead of a number for a used-up limit, and for a shorter limit made unusable by an exhausted longer
+  one in the same pool (e.g. 5-hour allowance once the week is gone). Per-model caps (Claude's Fable weekly)
+  are unusable once the account-wide limit of the same length is gone. JSON sections and windows carry
+  `exhausted` and `blockedBy`; the terminal view and dropdown say "unusable until the wk limit resets".
+- agy occasionally answers `/usage` with status ERROR and no detail; it is retried once, and a lasting
+  failure now includes agy's own error text.
+
 ## 0.4.0 (2026-09-25)
 
 - Menu bar groups limits by window length instead of per-account pills: a `5H` box and a `WK` box side

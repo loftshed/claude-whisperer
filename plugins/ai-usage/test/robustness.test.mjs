@@ -64,6 +64,19 @@ test("codex dying mid-conversation is reported, not a crash", async () => {
   }
 });
 
+test("an agy ERROR status is retried once before it counts as a failure", async () => {
+  const state = join(dir, "agy-state");
+  const flaky = script("agy-flaky", `#!/bin/sh
+if [ ! -f "${state}" ]; then touch "${state}"; echo '{"status":"ERROR","response":"","error":"backend busy"}'; exit 0; fi
+cat "${new URL("fixtures/agy-usage.json", import.meta.url).pathname}"
+`);
+  const { fetchAntigravity } = await import("../lib/providers/antigravity.mjs");
+  const result = await fetchAntigravity({ command: flaky });
+  assert.deepEqual(result.pools.map((p) => p.id), ["gemini", "claude-gpt"]);
+  const broken = script("agy-broken", `#!/bin/sh\necho '{"status":"ERROR","response":"","error":"backend busy"}'\n`);
+  await assert.rejects(fetchAntigravity({ command: broken }), /status ERROR: backend busy/);
+});
+
 test("bad arguments get a message and exit 2, not a stack trace or silent stale data", () => {
   const cache = join(dir, "cache-args");
   const unknown = runCli(["--bogus"], cache);

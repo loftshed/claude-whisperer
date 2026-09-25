@@ -1,4 +1,4 @@
-import { buildLanes, effectiveWindows, headline, level, pills, sections } from "./analyze.mjs";
+import { blockedWindows, buildLanes, durationLabel, effectiveWindows, headline, level, pills, sections } from "./analyze.mjs";
 import { formatClock, formatDuration } from "./time.mjs";
 import { SNAPSHOT_SCHEMA, VERSION } from "./version.mjs";
 
@@ -43,15 +43,20 @@ export function renderReport(accounts, { color = false, now = Date.now(), refres
       out.push(`   ${c("red", `⚠ refresh failed${when}: ${account.error}`)}`);
       if (account.fetchedAt) out.push(`   ${c("dim", `showing last good data from ${formatDuration(now - account.fetchedAt)} ago`)}`);
     }
+    const blocked = blockedWindows(account, now);
     for (const w of effectiveWindows(account, now)) {
-      const lv = level(w.remainingPct);
-      const pct = padStart(`${Math.floor(w.remainingPct)}%`, 4);
-      const reset = w.resetSinceFetch
+      const blocker = blocked.get(w.id);
+      const lv = blocker ? "out" : level(w.remainingPct);
+      const dead = blocker || w.remainingPct <= 0.5;
+      const pct = padStart(dead ? SKULL : `${Math.floor(w.remainingPct)}%`, 4);
+      const reset = blocker
+        ? c("dim", `unusable until the ${durationLabel(blocker.windowMins)} limit resets`)
+        : w.resetSinceFetch
         ? c("dim", "reset since last check")
         : w.resetsAt
           ? `${c("dim", "resets")} ${formatClock(w.resetsAt, now)} ${c("dim", `(in ${formatDuration(w.resetsAt - now)})`)}`
           : c("dim", "not started");
-      out.push(`   ${pad(w.label, 22)} ${c(LEVEL_COLOR[lv], bar(w.remainingPct, 14))} ${c(LEVEL_COLOR[lv], pct)} left   ${reset}`);
+      out.push(`   ${pad(w.label, 22)} ${c(LEVEL_COLOR[lv], bar(blocker ? 0 : w.remainingPct, 14))} ${c(LEVEL_COLOR[lv], pct)} ${dead ? "    " : "left"}   ${reset}`);
     }
     for (const note of account.notes ?? []) out.push(`   ${c("dim", note)}`);
     out.push("");
@@ -72,12 +77,16 @@ export function renderReport(accounts, { color = false, now = Date.now(), refres
   return out.join("\n");
 }
 
+// Shown instead of a number when a limit is used up, or unusable because a longer limit is.
+export const SKULL = "☠";
+
 const entryLabel = (e) => (e.tag ? `${e.label}·${e.tag}` : e.label);
 
 /** One line for tmux or a status line, grouped by window length: "5h CW 100 · CP 53 | wk CW 0 · …". */
 export function renderLine(accounts, now = Date.now()) {
   const { sections: list, unavailable } = sections(accounts, now);
-  const parts = list.map((s) => `${s.label} ${s.entries.map((e) => `${entryLabel(e)} ${Math.floor(e.pct)}${e.stale ? "!" : ""}`).join(" · ")}`);
+  const value = (e) => (e.exhausted || e.blockedBy ? SKULL : String(Math.floor(e.pct)));
+  const parts = list.map((s) => `${s.label} ${s.entries.map((e) => `${entryLabel(e)} ${value(e)}${e.stale ? "!" : ""}`).join(" · ")}`);
   if (unavailable.length) parts.push(unavailable.map((u) => `${u.label} ?`).join(" · "));
   return parts.join(" | ");
 }
@@ -113,7 +122,7 @@ export function jsonView(accounts, now = Date.now()) {
         short: p.short && { ...p.short, resetsAt: iso(p.short.resetsAt) },
         weekly: p.weekly && { ...p.weekly, resetsAt: iso(p.weekly.resetsAt) },
       })),
-      windows: effectiveWindows(a, now).map((w) => ({
+      windows: ((blocked) => effectiveWindows(a, now).map((w) => ({
         id: w.id,
         label: w.label,
         kind: w.kind,
@@ -122,7 +131,9 @@ export function jsonView(accounts, now = Date.now()) {
         resetsAt: iso(w.resetsAt),
         resetsInMinutes: minutesUntil(w.resetsAt, now),
         resetSinceFetch: Boolean(w.resetSinceFetch),
-      })),
+        exhausted: w.remainingPct <= 0.5,
+        blockedBy: blocked.has(w.id) ? durationLabel(blocked.get(w.id).windowMins) : null,
+      })))(blockedWindows(a, now)),
       notes: a.notes ?? [],
     })),
     lanes: buildLanes(accounts, now).map((l) => ({

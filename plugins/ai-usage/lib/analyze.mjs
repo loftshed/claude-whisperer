@@ -147,6 +147,36 @@ export function pills(account, now = Date.now()) {
   });
 }
 
+/**
+ * Windows that cannot be used because a longer window of the same pool is exhausted: 5-hour allowance is
+ * worthless once the week is gone. Only longer windows block shorter ones; an empty 5-hour window does not
+ * make the weekly remainder any less real. Returns Map(windowId -> blocking window).
+ */
+export function blockedWindows(account, now = Date.now()) {
+  const windows = new Map(effectiveWindows(account, now).map((w) => [w.id, w]));
+  const blocked = new Map();
+  for (const pool of independentPools(account)) {
+    const ws = pool.windowIds.map((id) => windows.get(id)).filter(Boolean);
+    for (const w of ws) {
+      const blocker = ws.find((o) => o !== w && (o.windowMins ?? 0) > (w.windowMins ?? 0) && o.remainingPct <= EXHAUSTED_PCT);
+      if (blocker && !blocked.has(w.id)) blocked.set(w.id, blocker);
+    }
+  }
+  // A per-model cap (Claude's "Fable weekly") is unusable once its parent pool's limit of the same or a
+  // longer length is exhausted; the reverse does not hold.
+  const pools = account.pools ?? [];
+  for (const sub of pools) {
+    const parent = pools.find((q) => q !== sub && q.windowIds.length < sub.windowIds.length && q.windowIds.every((id) => sub.windowIds.includes(id)));
+    if (!parent) continue;
+    for (const id of sub.windowIds.filter((wid) => !parent.windowIds.includes(wid))) {
+      const w = windows.get(id);
+      const blocker = w && parent.windowIds.map((pid) => windows.get(pid)).find((o) => o && (o.windowMins ?? 0) >= (w.windowMins ?? 0) && o.remainingPct <= EXHAUSTED_PCT);
+      if (blocker && !blocked.has(id)) blocked.set(id, blocker);
+    }
+  }
+  return blocked;
+}
+
 /** Short name for a window length: "5h", "wk", "1d", "30d". Unknown lengths are "limit". */
 export function durationLabel(mins) {
   if (!Number.isFinite(mins) || mins <= 0) return "limit";
@@ -169,6 +199,7 @@ export function sections(accounts, now = Date.now()) {
       continue;
     }
     const windows = new Map(effectiveWindows(account, now).map((w) => [w.id, w]));
+    const blocked = blockedWindows(account, now);
     const pools = independentPools(account);
     for (const pool of pools) {
       for (const w of pool.windowIds.map((id) => windows.get(id)).filter(Boolean)) {
@@ -180,7 +211,9 @@ export function sections(accounts, now = Date.now()) {
           label: account.short,
           tag: pools.length > 1 ? pool.label.charAt(0).toUpperCase() : null,
           pct: w.remainingPct,
-          level: level(w.remainingPct),
+          level: blocked.has(w.id) ? "out" : level(w.remainingPct),
+          exhausted: w.remainingPct <= EXHAUSTED_PCT,
+          blockedBy: blocked.has(w.id) ? durationLabel(blocked.get(w.id).windowMins) : null,
           resetsAt: w.resetsAt ?? null,
           stale: account.ok === false,
         });

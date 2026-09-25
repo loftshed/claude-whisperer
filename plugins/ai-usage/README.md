@@ -5,7 +5,7 @@ How much subscription quota is left on every AI account on this machine, and whe
 It reads the rate-limit windows of each account (Claude Code, Codex/ChatGPT, Antigravity/Gemini), keeps them in a shared cache, and shows them three ways:
 
 - **CLI / TUI**: `ai-usage` for a table, `ai-usage watch` for a live full-screen view.
-- **macOS menu bar app**: % left grouped by limit window, one box per window length: `[5H  CW 100  CP 53  AG·G 76  AG·C 100]  [WK  CW 0  CP 82  CX 49  AG·G 3  AG·C 27]`. Sections come from each window's actual length, so a provider on another cycle gets its own box (`3H`, `1D`). Codex has no 5-hour limit, so it appears only under WK. Antigravity has two pools, Gemini (G) and Claude & GPT-OSS (C). Numbers are coloured by how much is left; details and a ranking are in the dropdown.
+- **macOS menu bar app**: % left grouped by limit window, one box per window length: `[5H  CW 100  CP 53  AG·G 76  AG·C 100]  [WK  CW 0  CP 82  CX 49  AG·G 3  AG·C 27]`. Sections come from each window's actual length, so a provider on another cycle gets its own box (`3H`, `1D`). Codex has no 5-hour limit, so it appears only under WK. Antigravity has two pools, Gemini (G) and Claude & GPT-OSS (C). Numbers are coloured by how much is left. A ☠ replaces the number when a limit is used up, or when it is unusable because a longer limit of the same pool is used up (5-hour allowance is worthless once the week is gone; the reverse does not apply). Details and a ranking are in the dropdown.
 - **MCP server**: `get_usage` and `recommend` tools, so agents can check quota before choosing where to run work.
 
 ```

@@ -39,7 +39,10 @@ const TOOLS = [
 function summarizeUsage(view) {
   const lines = view.accounts.map((a) => {
     const windows = a.windows
-      .map((w) => `${w.label} ${Math.floor(w.remainingPct)}% left${w.resetsInMinutes != null ? ` (resets in ${Math.round(w.resetsInMinutes / 6) / 10}h)` : ""}`)
+      .map((w) => {
+        const left = w.exhausted ? "exhausted" : w.blockedBy ? `unusable (${w.blockedBy} limit exhausted)` : `${Math.floor(w.remainingPct)}% left`;
+        return `${w.label} ${left}${w.resetsInMinutes != null ? ` (resets in ${Math.round(w.resetsInMinutes / 6) / 10}h)` : ""}`;
+      })
       .join(", ");
     const problem = a.error ? ` [refresh failed: ${a.error}]` : "";
     return `- ${a.label}: ${windows || "no data"}${problem}`;

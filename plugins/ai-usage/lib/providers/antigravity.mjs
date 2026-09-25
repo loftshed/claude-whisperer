@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { childEnv, resolveBinary, run } from "../exec.mjs";
 
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -55,19 +56,30 @@ export function parseAntigravityUsage(payload) {
   return { windows, pools, notes: [] };
 }
 
-export async function fetchAntigravity(account) {
-  const bin = resolveBinary("agy", account.command);
+async function runUsage(bin, account) {
   const { code, stdout, stderr } = await run(bin, ["-p", "/usage", "--output-format", "json"], {
     env: childEnv(account.env ?? {}),
     timeoutMs: account.timeoutMs ?? 60_000,
     maxBytes: 1024 * 1024,
   });
-  let payload;
   try {
-    payload = JSON.parse(stdout);
+    return JSON.parse(stdout);
   } catch {
     throw new Error(`agy exited ${code}: ${(stderr || stdout).trim().slice(0, 200)}`);
   }
-  if (payload.status && payload.status !== "SUCCESS") throw new Error(`agy /usage status ${payload.status}: ${String(payload.response).slice(0, 160)}`);
+}
+
+export async function fetchAntigravity(account) {
+  const bin = resolveBinary("agy", account.command);
+  let payload = await runUsage(bin, account);
+  // agy occasionally answers status ERROR with no detail and succeeds a moment later; retry once.
+  if (payload.status && payload.status !== "SUCCESS") {
+    await sleep(1500);
+    payload = await runUsage(bin, account);
+  }
+  if (payload.status && payload.status !== "SUCCESS") {
+    const detail = String(payload.error || payload.response || "no detail").trim().slice(0, 160);
+    throw new Error(`agy /usage status ${payload.status}: ${detail}`);
+  }
   return parseAntigravityUsage(payload);
 }

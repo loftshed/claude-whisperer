@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { buildLanes, durationLabel, headline, pills, sections } from "../lib/analyze.mjs";
+import { blockedWindows, buildLanes, durationLabel, headline, pills, sections } from "../lib/analyze.mjs";
 import { parseAntigravityUsage } from "../lib/providers/antigravity.mjs";
 import { parseClaudeUsage } from "../lib/providers/claude.mjs";
 import { parseCodexRateLimits } from "../lib/providers/codex.mjs";
@@ -136,6 +136,24 @@ test("sections group every pool's windows by window length, shortest first", () 
   ]);
   assert.deepEqual(unavailable, [{ accountId: "gone", label: "GN", error: "boom" }]);
   assert.deepEqual([300, 10080, 1440, 180, 43200, 90, undefined].map(durationLabel), ["5h", "wk", "1d", "3h", "30d", "90m", "limit"]);
+});
+
+test("an exhausted longer limit makes shorter ones unusable, never the other way round", () => {
+  const [work, personal] = sampleAccounts();
+  // Work: weekly exhausted, so the 5-hour window and the Fable cap are unusable.
+  assert.deepEqual([...blockedWindows(work, NOW).entries()].map(([id, by]) => [id, by.id]), [["5h", "week"], ["week-fable", "week"]]);
+  assert.equal(blockedWindows(personal, NOW).size, 0);
+  const { sections: list } = sections([{ ...work, short: "CW" }], NOW);
+  assert.deepEqual(list.map((s) => [s.label, s.entries[0].exhausted, s.entries[0].blockedBy, s.entries[0].level]), [
+    ["5h", false, "wk", "out"],
+    ["wk", true, null, "out"],
+  ]);
+  // 5-hour empty but the week has room: the weekly remainder is still real.
+  const sessionOut = parseClaudeUsage("Current session: 100% used · resets Sep 25 at 3pm (America/Toronto)\nCurrent week (all models): 20% used · resets Sep 28 at 5pm (America/Toronto)", NOW);
+  const account = { id: "x", short: "X", provider: "claude", ok: true, ...sessionOut };
+  assert.equal(blockedWindows(account, NOW).size, 0);
+  const shape = sections([account], NOW).sections.map((s) => [s.label, s.entries[0].exhausted, s.entries[0].blockedBy]);
+  assert.deepEqual(shape, [["5h", true, null], ["wk", false, null]]);
 });
 
 test("jsonView exposes ISO reset times and minutes until reset", () => {

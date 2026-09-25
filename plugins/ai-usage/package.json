@@ -1,6 +1,6 @@
 {
   "name": "ai-usage",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Remaining subscription quota across Claude Code, Codex and Antigravity accounts: CLI/TUI, macOS menu bar app, and MCP server.",
   "private": true,
   "type": "module",
