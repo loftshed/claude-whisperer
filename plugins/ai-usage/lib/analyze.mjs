@@ -187,11 +187,13 @@ export function durationLabel(mins) {
 }
 
 /**
- * Every independent pool's windows grouped by window length, shortest first: e.g. a "5h" section and a "wk"
- * section. Whatever cycles a provider uses become their own sections, so nothing assumes Claude's 5 hours.
+ * The menu bar layout. Every usable pool's windows grouped by window length, shortest first (e.g. "5h" and
+ * "wk" sections; whatever cycles a provider uses become their own sections). A pool whose day-or-longer
+ * limit is used up is done for that period: it leaves the sections and is listed once under `exhausted`.
  */
 export function sections(accounts, now = Date.now()) {
   const byLength = new Map();
+  const exhausted = [];
   const unavailable = [];
   for (const account of accounts) {
     if (!account.windows?.length) {
@@ -199,29 +201,38 @@ export function sections(accounts, now = Date.now()) {
       continue;
     }
     const windows = new Map(effectiveWindows(account, now).map((w) => [w.id, w]));
-    const blocked = blockedWindows(account, now);
     const pools = independentPools(account);
     for (const pool of pools) {
-      for (const w of pool.windowIds.map((id) => windows.get(id)).filter(Boolean)) {
+      const ws = pool.windowIds.map((id) => windows.get(id)).filter(Boolean);
+      const base = {
+        accountId: account.id,
+        pool: pool.id,
+        label: account.short,
+        tag: pools.length > 1 ? pool.label.charAt(0).toUpperCase() : null,
+        stale: account.ok === false,
+      };
+      const spent = ws
+        .filter((w) => (w.windowMins ?? 0) >= 1440 && w.remainingPct <= EXHAUSTED_PCT)
+        .sort((a, b) => (b.resetsAt ?? 0) - (a.resetsAt ?? 0))[0];
+      if (spent) {
+        exhausted.push({ ...base, window: durationLabel(spent.windowMins), resetsAt: spent.resetsAt ?? null });
+        continue;
+      }
+      for (const w of ws) {
         const key = w.windowMins ?? 0;
         if (!byLength.has(key)) byLength.set(key, { windowMins: w.windowMins ?? null, label: durationLabel(w.windowMins), entries: [] });
         byLength.get(key).entries.push({
-          accountId: account.id,
-          pool: pool.id,
-          label: account.short,
-          tag: pools.length > 1 ? pool.label.charAt(0).toUpperCase() : null,
+          ...base,
           pct: w.remainingPct,
-          level: blocked.has(w.id) ? "out" : level(w.remainingPct),
+          level: level(w.remainingPct),
           exhausted: w.remainingPct <= EXHAUSTED_PCT,
-          blockedBy: blocked.has(w.id) ? durationLabel(blocked.get(w.id).windowMins) : null,
           resetsAt: w.resetsAt ?? null,
-          stale: account.ok === false,
         });
       }
     }
   }
   const list = [...byLength.values()].sort((a, b) => (a.windowMins ?? Infinity) - (b.windowMins ?? Infinity));
-  return { sections: list, unavailable };
+  return { sections: list, exhausted, unavailable };
 }
 
 /** Compact per-account figure for status bars: how much can be used right now, per independent pool. */

@@ -77,16 +77,16 @@ export function renderReport(accounts, { color = false, now = Date.now(), refres
   return out.join("\n");
 }
 
-// Shown instead of a number when a limit is used up, or unusable because a longer limit is.
+// Marks limits that are used up: the ☠ group in the menu bar and `line`, and dead rows in the terminal view.
 export const SKULL = "☠";
 
 const entryLabel = (e) => (e.tag ? `${e.label}·${e.tag}` : e.label);
 
-/** One line for tmux or a status line, grouped by window length: "5h CW 100 · CP 53 | wk CW 0 · …". */
+/** One line for tmux or a status line: "5h CP 53 · … | wk CP 82 · CX 49 · … | ☠ CW" (☠ = used up for the week). */
 export function renderLine(accounts, now = Date.now()) {
-  const { sections: list, unavailable } = sections(accounts, now);
-  const value = (e) => (e.exhausted || e.blockedBy ? SKULL : String(Math.floor(e.pct)));
-  const parts = list.map((s) => `${s.label} ${s.entries.map((e) => `${entryLabel(e)} ${value(e)}${e.stale ? "!" : ""}`).join(" · ")}`);
+  const { sections: list, exhausted, unavailable } = sections(accounts, now);
+  const parts = list.map((s) => `${s.label} ${s.entries.map((e) => `${entryLabel(e)} ${Math.floor(e.pct)}${e.stale ? "!" : ""}`).join(" · ")}`);
+  if (exhausted.length) parts.push(`${SKULL} ${exhausted.map((e) => entryLabel(e)).join(" · ")}`);
   if (unavailable.length) parts.push(unavailable.map((u) => `${u.label} ?`).join(" · "));
   return parts.join(" | ");
 }
@@ -101,8 +101,9 @@ export function jsonView(accounts, now = Date.now()) {
     version: VERSION,
     generatedAt: iso(now),
     // The menu bar layout: one section per window length (e.g. "5h", "wk"), shortest first.
-    ...(({ sections: list, unavailable }) => ({
+    ...(({ sections: list, exhausted, unavailable }) => ({
       sections: list.map((sec) => ({ ...sec, entries: sec.entries.map((e) => ({ ...e, resetsAt: iso(e.resetsAt) })) })),
+      exhausted: exhausted.map((e) => ({ ...e, resetsAt: iso(e.resetsAt) })),
       unavailable,
     }))(sections(accounts, now)),
     accounts: accounts.map((a) => ({

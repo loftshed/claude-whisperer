@@ -121,39 +121,42 @@ test("pills show the short and weekly window separately, one pill per independen
   assert.deepEqual(shape(ag), [["G", 100, 6], ["C", 100, 27]]);
 });
 
-test("sections group every pool's windows by window length, shortest first", () => {
+test("sections group usable pools by window length; pools used up for the week move to exhausted", () => {
   const [work, personal, ag] = sampleAccounts();
   const codex = { id: "codex", short: "CX", provider: "codex", ok: true, ...parseCodexRateLimits({ rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 48, windowDurationMins: 10080, resetsAt: 1790779510 } } } }) };
   // A provider on a different cycle gets its own section rather than being forced into "5h".
   const daily = { id: "other", short: "OT", provider: "codex", ok: false, ...parseCodexRateLimits({ rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 10, windowDurationMins: 1440, resetsAt: 1790400000 } } } }) };
   const accounts = [{ ...work, short: "CW" }, { ...personal, short: "CP" }, codex, { ...ag, short: "AG" }, daily, { id: "gone", short: "GN", ok: false, error: "boom" }];
-  const { sections: list, unavailable } = sections(accounts, NOW);
+  const { sections: list, exhausted, unavailable } = sections(accounts, NOW);
   const shape = list.map((s) => [s.label, s.entries.map((e) => `${e.label}${e.tag ? "·" + e.tag : ""} ${Math.floor(e.pct)}${e.stale ? "!" : ""}`)]);
   assert.deepEqual(shape, [
-    ["5h", ["CW 100", "CP 57", "AG·G 100", "AG·C 100"]],
+    ["5h", ["CP 57", "AG·G 100", "AG·C 100"]],
     ["1d", ["OT 90!"]],
-    ["wk", ["CW 0", "CP 89", "CX 52", "AG·G 6", "AG·C 27"]],
+    ["wk", ["CP 89", "CX 52", "AG·G 6", "AG·C 27"]],
   ]);
+  assert.deepEqual(exhausted.map((e) => [e.label, e.window, new Date(e.resetsAt).toISOString()]), [["CW", "wk", "2026-09-26T00:59:00.000Z"]]);
   assert.deepEqual(unavailable, [{ accountId: "gone", label: "GN", error: "boom" }]);
   assert.deepEqual([300, 10080, 1440, 180, 43200, 90, undefined].map(durationLabel), ["5h", "wk", "1d", "3h", "30d", "90m", "limit"]);
 });
 
 test("an exhausted longer limit makes shorter ones unusable, never the other way round", () => {
-  const [work, personal] = sampleAccounts();
-  // Work: weekly exhausted, so the 5-hour window and the Fable cap are unusable.
+  const [work, personal, ag] = sampleAccounts();
+  // Work: weekly exhausted, so the 5-hour window and the Fable cap are unusable (dropdown, terminal view).
   assert.deepEqual([...blockedWindows(work, NOW).entries()].map(([id, by]) => [id, by.id]), [["5h", "week"], ["week-fable", "week"]]);
   assert.equal(blockedWindows(personal, NOW).size, 0);
-  const { sections: list } = sections([{ ...work, short: "CW" }], NOW);
-  assert.deepEqual(list.map((s) => [s.label, s.entries[0].exhausted, s.entries[0].blockedBy, s.entries[0].level]), [
-    ["5h", false, "wk", "out"],
-    ["wk", true, null, "out"],
-  ]);
-  // 5-hour empty but the week has room: the weekly remainder is still real.
+  // 5-hour empty but the week has room: it stays in the 5h section at 0, and the week is still real.
   const sessionOut = parseClaudeUsage("Current session: 100% used · resets Sep 25 at 3pm (America/Toronto)\nCurrent week (all models): 20% used · resets Sep 28 at 5pm (America/Toronto)", NOW);
   const account = { id: "x", short: "X", provider: "claude", ok: true, ...sessionOut };
   assert.equal(blockedWindows(account, NOW).size, 0);
-  const shape = sections([account], NOW).sections.map((s) => [s.label, s.entries[0].exhausted, s.entries[0].blockedBy]);
-  assert.deepEqual(shape, [["5h", true, null], ["wk", false, null]]);
+  const result = sections([account], NOW);
+  assert.deepEqual(result.sections.map((s) => [s.label, s.entries[0].pct, s.entries[0].exhausted]), [["5h", 0, true], ["wk", 80, false]]);
+  assert.deepEqual(result.exhausted, []);
+  // One Antigravity pool used up for the week, the other not: only that pool moves.
+  const agSpent = structuredClone(ag);
+  agSpent.windows.find((w) => w.id === "gemini-weekly").remainingPct = 0;
+  const split = sections([{ ...agSpent, short: "AG" }], NOW);
+  assert.deepEqual(split.exhausted.map((e) => `${e.label}·${e.tag}`), ["AG·G"]);
+  assert.deepEqual(split.sections.map((s) => s.entries.map((e) => e.tag)), [["C"], ["C"]]);
 });
 
 test("jsonView exposes ISO reset times and minutes until reset", () => {

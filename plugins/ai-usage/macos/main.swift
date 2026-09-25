@@ -132,11 +132,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Menu bar sections
 
-    /// Text-style skull (U+2620 with the text variation selector) so it takes the level colour.
+    /// Text-style skull (U+2620 with the text variation selector) so it takes a colour.
     static let skull = "\u{2620}\u{FE0E}"
 
+    /// `value` is empty for entries in the ☠ group, which lists names only.
     private struct Entry { let label: String; let tag: String?; let value: String; let level: String; let stale: Bool }
-    private struct Section { let header: String; let entries: [Entry] }
+    private struct Section { let header: String; let skull: Bool; let entries: [Entry] }
     private typealias BarModel = (sections: [Section], unavailable: [String])
 
     private let barHeaderFont = NSFont.systemFont(ofSize: 9, weight: .heavy)
@@ -145,22 +146,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let barNumberFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .semibold)
     // The skull glyph is drawn small by the symbol font; a larger size makes it read at a glance.
     private let barSkullFont = NSFont.systemFont(ofSize: 14, weight: .regular)
-    private func valueFont(_ entry: Entry) -> NSFont { entry.value == AppDelegate.skull ? barSkullFont : barNumberFont }
 
-    /// `ai-usage json` sections: one per limit window length ("5h", "wk", …), plus accounts with no data.
+    /// `ai-usage json`: one section per limit window length ("5h", "wk", …), then a ☠ section for pools
+    /// whose weekly (or longer) limit is used up, then accounts with no data.
     private func barModel() -> BarModel {
-        let sections = (snapshot?["sections"] as? [[String: Any]] ?? []).map { section -> Section in
-            let entries = (section["entries"] as? [[String: Any]] ?? []).map { entry -> Entry in
-                let pct = entry["pct"] as? Double ?? 0
-                // Used up, or unusable because a longer limit is: a skull instead of a number.
-                let dead = (entry["exhausted"] as? Bool) == true || entry["blockedBy"] is String
-                return Entry(label: entry["label"] as? String ?? "?", tag: entry["tag"] as? String,
-                             value: dead ? AppDelegate.skull : String(Int(pct.rounded(.down))),
-                             level: dead ? "out" : entry["level"] as? String ?? level(for: pct),
-                             stale: (entry["stale"] as? Bool) == true)
-            }
-            return Section(header: (section["label"] as? String ?? "?").uppercased(), entries: entries)
+        func entry(_ raw: [String: Any], withValue: Bool) -> Entry {
+            let pct = raw["pct"] as? Double ?? 0
+            return Entry(label: raw["label"] as? String ?? "?", tag: raw["tag"] as? String,
+                         value: withValue ? String(Int(pct.rounded(.down))) : "",
+                         level: raw["level"] as? String ?? level(for: pct), stale: (raw["stale"] as? Bool) == true)
         }
+        var sections = (snapshot?["sections"] as? [[String: Any]] ?? []).map { section in
+            Section(header: (section["label"] as? String ?? "?").uppercased(), skull: false,
+                    entries: (section["entries"] as? [[String: Any]] ?? []).map { entry($0, withValue: true) })
+        }
+        let exhausted = (snapshot?["exhausted"] as? [[String: Any]] ?? []).map { entry($0, withValue: false) }
+        if !exhausted.isEmpty { sections.append(Section(header: AppDelegate.skull, skull: true, entries: exhausted)) }
         let unavailable = (snapshot?["unavailable"] as? [[String: Any]] ?? []).map { $0["label"] as? String ?? "?" }
         return (sections, unavailable)
     }
@@ -169,16 +170,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ceil(NSAttributedString(string: text, attributes: [.font: font]).size().width)
     }
 
-    /// One rounded box per limit window length, headed "5H", "WK", …, holding each account's % left.
+    /// One rounded box per section: "5H", "WK", … with each account's % left, then "☠" with the names of
+    /// everything used up for the week.
     private func barImage(_ model: BarModel) -> NSImage {
         let height: CGFloat = 22, boxHeight: CGFloat = 18, inset: CGFloat = 5, headerGap: CGFloat = 5
         let entryGap: CGFloat = 6, labelGap: CGFloat = 2, sectionGap: CGFloat = 4
+        func headerFont(_ section: Section) -> NSFont { section.skull ? barSkullFont : barHeaderFont }
         func entryWidth(_ entry: Entry) -> CGFloat {
-            width(entry.label, barLabelFont) + (entry.tag.map { width($0, barTagFont) + 1 } ?? 0) + labelGap
-                + width(entry.value, valueFont(entry)) + (entry.stale ? width("!", barNumberFont) : 0)
+            width(entry.label, barLabelFont) + (entry.tag.map { width($0, barTagFont) + 1 } ?? 0)
+                + (entry.value.isEmpty ? 0 : labelGap + width(entry.value, barNumberFont))
+                + (entry.stale ? width("!", barNumberFont) : 0)
         }
         func sectionWidth(_ section: Section) -> CGFloat {
-            2 * inset + width(section.header, barHeaderFont) + headerGap
+            2 * inset + width(section.header, headerFont(section)) + headerGap
                 + section.entries.map(entryWidth).reduce(0, +) + CGFloat(max(0, section.entries.count - 1)) * entryGap
         }
         let unavailableText = model.unavailable.map { "\($0) ?" }.joined(separator: "  ")
@@ -193,6 +197,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 text.draw(at: NSPoint(x: x, y: (height - size.height) / 2 + raise))
                 return ceil(size.width)
             }
+            // Not secondaryLabelColor: inside an image it gets no vibrancy and vanishes over the translucent bar.
+            let muted = NSColor.labelColor.withAlphaComponent(0.75)
             var x: CGFloat = 0
             for (i, section) in model.sections.enumerated() {
                 if i > 0 { x += sectionGap }
@@ -201,14 +207,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 NSColor.labelColor.withAlphaComponent(0.13).setFill()
                 NSBezierPath(roundedRect: box, xRadius: 5, yRadius: 5).fill()
                 var cx = x + inset
-                // Not secondaryLabelColor: inside an image it gets no vibrancy and vanishes over the translucent bar.
-                cx += draw(section.header, barHeaderFont, NSColor.labelColor.withAlphaComponent(0.75), at: cx) + headerGap
+                cx += draw(section.header, headerFont(section), section.skull ? levelText(color(for: "out")) : muted, at: cx) + headerGap
                 for (j, entry) in section.entries.enumerated() {
                     if j > 0 { cx += entryGap }
                     cx += draw(entry.label, barLabelFont, .labelColor, at: cx)
-                    if let tag = entry.tag { cx += 1 + draw(tag, barTagFont, NSColor.labelColor.withAlphaComponent(0.75), at: cx + 1, raise: -2) }
-                    cx += labelGap
-                    cx += draw(entry.value, valueFont(entry), levelText(color(for: entry.level)), at: cx)
+                    if let tag = entry.tag { cx += 1 + draw(tag, barTagFont, muted, at: cx + 1, raise: -2) }
+                    if !entry.value.isEmpty {
+                        cx += labelGap
+                        cx += draw(entry.value, barNumberFont, levelText(color(for: entry.level)), at: cx)
+                    }
                     if entry.stale { cx += draw("!", barNumberFont, .systemRed, at: cx) }
                 }
                 x += boxWidth
@@ -235,7 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var parts = model.sections.map { section -> String in
             let entries = section.entries.map { entry -> String in
                 let label = entry.tag.map { tag in "\(entry.label)·\(tag)" } ?? entry.label
-                return "\(label) \(entry.value)\(entry.stale ? "!" : "")"
+                return (entry.value.isEmpty ? label : "\(label) \(entry.value)") + (entry.stale ? "!" : "")
             }
             return "\(section.header) " + entries.joined(separator: " · ")
         }
@@ -255,7 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.image = barImage(model)
         button.imagePosition = .imageOnly
         button.setAccessibilityLabel("AI usage, % left: " + barSummary(model))
-        button.toolTip = "% left, grouped by limit window: 5H = 5-hour, WK = weekly.\nAntigravity pools: G = Gemini, C = Claude & GPT-OSS. ! = last refresh failed."
+        button.toolTip = "% left, grouped by limit window: 5H = 5-hour, WK = weekly.\n☠ = used up for the week (details in the menu).\nAntigravity pools: G = Gemini, C = Claude & GPT-OSS. ! = last refresh failed."
     }
 
     /// `AIUsageBar --render-title <png> [--light]`: draw the menu bar pills to a PNG for checking.
@@ -335,7 +342,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             status = "Updated \(clock(date))"
         }
         menu.addItem(infoItem(text("AI usage · \(status)", monoBold, .secondaryLabelColor)))
-        menu.addItem(infoItem(text("Menu bar: % left grouped by limit window (5H, WK) · G = Gemini, C = Claude & GPT-OSS", mono, .tertiaryLabelColor)))
+        menu.addItem(infoItem(text("Menu bar: % left by limit window (5H, WK) · ☠ = used up for the week · G = Gemini, C = Claude & GPT-OSS", mono, .tertiaryLabelColor)))
         if let lastError {
             menu.addItem(infoItem(text("⚠ \(lastError.prefix(120))", mono, .systemRed)))
         }

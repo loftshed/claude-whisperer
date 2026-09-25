@@ -3,6 +3,13 @@
 All notable changes to this project. Versions follow [semver](https://semver.org); the `ai-usage json`
 schema (`ai-usage.snapshot.v1`) changes its suffix on any breaking change to its shape.
 
+## 0.6.0 (2026-09-25)
+
+- Menu bar: pools whose weekly (or other day-or-longer) limit is used up leave the 5H/WK boxes and are
+  listed once in a ☠ box; an empty 5-hour window alone stays in 5H as a red 0. `ai-usage line` ends with
+  `| ☠ …`, and `ai-usage json` adds `exhausted` (with the window and when it resets). Replaces 0.5.0's
+  inline skulls in the menu bar; the terminal view and dropdown keep marking dead windows.
+
 ## 0.5.0 (2026-09-25)
 
 - ☠ instead of a number for a used-up limit, and for a shorter limit made unusable by an exhausted longer
