@@ -120,16 +120,46 @@ function markRedundantSubPools(lanes, pools) {
   }
 }
 
+// A pool whose windows are a strict superset of another pool's (e.g. Claude's per-model weekly cap) is a
+// sub-limit of that pool; compact views show only the independent pools.
+function independentPools(account) {
+  const pools = account.pools ?? [];
+  return pools.filter(
+    (p) => !pools.some((q) => q !== p && q.windowIds.length < p.windowIds.length && q.windowIds.every((id) => p.windowIds.includes(id))),
+  );
+}
+
+const gauge = (w) => (w ? { pct: w.remainingPct, level: level(w.remainingPct), label: w.label, resetsAt: w.resetsAt ?? null } : null);
+
+/**
+ * One pill per independent pool: its short window (5-hour) and its weekly window, separately. Codex has no
+ * short window, so its pill has only the weekly half. Antigravity has two pools, so two pills with tags.
+ */
+export function pills(account, now = Date.now()) {
+  if (!account.windows?.length) return [];
+  const windows = new Map(effectiveWindows(account, now).map((w) => [w.id, w]));
+  const pools = independentPools(account);
+  return pools.map((pool) => {
+    const ws = pool.windowIds.map((id) => windows.get(id)).filter(Boolean);
+    const short = ws.find((w) => (w.windowMins ?? Infinity) < 1440) ?? null;
+    const long = ws.filter((w) => (w.windowMins ?? 0) >= 1440).sort((a, b) => a.remainingPct - b.remainingPct)[0] ?? null;
+    return { pool: pool.id, tag: pools.length > 1 ? pool.label.charAt(0).toUpperCase() : null, poolLabel: pool.label, short: gauge(short), weekly: gauge(long) };
+  });
+}
+
+/** Text form of the pills: "100|59" per pool, 5-hour first; a lone number is weekly-only. */
+export function pillText(account, now = Date.now()) {
+  const list = pills(account, now);
+  if (list.length === 0) return "?";
+  const n = (g) => String(Math.floor(g.pct));
+  return list.map((p) => `${p.tag ?? ""}${[p.short, p.weekly].filter(Boolean).map(n).join("|")}`).join(" ");
+}
+
 /** Compact per-account figure for status bars: how much can be used right now, per independent pool. */
 export function headline(account, now = Date.now()) {
   if (!account.windows?.length) return { text: "?", level: "error" };
   const windows = new Map(effectiveWindows(account, now).map((w) => [w.id, w]));
-  const pools = account.pools ?? [];
-  // A pool whose windows are a strict superset of another pool's (e.g. Claude's per-model weekly cap)
-  // is a sub-limit of that pool, so leave it out of the headline.
-  const independent = pools.filter(
-    (p) => !pools.some((q) => q !== p && q.windowIds.length < p.windowIds.length && q.windowIds.every((id) => p.windowIds.includes(id))),
-  );
+  const independent = independentPools(account);
   const values = independent.map((p) => Math.min(...p.windowIds.map((id) => windows.get(id)?.remainingPct ?? 100)));
   const best = Math.max(...values);
   return { text: values.map((v) => String(Math.floor(v))).join("/"), level: level(best), values, levels: values.map(level) };

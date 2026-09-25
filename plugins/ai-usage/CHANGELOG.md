@@ -3,6 +3,17 @@
 All notable changes to this project. Versions follow [semver](https://semver.org); the `ai-usage json`
 schema (`ai-usage.snapshot.v1`) changes its suffix on any breaking change to its shape.
 
+## 0.3.0 (2026-09-25)
+
+- Menu bar pills: one per account and pool, 5-hour and weekly % left side by side, tinted by level; Codex
+  shows weekly only, Antigravity shows Gemini (G) and Claude & GPT-OSS (C) pools. `ai-usage line` and the
+  JSON (`accounts[].pills`) use the same layout. `AIUsageBar --render-title <png> [--light]` draws them.
+- `install.sh` installs the CLI to `~/.local/share/ai-usage`. The menu bar app ran it from the checkout
+  under `~/Documents`, where macOS privacy protection blocked it on a permission prompt and the menu bar
+  stayed on "AI …".
+- The menu bar app stops a refresh after 3 minutes and shows why, instead of waiting forever.
+- Claude probe timeout 45 s → 90 s: the first launch in a fresh app context is slow.
+
 ## 0.2.1 (2026-09-25)
 
 Fixes:

@@ -94,9 +94,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         process.standardOutput = out
         process.standardError = err
         do { try process.run() } catch { return .failure(RunError(message: "cannot run \(command): \(error.localizedDescription)")) }
+        // ai-usage bounds its own provider calls well under this; a run still going means it is stuck,
+        // e.g. on a macOS permission prompt. Stop it so the menu shows an error instead of "AI …" forever.
+        let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 180, execute: watchdog)
         let data = out.fileHandleForReading.readDataToEndOfFile()
         let errData = err.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        watchdog.cancel()
+        if process.terminationReason == .uncaughtSignal {
+            return .failure(RunError(message: "ai-usage did not finish within 3 minutes; if macOS is showing a permission prompt for it, answer it, or re-run install.sh"))
+        }
         if process.terminationStatus != 0 {
             let message = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return .failure(RunError(message: message.isEmpty ? "ai-usage exited \(process.terminationStatus)" : message))
@@ -122,33 +130,159 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pct <= 0.5 ? "out" : pct < 20 ? "low" : pct < 50 ? "mid" : "ok"
     }
 
+    // MARK: - Menu bar pills
+
+    private struct Segment { let text: String; let level: String }
+    private struct Pill { let tag: String?; let segments: [Segment] }
+    private struct Group { let label: String; let pills: [Pill]; let failed: Bool }
+
+    private let pillLabelFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
+    private let pillNumberFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+    private let pillTagFont = NSFont.systemFont(ofSize: 9, weight: .heavy)
+
+    private func groups() -> [Group] {
+        accounts.map { account in
+            let pills = (account["pills"] as? [[String: Any]] ?? []).map { pill -> Pill in
+                let segments = ["short", "weekly"].compactMap { key -> Segment? in
+                    guard let gauge = pill[key] as? [String: Any], let pct = gauge["pct"] as? Double else { return nil }
+                    return Segment(text: String(Int(pct.rounded(.down))), level: gauge["level"] as? String ?? level(for: pct))
+                }
+                return Pill(tag: pill["tag"] as? String, segments: segments)
+            }
+            return Group(label: account["short"] as? String ?? "?", pills: pills, failed: (account["ok"] as? Bool) == false)
+        }
+    }
+
+    private func width(_ text: String, _ font: NSFont) -> CGFloat {
+        ceil(NSAttributedString(string: text, attributes: [.font: font]).size().width)
+    }
+
+    /// Draws each account as its label followed by one capsule per pool: 5-hour | weekly % left.
+    private func pillImage(_ groups: [Group]) -> NSImage {
+        let height: CGFloat = 22, pillHeight: CGFloat = 16, pad: CGFloat = 4, groupGap: CGFloat = 8
+        let labelGap: CGFloat = 4, pillGap: CGFloat = 3, tagWidth: CGFloat = 11
+        func pillWidth(_ pill: Pill) -> CGFloat {
+            let segs = pill.segments.isEmpty ? [Segment(text: "?", level: "error")] : pill.segments
+            return (pill.tag == nil ? 0 : tagWidth) + segs.reduce(0) { $0 + width($1.text, pillNumberFont) + 2 * pad }
+        }
+        var total: CGFloat = 0
+        for (i, group) in groups.enumerated() {
+            total += (i > 0 ? groupGap : 0) + width(group.label, pillLabelFont) + labelGap
+            total += group.pills.map(pillWidth).reduce(0, +) + CGFloat(max(0, group.pills.count - 1)) * pillGap
+            if group.pills.isEmpty { total += width("?", pillNumberFont) }
+            if group.failed { total += width("!", pillNumberFont) + 1 }
+        }
+        let image = NSImage(size: NSSize(width: max(total, 1), height: height), flipped: false) { [self] _ in
+            var x: CGFloat = 0
+            let pillY = (height - pillHeight) / 2
+            func text(_ s: String, _ font: NSFont, _ color: NSColor, at px: CGFloat, width w: CGFloat) {
+                let attr = NSAttributedString(string: s, attributes: [.font: font, .foregroundColor: color])
+                let size = attr.size()
+                attr.draw(at: NSPoint(x: px + (w - size.width) / 2, y: (height - size.height) / 2))
+            }
+            for (i, group) in groups.enumerated() {
+                if i > 0 { x += groupGap }
+                let lw = width(group.label, pillLabelFont)
+                text(group.label, pillLabelFont, .labelColor, at: x, width: lw)
+                x += lw + labelGap
+                if group.pills.isEmpty {
+                    let w = width("?", pillNumberFont)
+                    text("?", pillNumberFont, .systemRed, at: x, width: w)
+                    x += w
+                }
+                for (j, pill) in group.pills.enumerated() {
+                    if j > 0 { x += pillGap }
+                    let pw = pillWidth(pill)
+                    let capsule = NSBezierPath(roundedRect: NSRect(x: x, y: pillY, width: pw, height: pillHeight), xRadius: pillHeight / 2, yRadius: pillHeight / 2)
+                    NSGraphicsContext.saveGraphicsState()
+                    capsule.addClip()
+                    NSColor.labelColor.withAlphaComponent(0.08).setFill()
+                    capsule.fill()
+                    var sx = x
+                    if let tag = pill.tag {
+                        text(tag, pillTagFont, .secondaryLabelColor, at: sx + 2, width: tagWidth - 2)
+                        sx += tagWidth
+                    }
+                    let segments = pill.segments.isEmpty ? [Segment(text: "?", level: "error")] : pill.segments
+                    for (k, seg) in segments.enumerated() {
+                        let sw = width(seg.text, pillNumberFont) + 2 * pad
+                        let tint = color(for: seg.level)
+                        tint.withAlphaComponent(0.24).setFill()
+                        NSRect(x: sx, y: pillY, width: sw, height: pillHeight).fill()
+                        if k > 0 {
+                            NSColor.labelColor.withAlphaComponent(0.35).setFill()
+                            NSRect(x: sx - 0.5, y: pillY + 3, width: 1, height: pillHeight - 6).fill()
+                        }
+                        text(seg.text, pillNumberFont, pillText(tint), at: sx, width: sw)
+                        sx += sw
+                    }
+                    NSGraphicsContext.restoreGraphicsState()
+                    x += pw
+                }
+                if group.failed {
+                    x += 1
+                    let w = width("!", pillNumberFont)
+                    text("!", pillNumberFont, .systemRed, at: x, width: w)
+                    x += w
+                }
+            }
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
+    /// Level colour for pill numbers, darkened in light mode where bright green on a pale tint is hard to read.
+    private func pillText(_ tint: NSColor) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            return dark ? tint : (tint.usingColorSpace(.deviceRGB)?.blended(withFraction: 0.4, of: .black) ?? tint)
+        }
+    }
+
+    private func pillSummary(_ groups: [Group]) -> String {
+        groups.map { group in
+            let pills = group.pills.map { ($0.tag ?? "") + $0.segments.map(\.text).joined(separator: "|") }
+            return "\(group.label) \(pills.isEmpty ? "?" : pills.joined(separator: " "))\(group.failed ? "!" : "")"
+        }.joined(separator: "  ")
+    }
+
     private func updateTitle() {
-        let title = NSMutableAttributedString()
+        guard let button = statusItem.button else { return }
         if accounts.isEmpty {
-            title.append(NSAttributedString(string: lastError == nil ? "AI …" : "AI ⚠", attributes: [.font: titleFont]))
+            button.image = nil
+            button.attributedTitle = NSAttributedString(string: lastError == nil ? "AI …" : "AI ⚠", attributes: [.font: titleFont])
+            return
         }
-        for (index, account) in accounts.enumerated() {
-            if index > 0 { title.append(NSAttributedString(string: "  ", attributes: [.font: titleFont])) }
-            let short = account["short"] as? String ?? "?"
-            // No explicit color: the button's default text color keeps the menu bar's vibrancy and contrast.
-            title.append(NSAttributedString(string: short + " ", attributes: [.font: titleFont]))
-            let headline = account["headline"] as? [String: Any] ?? [:]
-            let values = headline["values"] as? [Double] ?? []
-            let levels = headline["levels"] as? [String] ?? []
-            if values.isEmpty {
-                title.append(NSAttributedString(string: "?", attributes: [.font: titleFont, .foregroundColor: NSColor.systemRed]))
-            }
-            for (i, value) in values.enumerated() {
-                if i > 0 { title.append(NSAttributedString(string: "/", attributes: [.font: titleFont])) }
-                let lvl = i < levels.count ? levels[i] : level(for: value)
-                title.append(NSAttributedString(string: String(Int(value.rounded(.down))), attributes: [.font: titleFont, .foregroundColor: color(for: lvl)]))
-            }
-            if (account["ok"] as? Bool) == false {
-                title.append(NSAttributedString(string: "!", attributes: [.font: titleFont, .foregroundColor: NSColor.systemRed]))
-            }
+        let groups = groups()
+        button.attributedTitle = NSAttributedString(string: "")
+        button.image = pillImage(groups)
+        button.imagePosition = .imageOnly
+        button.setAccessibilityLabel("AI usage: " + pillSummary(groups))
+        button.toolTip = "Each pill: 5-hour | weekly % left (a single number is weekly only).\nAntigravity: G = Gemini pool, C = Claude & GPT-OSS pool."
+    }
+
+    /// `AIUsageBar --render-title <png> [--light]`: draw the menu bar pills to a PNG for checking.
+    func renderTitle(to path: String, light: Bool) {
+        if case .success(let data) = AppDelegate.run(command, ["json"]) {
+            snapshot = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         }
-        statusItem.button?.attributedTitle = title
-        statusItem.button?.toolTip = "AI usage: % usable now per account (right now, per independent pool)"
+        let image = pillImage(groups())
+        let scale: CGFloat = 2
+        let appearance = NSAppearance(named: light ? .aqua : .darkAqua)!
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(image.size.width * scale), pixelsHigh: Int(image.size.height * scale),
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return }
+        rep.size = image.size
+        appearance.performAsCurrentDrawingAppearance {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            (light ? NSColor(white: 0.93, alpha: 1) : NSColor(white: 0.16, alpha: 1)).setFill()
+            NSRect(origin: .zero, size: image.size).fill()
+            image.draw(in: NSRect(origin: .zero, size: image.size))
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        print("TITLE: " + pillSummary(groups()))
     }
 
     private func pad(_ s: String, _ n: Int) -> String {
@@ -205,6 +339,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             status = "Updated \(clock(date))"
         }
         menu.addItem(infoItem(text("AI usage · \(status)", monoBold, .secondaryLabelColor)))
+        menu.addItem(infoItem(text("Pills: 5-hour | weekly % left · G = Gemini, C = Claude & GPT-OSS", mono, .tertiaryLabelColor)))
         if let lastError {
             menu.addItem(infoItem(text("⚠ \(lastError.prefix(120))", mono, .systemRed)))
         }
@@ -304,9 +439,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         updateTitle()
         rebuildMenu()
-        print("TITLE: " + (statusItem.button?.attributedTitle.string ?? ""))
+        print("TITLE: " + pillSummary(groups()))
         for item in menu.items { print(item.isSeparatorItem ? "────" : item.title) }
     }
+}
+
+if let index = CommandLine.arguments.firstIndex(of: "--render-title"), index + 1 < CommandLine.arguments.count {
+    AppDelegate().renderTitle(to: CommandLine.arguments[index + 1], light: CommandLine.arguments.contains("--light"))
+    exit(0)
 }
 
 if CommandLine.arguments.contains("--dump-menu") {

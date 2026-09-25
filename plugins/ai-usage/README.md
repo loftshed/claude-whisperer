@@ -5,7 +5,7 @@ How much subscription quota is left on every AI account on this machine, and whe
 It reads the rate-limit windows of each account (Claude Code, Codex/ChatGPT, Antigravity/Gemini), keeps them in a shared cache, and shows them three ways:
 
 - **CLI / TUI**: `ai-usage` for a table, `ai-usage watch` for a live full-screen view.
-- **macOS menu bar app**: `CW 0  CP 89  CX 51  AG 6/27` in the menu bar, with details and a ranking in the dropdown.
+- **macOS menu bar app**: one pill per account and pool, `CW [100│0]  CP [56│83]  CX [49]  AG [G 81│4] [C 100│27]`: 5-hour on the left, weekly on the right, each tinted by how much is left. A single number is a weekly-only limit (Codex). Antigravity has two pools, Gemini (G) and Claude & GPT-OSS (C). Details and a ranking are in the dropdown.
 - **MCP server**: `get_usage` and `recommend` tools, so agents can check quota before choosing where to run work.
 
 ```
@@ -78,7 +78,7 @@ No config is needed: without `~/.config/ai-usage/config.json`, ai-usage monitors
 
 `./uninstall.sh` removes the launcher, app, login agent, MCP registrations and cache (`--purge` also removes the config).
 
-Re-run `./install.sh` after moving the checkout or changing Node versions; the launcher records both paths.
+`install.sh` installs a copy of the CLI to `~/.local/share/ai-usage` and points the launcher there, so the menu bar app and MCP servers never read the checkout. macOS privacy protection makes background access to `~/Documents` wait on a permission prompt, which returns with every rebuild of the ad-hoc-signed app. Re-run `./install.sh` after pulling changes, moving the checkout, or changing Node versions.
 
 ## Commands
 
@@ -86,7 +86,7 @@ Re-run `./install.sh` after moving the checkout or changing Node versions; the l
 ai-usage [show]            table of every window plus where to spend next
 ai-usage watch             live view (r = refresh now, q = quit)
 ai-usage json              machine-readable snapshot, schema "ai-usage.snapshot.v1"
-ai-usage line              one line for tmux or a status line: "CW 0 · CP 89 · CX 51 · AG 6/27"
+ai-usage line              one line for tmux or a status line: "CW 100|0 · CP 56|83 · CX 49 · AG G81|4 C100|27"
 ai-usage recommend         ranked pools [--family claude|gpt|gemini] [--json]
 ai-usage mcp               MCP server on stdio
 ai-usage init              detect accounts and write the config

@@ -24,6 +24,7 @@ done
 echo "✓ removed skill links"
 
 rm -f "$launcher"
+node -e 'require("fs").rmSync(process.argv[1], { recursive: true, force: true })' "$HOME/.local/share/ai-usage"
 node -e 'require("fs").rmSync(process.argv[1], { recursive: true, force: true })' "$HOME/.cache/ai-usage"
 echo "✓ removed launcher and cache"
 

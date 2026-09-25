@@ -1,4 +1,4 @@
-import { buildLanes, effectiveWindows, headline, level } from "./analyze.mjs";
+import { buildLanes, effectiveWindows, headline, level, pills, pillText } from "./analyze.mjs";
 import { formatClock, formatDuration } from "./time.mjs";
 import { SNAPSHOT_SCHEMA, VERSION } from "./version.mjs";
 
@@ -72,8 +72,9 @@ export function renderReport(accounts, { color = false, now = Date.now(), refres
   return out.join("\n");
 }
 
+/** One line for tmux or a status line: each account's pills as "5h|week" (a lone number is weekly-only). */
 export function renderLine(accounts, now = Date.now()) {
-  return accounts.map((a) => `${a.short} ${headline(a, now).text}`).join(" · ");
+  return accounts.map((a) => `${a.short} ${pillText(a, now)}`).join(" · ");
 }
 
 const iso = (ms) => (ms ? new Date(ms).toISOString() : null);
@@ -97,6 +98,11 @@ export function jsonView(accounts, now = Date.now()) {
       fetchedAt: iso(a.fetchedAt),
       ageMinutes: a.fetchedAt ? Math.round((now - a.fetchedAt) / 60_000) : null,
       headline: headline(a, now),
+      pills: pills(a, now).map((p) => ({
+        ...p,
+        short: p.short && { ...p.short, resetsAt: iso(p.short.resetsAt) },
+        weekly: p.weekly && { ...p.weekly, resetsAt: iso(p.weekly.resetsAt) },
+      })),
       windows: effectiveWindows(a, now).map((w) => ({
         id: w.id,
         label: w.label,

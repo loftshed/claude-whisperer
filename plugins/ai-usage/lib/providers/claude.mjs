@@ -66,7 +66,9 @@ export async function fetchClaude(account, { now = Date.now() } = {}) {
     "--setting-sources", "",
     "--settings", '{"disableAllHooks":true}',
   ];
-  const { code, stdout, stderr } = await run(bin, args, { env, timeoutMs: account.timeoutMs ?? 45_000 });
+  // The first claude launch in a fresh app context (e.g. right after the menu bar app is reinstalled) can take
+  // well over 15 s; 90 s avoids reporting a cold start as a failure.
+  const { code, stdout, stderr } = await run(bin, args, { env, timeoutMs: account.timeoutMs ?? 90_000 });
   let parsed;
   try {
     parsed = JSON.parse(stdout);

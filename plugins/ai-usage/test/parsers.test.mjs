@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { buildLanes, headline } from "../lib/analyze.mjs";
+import { buildLanes, headline, pills, pillText } from "../lib/analyze.mjs";
 import { parseAntigravityUsage } from "../lib/providers/antigravity.mjs";
 import { parseClaudeUsage } from "../lib/providers/claude.mjs";
 import { parseCodexRateLimits } from "../lib/providers/codex.mjs";
@@ -109,6 +109,17 @@ test("headline skips per-model sub-limits and shows each independent pool", () =
   assert.deepEqual(headline(work, NOW), { text: "0", level: "out", values: [0], levels: ["out"] });
   assert.equal(headline(personal, NOW).text, "57");
   assert.equal(headline(ag, NOW).text, "6/27");
+});
+
+test("pills show the short and weekly window separately, one pill per independent pool", () => {
+  const [work, personal, ag] = sampleAccounts();
+  const codex = { id: "codex", provider: "codex", ok: true, ...parseCodexRateLimits({ rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 48, windowDurationMins: 10080, resetsAt: 1790779510 } } } }) };
+  const shape = (account) => pills(account, NOW).map((p) => [p.tag, p.short && Math.floor(p.short.pct), p.weekly && Math.floor(p.weekly.pct)]);
+  assert.deepEqual(shape(work), [[null, 100, 0]]);
+  assert.deepEqual(shape(personal), [[null, 57, 89]], "weekly is the all-models limit; the Fable cap stays in the details");
+  assert.deepEqual(shape(codex), [[null, null, 52]], "Codex has only a weekly window");
+  assert.deepEqual(shape(ag), [["G", 100, 6], ["C", 100, 27]]);
+  assert.deepEqual([work, personal, codex, ag].map((a) => pillText(a, NOW)), ["100|0", "57|89", "52", "G100|6 C100|27"]);
 });
 
 test("jsonView exposes ISO reset times and minutes until reset", () => {
