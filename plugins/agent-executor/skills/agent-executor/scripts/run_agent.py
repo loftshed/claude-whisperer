@@ -142,6 +142,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Bypass the model cache before execution",
     )
     parser.add_argument(
+        "--ignore-quota",
+        action="store_true",
+        help="Launch even when ai-usage reports the route's subscription quota as exhausted",
+    )
+    parser.add_argument(
         "--variant",
         help="OpenCode model variant (default: high); invalid for other engines",
     )
@@ -2845,6 +2850,8 @@ def detached_runner_command(
         command.extend(["--resume-result", str(args.resume_result.expanduser().resolve())])
     if args.refresh_models:
         command.append("--refresh-models")
+    if args.ignore_quota:
+        command.append("--ignore-quota")
     for extra in args.add_dir:
         command.extend(["--add-dir", str(extra)])
     if task_spec_path is None:
@@ -2884,6 +2891,8 @@ def launch_detached(args: argparse.Namespace) -> int:
     _, add_dirs, _allowed_paths, tracked_paths, enforced_paths, _, _ = validated_run_options(
         args, task_spec=task_spec
     )
+    # Check before detaching so the caller hears about an exhausted pool now, not in a completion event.
+    quota_gate(args.engine, args.model or PREFERRED_MODELS.get(args.engine, ""), ignore=args.ignore_quota)
     event_dir = default_completion_event_dir().resolve()
     if event_dir == repo or repo in event_dir.parents:
         raise RunnerError(
@@ -3061,12 +3070,63 @@ def publish_uncaught_completion_failure(error: Exception, exit_code: int) -> Non
         )
 
 
+def quota_gate(engine: str, model: str, *, ignore: bool) -> None:
+    """Refuse to launch into an exhausted subscription pool and warn when little is usable now.
+
+    Quota is read live from ai-usage and never stored. Missing ai-usage means unknown quota, which
+    does not block a run.
+    """
+    if ignore:
+        return
+    quota = bundled_module("quota")
+    view = quota.snapshot()
+    result = quota.check(engine, model, view)
+    if result["status"] == "blocked":
+        raise RunnerError(quota.blocked_message(engine, model, result, view), quota.EXIT_QUOTA_EXHAUSTED)
+    if result["status"] == "low":
+        emit_lifecycle(
+            "quota_low", pool=result.get("label"), usable_now_pct=round(result.get("availableNowPct") or 0),
+            advice=result.get("advice"),
+        )
+
+
+def quota_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog=f"{Path(__file__).name} quota",
+        description="Live subscription quota for each executor route, read from ai-usage. Nothing is stored.",
+    )
+    parser.add_argument("--format", choices=("text", "json"), default="text")
+    args = parser.parse_args(argv)
+    quota = bundled_module("quota")
+    view = quota.snapshot()
+    rows = quota.route_table(view)
+    if args.format == "json":
+        print(json.dumps({"source": "ai-usage" if view else None,
+                          "generated_at": view.get("generatedAt") if view else None, "routes": rows}, indent=2))
+        return 0
+    if view is None:
+        print("ai-usage is not installed or did not answer: quota unknown, runs are not blocked.")
+    for row in rows:
+        head = f"{row['engine']:<21} {row['models']:<21}"
+        if row["status"] in ("not_applicable", "unknown"):
+            print(f"{head} {row['status']}: {row.get('detail', '')}")
+            continue
+        points = row.get("surplusPts")
+        pace = f"{points:+d} pts" if isinstance(points, int) and row["status"] != "blocked" else ""
+        billing = " [personal]" if row.get("billing") == "personal" else ""
+        print(f"{head} {row['status']:<9} {round(row['availableNowPct']):>3}% usable {pace:>8}  "
+              f"{row['label']}{billing}: {row['advice']}")
+    return 0
+
+
 def main() -> int:
     argv = sys.argv[1:]
     if argv and argv[0] == "models":
         return models_main(argv[1:])
     if argv and argv[0] == "events":
         return events_main(argv[1:])
+    if argv and argv[0] == "quota":
+        return quota_main(argv[1:])
     args = parse_args(argv)
     if args.detach:
         return execute(args)
@@ -3144,6 +3204,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
             args.model,
             refresh=args.refresh_models,
         )
+        quota_gate(args.engine, model, ignore=args.ignore_quota or args.dry_run)
         support = bundled_module("execution_support")
         try:
             effort = support.bind_effort(args.engine, model, args.effort, model_catalog)

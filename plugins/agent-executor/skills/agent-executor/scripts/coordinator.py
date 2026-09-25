@@ -34,6 +34,7 @@ SUPPORT = module("execution_support")
 EVIDENCE = module("evidence")
 POLICY = module("conductor_policy")
 NATIVE = module("native_bridge")
+QUOTA = module("quota")
 SCHEMA = "agent-executor.task.v1"
 
 
@@ -561,7 +562,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "route":
             output = choose_route(read(args.packet))
         elif args.action == "recommend":
-            output = POLICY.recommend(read(args.packet), read(Path(__file__).parent.parent / "references/profiles.json"))
+            registry = read(Path(__file__).parent.parent / "references/profiles.json")
+            packet = read(args.packet)
+            if packet.get("access") == "live":
+                packet["access"] = QUOTA.access_records(QUOTA.snapshot(), registry)
+            output = POLICY.recommend(packet, registry)
         elif args.action == "init":
             output = initialize(args)
         else:

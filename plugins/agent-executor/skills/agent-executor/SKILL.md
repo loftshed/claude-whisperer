@@ -174,6 +174,34 @@ The routes below are valid only when they cross away from the current harness:
 
 These are cost-conscious preferences, not claims about availability. The runner exact-matches them against the catalog and stops with live suggestions if one disappears. Pass another exact model with `--model` when requested. Select only a CLI whose catalog exposes that exact ID.
 
+## Check quota before routing
+
+Subscription quota is use-it-or-lose-it, and a run launched into an exhausted pool stalls. Read live
+quota before choosing a route:
+
+```bash
+python3 <skill-directory>/scripts/run_agent.py quota
+python3 <skill-directory>/scripts/run_agent.py quota --format json
+```
+
+It reads [ai-usage](https://github.com/loftshed/claude-whisperer/tree/main/plugins/ai-usage) (cached for about
+3 minutes) and maps it onto routes: `codex`, `agy` Gemini, and `agy` Claude/GPT-OSS pools, plus the native
+Claude accounts for reference. OpenCode providers bill per request, so they have no window to check. The
+ai-usage MCP `recommend` tool gives the same ranking inside any harness.
+
+- The profile table above decides which models fit the task. Quota chooses among routes that fit; it
+  never justifies a weaker model for work that needs a stronger one.
+- The runner refuses to launch into a blocked pool: exit 15, with the refill time and routes that have
+  quota now. Pass `--ignore-quota` only when the user asks. Detached launches check before detaching.
+- A pool under 10% usable now emits `AGENT_LIFECYCLE=quota_low`; prefer another fitting route for long work.
+- Among fitting routes, prefer the one with the most unused capacity (`surplusPts`).
+- `coordinator.py recommend` with `"access": "live"` in the packet builds access records from live quota,
+  drops blocked pools, orders candidates by unused capacity, and marks personal accounts
+  `personal_subscription` so they stay excluded without `personal_quota_authorized`.
+- Quota is read at decision time and never stored. Per-run cost is already in each result's `usage`.
+- Never switch billing context (work vs personal accounts) on quota grounds without the user's say-so.
+- Without ai-usage, quota is unknown and runs proceed. Unknown is never zero.
+
 ## Effort, usage, and reference costs
 
 Pass `--effort` explicitly for reproducible Codex runs. The runner validates it against that model's

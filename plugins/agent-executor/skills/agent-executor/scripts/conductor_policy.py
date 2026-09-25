@@ -122,6 +122,15 @@ def recommend(packet: dict[str, Any], registry: dict[str, Any]) -> dict[str, Any
             candidates.append({"profile": profile["id"], "model": observed["model"], "engine": observed["engine"],
                 "native": observed["engine"] == packet.get("host"),
                 "effort_candidate": profile["effort_candidate"], "prompt_adjustment": profile["prompt_adjustment"],
-                "billing_mode": observed.get("billing_mode", "unknown"), "access_source": observed["source"]})
+                "billing_mode": observed.get("billing_mode", "unknown"), "access_source": observed["source"],
+                "quota": observed.get("quota")})
+    quota_known = any(candidate["quota"] for candidate in candidates)
+    if quota_known:
+        # Pools with room first (a run started in a nearly empty pool tends to stall), then by unused
+        # capacity. This orders otherwise-suitable candidates; it says nothing about quality.
+        candidates.sort(key=lambda candidate: ((candidate["quota"] or {}).get("status") == "low",
+                                               -((candidate["quota"] or {}).get("surplusPts") or 0)))
+    ranking = ("Ordered by quota: pools with room first, then unused capacity (surplusPts); not quality; " if quota_known
+               else "No empirical model ranking; ") + "use task/context value gate before handoff."
     return {"status": "provisional_candidates", "role": role, "candidates": candidates,
-            "selection_owner": "conductor", "ranking": "No empirical model ranking; use task/context value gate before handoff."}
+            "selection_owner": "conductor", "ranking": ranking}

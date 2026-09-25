@@ -17,6 +17,9 @@ from unittest import mock
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "run_agent.py"
+# Runner tests must never query real subscription accounts through ai-usage; test_quota.py sets
+# its own fake per test.
+os.environ["AI_USAGE_BIN"] = str(Path(__file__).parent / "no-ai-usage")
 SPEC = importlib.util.spec_from_file_location("agent_executor_runner", SCRIPT)
 assert SPEC and SPEC.loader
 RUNNER = importlib.util.module_from_spec(SPEC)
