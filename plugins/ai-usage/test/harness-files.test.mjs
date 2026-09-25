@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { editJsonSection, editZedContextServer, stripJsonc } from "../lib/harness-files.mjs";
+import { editJsonSection } from "../lib/harness-files.mjs";
 
 const dir = mkdtempSync(join(tmpdir(), "ai-usage-harness-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
@@ -30,36 +30,4 @@ test("editJsonSection creates a missing file and refuses files with comments", (
   writeFileSync(commented, '{\n  // keep me\n  "a": 1\n}\n');
   assert.match(editJsonSection(commented, "mcp", "ai-usage", entry).manual, /has comments/);
   assert.match(readFileSync(commented, "utf8"), /keep me/);
-});
-
-test("editZedContextServer inserts into commented JSONC with matching indentation and removes cleanly", () => {
-  const file = join(dir, "zed.json");
-  const original = [
-    "// Zed settings",
-    "{",
-    "    // servers",
-    '    "context_servers": {',
-    '        "other": {',
-    '            "enabled": true,',
-    "        },",
-    "    },",
-    '    "theme": "One Dark", // trailing comment',
-    "}",
-    "",
-  ].join("\n");
-  writeFileSync(file, original);
-  assert.deepEqual(editZedContextServer(file, "ai-usage", { ...entry, env: {} }), { changed: true });
-  const text = readFileSync(file, "utf8");
-  assert.match(text, /^ {8}"ai-usage": \{\n {12}"command": "\/bin\/ai-usage",\n {12}"args": \["mcp"\],\n {12}"env": \{\}\n {8}\},\n {8}"other"/m);
-  assert.match(text, /trailing comment/);
-  assert.deepEqual(Object.keys(JSON.parse(stripJsonc(text)).context_servers), ["ai-usage", "other"]);
-  assert.deepEqual(editZedContextServer(file, "ai-usage", entry), { changed: false });
-  assert.deepEqual(editZedContextServer(file, "ai-usage", entry, { remove: true }), { changed: true });
-  assert.equal(readFileSync(file, "utf8"), original);
-});
-
-test("editZedContextServer asks for a manual edit when there is no single anchor", () => {
-  const file = join(dir, "zed-empty.json");
-  writeFileSync(file, '{\n  "theme": "One Dark"\n}\n');
-  assert.match(editZedContextServer(file, "ai-usage", entry).manual, /by hand/);
 });

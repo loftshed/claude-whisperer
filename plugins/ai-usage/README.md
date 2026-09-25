@@ -70,9 +70,9 @@ codex plugin add ai-usage@claude-whisperer
 
 The ai-usage skill tells agents when to check quota and how to act on it. Claude Code and Codex get it from the plugin, Gemini CLI reads `~/.agents/skills`, and agy and OpenCode get links to that directory. agy can import Claude plugins but leaves `${CLAUDE_PLUGIN_ROOT}` unexpanded, so it uses the link and `mcp-install` instead.
 
-`mcp-install` registers the server in every harness it finds: Codex (CLI and desktop app share a config), agy, Gemini CLI, VS Code, OpenCode, Claude Desktop and Zed, plus any Claude Code profile without the plugin enabled (profiles with it are skipped so tools do not appear twice). Harnesses with an `mcp add` command are driven through it; OpenCode, Claude Desktop and Zed get a config-file edit that backs the file up to `<file>.bak-ai-usage`, re-parses the result, and leaves JSONC comments intact. It is safe to re-run. Without the plugin, `./install.sh --mcp` does the same including Claude Code.
+`mcp-install` registers the server in Codex (CLI and desktop app share a config), agy, Gemini CLI and OpenCode (an agent-executor engine), plus any Claude Code profile without the plugin enabled (profiles with it are skipped so tools do not appear twice). Harnesses with an `mcp add` command are driven through it; OpenCode gets a config-file edit that backs the file up to `<file>.bak-ai-usage` and re-parses the result. It is safe to re-run. Without the plugin, `./install.sh --mcp` does the same including Claude Code.
 
-Two harness quirks: Gemini CLI disables every MCP server in folders it does not trust, and Claude Desktop only loads servers at launch.
+Gemini CLI disables every MCP server in folders it does not trust.
 
 No config is needed: without `~/.config/ai-usage/config.json`, ai-usage monitors what it detects (`~/.claude`, every `~/.claude-<name>` profile directory, `codex`, `agy`). `ai-usage init` writes that detection to the config file so you can edit labels, short names and routes; `--dry-run` shows it first.
 
@@ -90,7 +90,7 @@ ai-usage line              one line for tmux or a status line: "CW 0 · CP 89 ·
 ai-usage recommend         ranked pools [--family claude|gpt|gemini] [--json]
 ai-usage mcp               MCP server on stdio
 ai-usage init              detect accounts and write the config
-ai-usage mcp-install       register the MCP server in every harness found (mcp-uninstall to remove)
+ai-usage mcp-install       register the MCP server in Claude, Codex, agy, Gemini CLI, OpenCode (mcp-uninstall removes)
 ```
 
 `-r/--refresh` bypasses the cache; `--max-age <s>` sets how old cached data may be.

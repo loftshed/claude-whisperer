@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { childEnv, expandHome, resolveBinary, run } from "./exec.mjs";
-import { editJsonSection, editZedContextServer } from "./harness-files.mjs";
+import { editJsonSection } from "./harness-files.mjs";
 
 const NAME = "ai-usage";
 
@@ -24,9 +24,9 @@ function binary(name, override) {
 }
 
 /**
- * Every agent harness on this machine that can call the MCP server: each Claude Code profile, then any
- * installed Codex, agy, Gemini CLI, OpenCode, VS Code, Claude Desktop and Zed. CLIs with an `mcp add`
- * command are driven through it; the rest get a guarded config-file edit.
+ * The agent harnesses on this machine that can call the MCP server: each Claude Code profile, then any
+ * installed Codex, agy, Gemini CLI and OpenCode. CLIs with an `mcp add` command are driven through it;
+ * OpenCode gets a guarded config-file edit.
  */
 export function registrationPlan(config, launcher, { remove = false, skipClaude = false, home = homedir() } = {}) {
   const plan = [];
@@ -58,31 +58,12 @@ export function registrationPlan(config, launcher, { remove = false, skipClaude 
   cli("Antigravity (agy)", binary("agy"), remove ? ["mcp", "remove", NAME] : ["mcp", "add", NAME, launcher, "mcp"]);
   cli("Gemini CLI", binary("gemini"), remove ? ["mcp", "remove", "-s", "user", NAME] : ["mcp", "add", "-s", "user", NAME, launcher, "mcp"]);
 
-  const code = binary("code");
-  if (code) {
-    if (remove) {
-      file("VS Code", () => ({ changed: false, manual: `remove "${NAME}" from VS Code's user mcp.json (MCP: Open User Configuration)` }));
-    } else {
-      cli("VS Code", code, ["--add-mcp", JSON.stringify({ name: NAME, type: "stdio", command: launcher, args: ["mcp"] })]);
-    }
-  }
-
+  // OpenCode is one of agent-executor's execution engines, so its delegated runs can check quota too.
   const opencodeDir = join(home, ".config", "opencode");
   if (binary("opencode") || existsSync(opencodeDir)) {
     const jsonc = join(opencodeDir, "opencode.jsonc");
     const target = existsSync(jsonc) ? jsonc : join(opencodeDir, "opencode.json");
     file("OpenCode", () => editJsonSection(target, "mcp", NAME, { type: "local", command: [launcher, "mcp"], enabled: true }, { remove }));
-  }
-
-  const claudeDesktop = join(home, "Library", "Application Support", "Claude");
-  if (existsSync(claudeDesktop)) {
-    const target = join(claudeDesktop, "claude_desktop_config.json");
-    file("Claude Desktop (restart it to load)", () => editJsonSection(target, "mcpServers", NAME, { command: launcher, args: ["mcp"] }, { remove }));
-  }
-
-  const zed = join(home, ".config", "zed", "settings.json");
-  if (existsSync(zed)) {
-    file("Zed", () => editZedContextServer(zed, NAME, { command: launcher, args: ["mcp"], env: {} }, { remove }));
   }
   return plan;
 }

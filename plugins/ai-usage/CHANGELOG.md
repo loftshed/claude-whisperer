@@ -15,9 +15,8 @@ First release.
 - MCP server with `get_usage` and `recommend`.
 - macOS menu bar app (AppKit, no dependencies) with a login LaunchAgent; `--dump-menu` for text checks.
 - `install.sh` / `uninstall.sh`.
-- `mcp-install` covers every harness found: Claude Code profiles (skipped where the plugin is enabled),
-  Codex, agy, Gemini CLI, VS Code, OpenCode, Claude Desktop and Zed, with backed-up, re-parsed
-  config edits where no CLI exists.
+- `mcp-install` covers Claude Code profiles (skipped where the plugin is enabled), Codex, agy,
+  Gemini CLI and OpenCode, with a backed-up, re-parsed config edit where no CLI exists.
 - `install.sh` links the skill into `~/.agents/skills` and on to agy and OpenCode.
 - Packaged as a claude-whisperer plugin: bundled MCP server (`.mcp.json`) and an `ai-usage` skill with
   quota-aware routing rules. Without a config file, accounts are auto-detected.

@@ -20,8 +20,8 @@ Usage:
   ai-usage mcp               run as an MCP server on stdio
   ai-usage init              detect this machine's accounts and write the config [--force] [--dry-run]
   ai-usage config            show config and cache locations
-  ai-usage mcp-install       register the MCP server in every harness found (Claude Code profiles,
-                             Codex, agy, Gemini CLI, VS Code, OpenCode, Claude Desktop, Zed)
+  ai-usage mcp-install       register the MCP server in Claude Code profiles, Codex, agy,
+                             Gemini CLI and OpenCode
                              [--dry-run] [--command <launcher path>]
                              [--skip-claude] when Claude Code gets it from the ai-usage plugin
   ai-usage mcp-uninstall     remove those registrations
