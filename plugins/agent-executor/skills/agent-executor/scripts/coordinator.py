@@ -565,7 +565,7 @@ def main(argv: list[str] | None = None) -> int:
             registry = read(Path(__file__).parent.parent / "references/profiles.json")
             packet = read(args.packet)
             if packet.get("access") == "live":
-                packet["access"] = QUOTA.access_records(QUOTA.snapshot(), registry)
+                packet["access"] = QUOTA.access_records(QUOTA.snapshot(), registry, packet.get("host"))
             output = POLICY.recommend(packet, registry)
         elif args.action == "init":
             output = initialize(args)

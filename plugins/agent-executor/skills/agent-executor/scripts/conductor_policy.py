@@ -126,11 +126,16 @@ def recommend(packet: dict[str, Any], registry: dict[str, Any]) -> dict[str, Any
                 "quota": observed.get("quota")})
     quota_known = any(candidate["quota"] for candidate in candidates)
     if quota_known:
-        # Pools with room first (a run started in a nearly empty pool tends to stall), then by unused
-        # capacity. This orders otherwise-suitable candidates; it says nothing about quality.
-        candidates.sort(key=lambda candidate: ((candidate["quota"] or {}).get("status") == "low",
-                                               -((candidate["quota"] or {}).get("surplusPts") or 0)))
-    ranking = ("Ordered by quota: pools with room first, then unused capacity (surplusPts); not quality; " if quota_known
+        # Pools with room first (a run started in a nearly empty pool tends to stall); then pools near their
+        # weekly rollover with capacity left (lost unless spent); then the host's own models (native first);
+        # then unused capacity. This orders otherwise-suitable candidates; it says nothing about quality.
+        def quota_order(candidate: dict[str, Any]) -> tuple:
+            quota = candidate["quota"] or {}
+            return (quota.get("status") == "low", not quota.get("expiring"), not candidate["native"],
+                    -(quota.get("surplusPts") or 0))
+        candidates.sort(key=quota_order)
+    ranking = ("Ordered by quota: pools with room first, then expiring (use it or lose it), then native, then unused "
+               "capacity (surplusPts); not quality; " if quota_known
                else "No empirical model ranking; ") + "use task/context value gate before handoff."
     return {"status": "provisional_candidates", "role": role, "candidates": candidates,
             "selection_owner": "conductor", "ranking": ranking}

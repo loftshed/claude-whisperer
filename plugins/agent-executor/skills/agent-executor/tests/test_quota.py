@@ -100,7 +100,7 @@ class RecommendTests(unittest.TestCase):
     ]}
 
     def recommend(self, **packet: object) -> list[tuple[str, str]]:
-        records = QUOTA.access_records(view(), self.registry)
+        records = QUOTA.access_records(view(), self.registry, "claude")
         result = POLICY.recommend({"role": "implementation", "host": "claude", "access": records, **packet}, self.registry)
         return [(candidate["model"], candidate["access_source"]) for candidate in result["candidates"]]
 
@@ -148,6 +148,35 @@ class RunnerGateTests(unittest.TestCase):
     def test_gate_lets_runs_through_when_quota_is_unknown(self) -> None:
         with mock.patch.dict(os.environ, {"AI_USAGE_BIN": "/nonexistent/ai-usage"}):
             RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=False)
+
+
+class DispatchableRecommendTests(unittest.TestCase):
+    registry = {"profiles": [
+        {"id": "luna", "model_ids": ["gpt-5.6-luna"], "roles": ["implementation"], "effort_candidate": "medium", "prompt_adjustment": ""},
+        {"id": "flash", "model_ids": ["gemini-3.8-flash-medium"], "roles": ["implementation"], "effort_candidate": "medium", "prompt_adjustment": ""},
+        {"id": "sonnet", "model_ids": ["claude-sonnet-5"], "roles": ["implementation"], "effort_candidate": "high", "prompt_adjustment": ""},
+    ]}
+
+    def ranked(self, host: str, current: dict, **packet: object) -> list[str]:
+        records = QUOTA.access_records(current, self.registry, host)
+        result = POLICY.recommend({"role": "implementation", "host": host, "access": records, **packet}, self.registry)
+        return [candidate["model"] for candidate in result["candidates"]]
+
+    def test_a_codex_host_is_never_offered_claude_it_cannot_dispatch(self) -> None:
+        roomy = view()
+        roomy["lanes"][3] = lane("antigravity", "gemini", "Antigravity · Gemini", usable=60, surplus=2)
+        self.assertNotIn("claude-sonnet-5", self.ranked("codex", roomy, personal_quota_authorized=True))
+        self.assertIn("claude-sonnet-5", self.ranked("claude", roomy, personal_quota_authorized=True))
+
+    def test_expiring_pools_come_first_then_native(self) -> None:
+        current = view()
+        current["lanes"][3] = {**lane("antigravity", "gemini", "Antigravity · Gemini", usable=60, surplus=2),
+                               "expiring": True, "expiresAt": "2026-09-26T00:44:52.000Z", "burnPctPerHour": 7.5}
+        # Gemini is expiring: first even though Codex is native to a Codex host and has more surplus.
+        self.assertEqual(self.ranked("codex", current), ["gemini-3.8-flash-medium", "gpt-5.6-luna"])
+        current["lanes"][3]["expiring"] = False
+        # Nothing expiring: the host's own model (native) comes first.
+        self.assertEqual(self.ranked("codex", current), ["gpt-5.6-luna", "gemini-3.8-flash-medium"])
 
 
 if __name__ == "__main__":

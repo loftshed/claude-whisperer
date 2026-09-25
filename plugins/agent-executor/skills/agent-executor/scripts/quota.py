@@ -120,7 +120,8 @@ def check(engine: str, model: str, view: dict[str, Any] | None) -> dict[str, Any
 
 
 def summary(lane: dict[str, Any]) -> dict[str, Any]:
-    keys = ("label", "accountId", "poolId", "billing", "availableNowPct", "weeklyRemainingPct", "surplusPts", "blockedUntil", "advice", "stale")
+    keys = ("label", "accountId", "poolId", "billing", "availableNowPct", "weeklyRemainingPct", "surplusPts", "blockedUntil",
+            "expiring", "expiresAt", "burnPctPerHour", "advice", "stale")
     return {key: lane.get(key) for key in keys}
 
 
@@ -159,10 +160,15 @@ def blocked_message(engine: str, model: str, result: dict[str, Any], view: dict[
     return text + " Pass --ignore-quota only when the user asks to launch anyway."
 
 
-def access_records(view: dict[str, Any] | None, registry: dict[str, Any]) -> list[dict[str, Any]]:
+# Engines the runner can dispatch to from any host. Claude is reachable only natively, from a Claude host.
+DISPATCHABLE = ("codex", "agy")
+
+
+def access_records(view: dict[str, Any] | None, registry: dict[str, Any], host: str | None = None) -> list[dict[str, Any]]:
     """Observed-access records for conductor_policy.recommend(), built from live quota.
 
-    One record per profile model and account. Personal accounts are marked personal_subscription so
+    One record per profile model and account, for routes this host can actually use: the runner's
+    engines plus the host's own models. Personal accounts are marked personal_subscription so
     recommend() keeps excluding them unless the packet authorizes personal quota.
     """
     observed_at = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -170,7 +176,7 @@ def access_records(view: dict[str, Any] | None, registry: dict[str, Any]) -> lis
     for profile in registry.get("profiles", []):
         for model in profile.get("model_ids", []):
             engine = "codex" if model.startswith("gpt") else "agy" if model.startswith("gemini") else "claude" if model.startswith("claude") else None
-            if engine is None:
+            if engine is None or (engine not in DISPATCHABLE and engine != host):
                 continue
             lanes = pool_lanes(engine, model, view) if view is not None else []
             if not lanes:
