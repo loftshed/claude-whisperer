@@ -147,12 +147,48 @@ export function pills(account, now = Date.now()) {
   });
 }
 
-/** Text form of the pills: "100|59" per pool, 5-hour first; a lone number is weekly-only. */
-export function pillText(account, now = Date.now()) {
-  const list = pills(account, now);
-  if (list.length === 0) return "?";
-  const n = (g) => String(Math.floor(g.pct));
-  return list.map((p) => `${p.tag ?? ""}${[p.short, p.weekly].filter(Boolean).map(n).join("|")}`).join(" ");
+/** Short name for a window length: "5h", "wk", "1d", "30d". Unknown lengths are "limit". */
+export function durationLabel(mins) {
+  if (!Number.isFinite(mins) || mins <= 0) return "limit";
+  if (mins === 10080) return "wk";
+  if (mins % 1440 === 0) return `${mins / 1440}d`;
+  if (mins % 60 === 0) return `${mins / 60}h`;
+  return `${mins}m`;
+}
+
+/**
+ * Every independent pool's windows grouped by window length, shortest first: e.g. a "5h" section and a "wk"
+ * section. Whatever cycles a provider uses become their own sections, so nothing assumes Claude's 5 hours.
+ */
+export function sections(accounts, now = Date.now()) {
+  const byLength = new Map();
+  const unavailable = [];
+  for (const account of accounts) {
+    if (!account.windows?.length) {
+      unavailable.push({ accountId: account.id, label: account.short, error: account.error ?? "no data" });
+      continue;
+    }
+    const windows = new Map(effectiveWindows(account, now).map((w) => [w.id, w]));
+    const pools = independentPools(account);
+    for (const pool of pools) {
+      for (const w of pool.windowIds.map((id) => windows.get(id)).filter(Boolean)) {
+        const key = w.windowMins ?? 0;
+        if (!byLength.has(key)) byLength.set(key, { windowMins: w.windowMins ?? null, label: durationLabel(w.windowMins), entries: [] });
+        byLength.get(key).entries.push({
+          accountId: account.id,
+          pool: pool.id,
+          label: account.short,
+          tag: pools.length > 1 ? pool.label.charAt(0).toUpperCase() : null,
+          pct: w.remainingPct,
+          level: level(w.remainingPct),
+          resetsAt: w.resetsAt ?? null,
+          stale: account.ok === false,
+        });
+      }
+    }
+  }
+  const list = [...byLength.values()].sort((a, b) => (a.windowMins ?? Infinity) - (b.windowMins ?? Infinity));
+  return { sections: list, unavailable };
 }
 
 /** Compact per-account figure for status bars: how much can be used right now, per independent pool. */

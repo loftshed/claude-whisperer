@@ -5,7 +5,7 @@ How much subscription quota is left on every AI account on this machine, and whe
 It reads the rate-limit windows of each account (Claude Code, Codex/ChatGPT, Antigravity/Gemini), keeps them in a shared cache, and shows them three ways:
 
 - **CLI / TUI**: `ai-usage` for a table, `ai-usage watch` for a live full-screen view.
-- **macOS menu bar app**: one pill per account and pool, `CW [100│0]  CP [56│83]  CX [49]  AG [G 81│4] [C 100│27]`: 5-hour on the left, weekly on the right, each tinted by how much is left. A single number is a weekly-only limit (Codex). Antigravity has two pools, Gemini (G) and Claude & GPT-OSS (C). Details and a ranking are in the dropdown.
+- **macOS menu bar app**: % left grouped by limit window, one box per window length: `[5H  CW 100  CP 53  AG·G 76  AG·C 100]  [WK  CW 0  CP 82  CX 49  AG·G 3  AG·C 27]`. Sections come from each window's actual length, so a provider on another cycle gets its own box (`3H`, `1D`). Codex has no 5-hour limit, so it appears only under WK. Antigravity has two pools, Gemini (G) and Claude & GPT-OSS (C). Numbers are coloured by how much is left; details and a ranking are in the dropdown.
 - **MCP server**: `get_usage` and `recommend` tools, so agents can check quota before choosing where to run work.
 
 ```
@@ -86,7 +86,7 @@ No config is needed: without `~/.config/ai-usage/config.json`, ai-usage monitors
 ai-usage [show]            table of every window plus where to spend next
 ai-usage watch             live view (r = refresh now, q = quit)
 ai-usage json              machine-readable snapshot, schema "ai-usage.snapshot.v1"
-ai-usage line              one line for tmux or a status line: "CW 100|0 · CP 56|83 · CX 49 · AG G81|4 C100|27"
+ai-usage line              one line for tmux or a status line: "5h CW 100 · CP 53 · … | wk CW 0 · CP 82 · CX 49 · …"
 ai-usage recommend         ranked pools [--family claude|gpt|gemini] [--json]
 ai-usage mcp               MCP server on stdio
 ai-usage init              detect accounts and write the config

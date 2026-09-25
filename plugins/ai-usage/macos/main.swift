@@ -130,101 +130,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pct <= 0.5 ? "out" : pct < 20 ? "low" : pct < 50 ? "mid" : "ok"
     }
 
-    // MARK: - Menu bar pills
+    // MARK: - Menu bar sections
 
-    private struct Segment { let text: String; let level: String }
-    private struct Pill { let tag: String?; let segments: [Segment] }
-    private struct Group { let label: String; let pills: [Pill]; let failed: Bool }
+    private struct Entry { let label: String; let tag: String?; let value: String; let level: String; let stale: Bool }
+    private struct Section { let header: String; let entries: [Entry] }
+    private typealias BarModel = (sections: [Section], unavailable: [String])
 
-    private let pillLabelFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
-    private let pillNumberFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
-    private let pillTagFont = NSFont.systemFont(ofSize: 9, weight: .heavy)
+    private let barHeaderFont = NSFont.systemFont(ofSize: 9, weight: .heavy)
+    private let barLabelFont = NSFont.systemFont(ofSize: 10.5, weight: .medium)
+    private let barTagFont = NSFont.systemFont(ofSize: 8, weight: .bold)
+    private let barNumberFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .semibold)
 
-    private func groups() -> [Group] {
-        accounts.map { account in
-            let pills = (account["pills"] as? [[String: Any]] ?? []).map { pill -> Pill in
-                let segments = ["short", "weekly"].compactMap { key -> Segment? in
-                    guard let gauge = pill[key] as? [String: Any], let pct = gauge["pct"] as? Double else { return nil }
-                    return Segment(text: String(Int(pct.rounded(.down))), level: gauge["level"] as? String ?? level(for: pct))
-                }
-                return Pill(tag: pill["tag"] as? String, segments: segments)
+    /// `ai-usage json` sections: one per limit window length ("5h", "wk", …), plus accounts with no data.
+    private func barModel() -> BarModel {
+        let sections = (snapshot?["sections"] as? [[String: Any]] ?? []).map { section -> Section in
+            let entries = (section["entries"] as? [[String: Any]] ?? []).map { entry -> Entry in
+                let pct = entry["pct"] as? Double ?? 0
+                return Entry(label: entry["label"] as? String ?? "?", tag: entry["tag"] as? String,
+                             value: String(Int(pct.rounded(.down))), level: entry["level"] as? String ?? level(for: pct),
+                             stale: (entry["stale"] as? Bool) == true)
             }
-            return Group(label: account["short"] as? String ?? "?", pills: pills, failed: (account["ok"] as? Bool) == false)
+            return Section(header: (section["label"] as? String ?? "?").uppercased(), entries: entries)
         }
+        let unavailable = (snapshot?["unavailable"] as? [[String: Any]] ?? []).map { $0["label"] as? String ?? "?" }
+        return (sections, unavailable)
     }
 
     private func width(_ text: String, _ font: NSFont) -> CGFloat {
         ceil(NSAttributedString(string: text, attributes: [.font: font]).size().width)
     }
 
-    /// Draws each account as its label followed by one capsule per pool: 5-hour | weekly % left.
-    private func pillImage(_ groups: [Group]) -> NSImage {
-        let height: CGFloat = 22, pillHeight: CGFloat = 16, pad: CGFloat = 4, groupGap: CGFloat = 8
-        let labelGap: CGFloat = 4, pillGap: CGFloat = 3, tagWidth: CGFloat = 11
-        func pillWidth(_ pill: Pill) -> CGFloat {
-            let segs = pill.segments.isEmpty ? [Segment(text: "?", level: "error")] : pill.segments
-            return (pill.tag == nil ? 0 : tagWidth) + segs.reduce(0) { $0 + width($1.text, pillNumberFont) + 2 * pad }
+    /// One rounded box per limit window length, headed "5H", "WK", …, holding each account's % left.
+    private func barImage(_ model: BarModel) -> NSImage {
+        let height: CGFloat = 22, boxHeight: CGFloat = 18, inset: CGFloat = 5, headerGap: CGFloat = 5
+        let entryGap: CGFloat = 6, labelGap: CGFloat = 2, sectionGap: CGFloat = 4
+        func entryWidth(_ entry: Entry) -> CGFloat {
+            width(entry.label, barLabelFont) + (entry.tag.map { width($0, barTagFont) + 1 } ?? 0) + labelGap
+                + width(entry.value, barNumberFont) + (entry.stale ? width("!", barNumberFont) : 0)
         }
-        var total: CGFloat = 0
-        for (i, group) in groups.enumerated() {
-            total += (i > 0 ? groupGap : 0) + width(group.label, pillLabelFont) + labelGap
-            total += group.pills.map(pillWidth).reduce(0, +) + CGFloat(max(0, group.pills.count - 1)) * pillGap
-            if group.pills.isEmpty { total += width("?", pillNumberFont) }
-            if group.failed { total += width("!", pillNumberFont) + 1 }
+        func sectionWidth(_ section: Section) -> CGFloat {
+            2 * inset + width(section.header, barHeaderFont) + headerGap
+                + section.entries.map(entryWidth).reduce(0, +) + CGFloat(max(0, section.entries.count - 1)) * entryGap
         }
+        let unavailableText = model.unavailable.map { "\($0) ?" }.joined(separator: "  ")
+        var total = model.sections.map(sectionWidth).reduce(0, +) + CGFloat(max(0, model.sections.count - 1)) * sectionGap
+        if !unavailableText.isEmpty { total += (total > 0 ? sectionGap : 0) + width(unavailableText, barLabelFont) }
+
         let image = NSImage(size: NSSize(width: max(total, 1), height: height), flipped: false) { [self] _ in
-            var x: CGFloat = 0
-            let pillY = (height - pillHeight) / 2
-            func text(_ s: String, _ font: NSFont, _ color: NSColor, at px: CGFloat, width w: CGFloat) {
-                let attr = NSAttributedString(string: s, attributes: [.font: font, .foregroundColor: color])
-                let size = attr.size()
-                attr.draw(at: NSPoint(x: px + (w - size.width) / 2, y: (height - size.height) / 2))
+            @discardableResult
+            func draw(_ string: String, _ font: NSFont, _ color: NSColor, at x: CGFloat, raise: CGFloat = 0) -> CGFloat {
+                let text = NSAttributedString(string: string, attributes: [.font: font, .foregroundColor: color])
+                let size = text.size()
+                text.draw(at: NSPoint(x: x, y: (height - size.height) / 2 + raise))
+                return ceil(size.width)
             }
-            for (i, group) in groups.enumerated() {
-                if i > 0 { x += groupGap }
-                let lw = width(group.label, pillLabelFont)
-                text(group.label, pillLabelFont, .labelColor, at: x, width: lw)
-                x += lw + labelGap
-                if group.pills.isEmpty {
-                    let w = width("?", pillNumberFont)
-                    text("?", pillNumberFont, .systemRed, at: x, width: w)
-                    x += w
+            var x: CGFloat = 0
+            for (i, section) in model.sections.enumerated() {
+                if i > 0 { x += sectionGap }
+                let boxWidth = sectionWidth(section)
+                let box = NSRect(x: x, y: (height - boxHeight) / 2, width: boxWidth, height: boxHeight)
+                NSColor.labelColor.withAlphaComponent(0.13).setFill()
+                NSBezierPath(roundedRect: box, xRadius: 5, yRadius: 5).fill()
+                var cx = x + inset
+                // Not secondaryLabelColor: inside an image it gets no vibrancy and vanishes over the translucent bar.
+                cx += draw(section.header, barHeaderFont, NSColor.labelColor.withAlphaComponent(0.75), at: cx) + headerGap
+                for (j, entry) in section.entries.enumerated() {
+                    if j > 0 { cx += entryGap }
+                    cx += draw(entry.label, barLabelFont, .labelColor, at: cx)
+                    if let tag = entry.tag { cx += 1 + draw(tag, barTagFont, NSColor.labelColor.withAlphaComponent(0.75), at: cx + 1, raise: -2) }
+                    cx += labelGap
+                    cx += draw(entry.value, barNumberFont, levelText(color(for: entry.level)), at: cx)
+                    if entry.stale { cx += draw("!", barNumberFont, .systemRed, at: cx) }
                 }
-                for (j, pill) in group.pills.enumerated() {
-                    if j > 0 { x += pillGap }
-                    let pw = pillWidth(pill)
-                    let capsule = NSBezierPath(roundedRect: NSRect(x: x, y: pillY, width: pw, height: pillHeight), xRadius: pillHeight / 2, yRadius: pillHeight / 2)
-                    NSGraphicsContext.saveGraphicsState()
-                    capsule.addClip()
-                    NSColor.labelColor.withAlphaComponent(0.08).setFill()
-                    capsule.fill()
-                    var sx = x
-                    if let tag = pill.tag {
-                        text(tag, pillTagFont, .secondaryLabelColor, at: sx + 2, width: tagWidth - 2)
-                        sx += tagWidth
-                    }
-                    let segments = pill.segments.isEmpty ? [Segment(text: "?", level: "error")] : pill.segments
-                    for (k, seg) in segments.enumerated() {
-                        let sw = width(seg.text, pillNumberFont) + 2 * pad
-                        let tint = color(for: seg.level)
-                        tint.withAlphaComponent(0.24).setFill()
-                        NSRect(x: sx, y: pillY, width: sw, height: pillHeight).fill()
-                        if k > 0 {
-                            NSColor.labelColor.withAlphaComponent(0.35).setFill()
-                            NSRect(x: sx - 0.5, y: pillY + 3, width: 1, height: pillHeight - 6).fill()
-                        }
-                        text(seg.text, pillNumberFont, pillText(tint), at: sx, width: sw)
-                        sx += sw
-                    }
-                    NSGraphicsContext.restoreGraphicsState()
-                    x += pw
-                }
-                if group.failed {
-                    x += 1
-                    let w = width("!", pillNumberFont)
-                    text("!", pillNumberFont, .systemRed, at: x, width: w)
-                    x += w
-                }
+                x += boxWidth
+            }
+            if !unavailableText.isEmpty {
+                if x > 0 { x += sectionGap }
+                draw(unavailableText, barLabelFont, .systemRed, at: x)
             }
             return true
         }
@@ -232,19 +214,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return image
     }
 
-    /// Level colour for pill numbers, darkened in light mode where bright green on a pale tint is hard to read.
-    private func pillText(_ tint: NSColor) -> NSColor {
+    /// Level colour for numbers, darkened in light mode where bright green is hard to read.
+    private func levelText(_ tint: NSColor) -> NSColor {
         NSColor(name: nil) { appearance in
             let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             return dark ? tint : (tint.usingColorSpace(.deviceRGB)?.blended(withFraction: 0.4, of: .black) ?? tint)
         }
     }
 
-    private func pillSummary(_ groups: [Group]) -> String {
-        groups.map { group in
-            let pills = group.pills.map { ($0.tag ?? "") + $0.segments.map(\.text).joined(separator: "|") }
-            return "\(group.label) \(pills.isEmpty ? "?" : pills.joined(separator: " "))\(group.failed ? "!" : "")"
-        }.joined(separator: "  ")
+    private func barSummary(_ model: BarModel) -> String {
+        var parts = model.sections.map { section -> String in
+            let entries = section.entries.map { entry -> String in
+                let label = entry.tag.map { tag in "\(entry.label)·\(tag)" } ?? entry.label
+                return "\(label) \(entry.value)\(entry.stale ? "!" : "")"
+            }
+            return "\(section.header) " + entries.joined(separator: " · ")
+        }
+        if !model.unavailable.isEmpty { parts.append(model.unavailable.map { "\($0) ?" }.joined(separator: " · ")) }
+        return parts.joined(separator: " | ")
     }
 
     private func updateTitle() {
@@ -254,12 +241,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.attributedTitle = NSAttributedString(string: lastError == nil ? "AI …" : "AI ⚠", attributes: [.font: titleFont])
             return
         }
-        let groups = groups()
+        let model = barModel()
         button.attributedTitle = NSAttributedString(string: "")
-        button.image = pillImage(groups)
+        button.image = barImage(model)
         button.imagePosition = .imageOnly
-        button.setAccessibilityLabel("AI usage: " + pillSummary(groups))
-        button.toolTip = "Each pill: 5-hour | weekly % left (a single number is weekly only).\nAntigravity: G = Gemini pool, C = Claude & GPT-OSS pool."
+        button.setAccessibilityLabel("AI usage, % left: " + barSummary(model))
+        button.toolTip = "% left, grouped by limit window: 5H = 5-hour, WK = weekly.\nAntigravity pools: G = Gemini, C = Claude & GPT-OSS. ! = last refresh failed."
     }
 
     /// `AIUsageBar --render-title <png> [--light]`: draw the menu bar pills to a PNG for checking.
@@ -267,7 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if case .success(let data) = AppDelegate.run(command, ["json"]) {
             snapshot = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         }
-        let image = pillImage(groups())
+        let image = barImage(barModel())
         let scale: CGFloat = 2
         let appearance = NSAppearance(named: light ? .aqua : .darkAqua)!
         guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(image.size.width * scale), pixelsHigh: Int(image.size.height * scale),
@@ -282,7 +269,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSGraphicsContext.restoreGraphicsState()
         }
         try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
-        print("TITLE: " + pillSummary(groups()))
+        print("TITLE: " + barSummary(barModel()))
     }
 
     private func pad(_ s: String, _ n: Int) -> String {
@@ -339,7 +326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             status = "Updated \(clock(date))"
         }
         menu.addItem(infoItem(text("AI usage · \(status)", monoBold, .secondaryLabelColor)))
-        menu.addItem(infoItem(text("Pills: 5-hour | weekly % left · G = Gemini, C = Claude & GPT-OSS", mono, .tertiaryLabelColor)))
+        menu.addItem(infoItem(text("Menu bar: % left grouped by limit window (5H, WK) · G = Gemini, C = Claude & GPT-OSS", mono, .tertiaryLabelColor)))
         if let lastError {
             menu.addItem(infoItem(text("⚠ \(lastError.prefix(120))", mono, .systemRed)))
         }
@@ -439,7 +426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         updateTitle()
         rebuildMenu()
-        print("TITLE: " + pillSummary(groups()))
+        print("TITLE: " + barSummary(barModel()))
         for item in menu.items { print(item.isSeparatorItem ? "────" : item.title) }
     }
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { buildLanes, headline, pills, pillText } from "../lib/analyze.mjs";
+import { buildLanes, durationLabel, headline, pills, sections } from "../lib/analyze.mjs";
 import { parseAntigravityUsage } from "../lib/providers/antigravity.mjs";
 import { parseClaudeUsage } from "../lib/providers/claude.mjs";
 import { parseCodexRateLimits } from "../lib/providers/codex.mjs";
@@ -119,7 +119,23 @@ test("pills show the short and weekly window separately, one pill per independen
   assert.deepEqual(shape(personal), [[null, 57, 89]], "weekly is the all-models limit; the Fable cap stays in the details");
   assert.deepEqual(shape(codex), [[null, null, 52]], "Codex has only a weekly window");
   assert.deepEqual(shape(ag), [["G", 100, 6], ["C", 100, 27]]);
-  assert.deepEqual([work, personal, codex, ag].map((a) => pillText(a, NOW)), ["100|0", "57|89", "52", "G100|6 C100|27"]);
+});
+
+test("sections group every pool's windows by window length, shortest first", () => {
+  const [work, personal, ag] = sampleAccounts();
+  const codex = { id: "codex", short: "CX", provider: "codex", ok: true, ...parseCodexRateLimits({ rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 48, windowDurationMins: 10080, resetsAt: 1790779510 } } } }) };
+  // A provider on a different cycle gets its own section rather than being forced into "5h".
+  const daily = { id: "other", short: "OT", provider: "codex", ok: false, ...parseCodexRateLimits({ rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 10, windowDurationMins: 1440, resetsAt: 1790400000 } } } }) };
+  const accounts = [{ ...work, short: "CW" }, { ...personal, short: "CP" }, codex, { ...ag, short: "AG" }, daily, { id: "gone", short: "GN", ok: false, error: "boom" }];
+  const { sections: list, unavailable } = sections(accounts, NOW);
+  const shape = list.map((s) => [s.label, s.entries.map((e) => `${e.label}${e.tag ? "·" + e.tag : ""} ${Math.floor(e.pct)}${e.stale ? "!" : ""}`)]);
+  assert.deepEqual(shape, [
+    ["5h", ["CW 100", "CP 57", "AG·G 100", "AG·C 100"]],
+    ["1d", ["OT 90!"]],
+    ["wk", ["CW 0", "CP 89", "CX 52", "AG·G 6", "AG·C 27"]],
+  ]);
+  assert.deepEqual(unavailable, [{ accountId: "gone", label: "GN", error: "boom" }]);
+  assert.deepEqual([300, 10080, 1440, 180, 43200, 90, undefined].map(durationLabel), ["5h", "wk", "1d", "3h", "30d", "90m", "limit"]);
 });
 
 test("jsonView exposes ISO reset times and minutes until reset", () => {

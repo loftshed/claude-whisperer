@@ -3,6 +3,13 @@
 All notable changes to this project. Versions follow [semver](https://semver.org); the `ai-usage json`
 schema (`ai-usage.snapshot.v1`) changes its suffix on any breaking change to its shape.
 
+## 0.4.0 (2026-09-25)
+
+- Menu bar groups limits by window length instead of per-account pills: a `5H` box and a `WK` box side
+  by side, each listing every account's % left. Sections are derived from each window's real duration, so
+  other cycles get their own box (`3H`, `1D`, …). `ai-usage line` uses the same grouping, and
+  `ai-usage json` adds top-level `sections` and `unavailable`.
+
 ## 0.3.0 (2026-09-25)
 
 - Menu bar pills: one per account and pool, 5-hour and weekly % left side by side, tinted by level; Codex

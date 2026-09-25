@@ -1,4 +1,4 @@
-import { buildLanes, effectiveWindows, headline, level, pills, pillText } from "./analyze.mjs";
+import { buildLanes, effectiveWindows, headline, level, pills, sections } from "./analyze.mjs";
 import { formatClock, formatDuration } from "./time.mjs";
 import { SNAPSHOT_SCHEMA, VERSION } from "./version.mjs";
 
@@ -72,9 +72,14 @@ export function renderReport(accounts, { color = false, now = Date.now(), refres
   return out.join("\n");
 }
 
-/** One line for tmux or a status line: each account's pills as "5h|week" (a lone number is weekly-only). */
+const entryLabel = (e) => (e.tag ? `${e.label}·${e.tag}` : e.label);
+
+/** One line for tmux or a status line, grouped by window length: "5h CW 100 · CP 53 | wk CW 0 · …". */
 export function renderLine(accounts, now = Date.now()) {
-  return accounts.map((a) => `${a.short} ${pillText(a, now)}`).join(" · ");
+  const { sections: list, unavailable } = sections(accounts, now);
+  const parts = list.map((s) => `${s.label} ${s.entries.map((e) => `${entryLabel(e)} ${Math.floor(e.pct)}${e.stale ? "!" : ""}`).join(" · ")}`);
+  if (unavailable.length) parts.push(unavailable.map((u) => `${u.label} ?`).join(" · "));
+  return parts.join(" | ");
 }
 
 const iso = (ms) => (ms ? new Date(ms).toISOString() : null);
@@ -86,6 +91,11 @@ export function jsonView(accounts, now = Date.now()) {
     schema: SNAPSHOT_SCHEMA,
     version: VERSION,
     generatedAt: iso(now),
+    // The menu bar layout: one section per window length (e.g. "5h", "wk"), shortest first.
+    ...(({ sections: list, unavailable }) => ({
+      sections: list.map((sec) => ({ ...sec, entries: sec.entries.map((e) => ({ ...e, resetsAt: iso(e.resetsAt) })) })),
+      unavailable,
+    }))(sections(accounts, now)),
     accounts: accounts.map((a) => ({
       id: a.id,
       label: a.label,
