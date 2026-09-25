@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -171,4 +171,25 @@ test("mcp: get_usage JSON is compact and still carries what agents route on", ()
   assert.equal(lane.expiring, true);
   assert.ok(lane.expiresAt && lane.burnPctPerHour > 0);
   assert.match(text, /^Expiring soon, spend first: Codex \(75% left, resets in 2[34]h at \d{4}-/);
+});
+
+test("agy is probed at most every 10 minutes unless a refresh is forced or the account overrides it", () => {
+  const counter = join(dir, "agy-calls");
+  const fixture = new URL("fixtures/agy-usage.json", import.meta.url).pathname;
+  const countingAgy = script("agy-counting", `#!/bin/sh\necho x >> "${counter}"\ncat "${fixture}"\n`);
+  const calls = () => (existsSync(counter) ? readFileSync(counter, "utf8").trim().split("\n").length : 0);
+  const run = (cfg, args) => {
+    const file = join(dir, `config-agy-${cfg.tag}.json`);
+    writeFileSync(file, JSON.stringify({ accounts: [{ id: "ag", provider: "antigravity", label: "AG", short: "AG", command: countingAgy, ...cfg.account }] }));
+    const r = spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", timeout: 30_000, env: { ...process.env, AI_USAGE_CONFIG: file, AI_USAGE_CACHE_DIR: join(dir, `cache-agy-${cfg.tag}`) } });
+    assert.equal(r.status, 0, r.stderr);
+  };
+  run({ tag: "default" }, ["line", "--max-age", "0"]);
+  run({ tag: "default" }, ["line", "--max-age", "0"]);
+  assert.equal(calls(), 1, "second read within 10 minutes reuses the cache");
+  run({ tag: "default" }, ["line", "--refresh"]);
+  assert.equal(calls(), 2, "an explicit refresh always probes");
+  run({ tag: "override", account: { minRefreshSeconds: 0 } }, ["line", "--max-age", "0"]);
+  run({ tag: "override", account: { minRefreshSeconds: 0 } }, ["line", "--max-age", "0"]);
+  assert.equal(calls(), 4, "minRefreshSeconds: 0 removes the floor");
 });

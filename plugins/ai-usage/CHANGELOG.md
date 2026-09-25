@@ -3,6 +3,15 @@
 All notable changes to this project. Versions follow [semver](https://semver.org); the `ai-usage json`
 schema (`ai-usage.snapshot.v1`) changes its suffix on any breaking change to its shape.
 
+## 0.7.1 (2026-09-25)
+
+- Repeated macOS permission prompts for "AI Usage": `install.sh` rebuilt and re-signed the ad-hoc-signed app on
+  every run, so macOS forgot each answer. It now rebuilds only when `macos/main.swift` or `build.sh` change
+  (`AIUsageBuildHash` in the bundle), keeping the app's identity.
+- Antigravity is re-queried at most every 10 minutes unless a refresh is forced: `agy -p /usage` starts every
+  MCP server in agy's config (here an LSP via `npm exec` and a mock server under `~/Documents`, the source of
+  the Documents prompt). `accounts[].minRefreshSeconds` overrides it per account.
+
 ## 0.7.0 (2026-09-25)
 
 Use it or lose it:

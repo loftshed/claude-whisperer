@@ -25,6 +25,7 @@ cat > "$app/Contents/Info.plist" <<EOF
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>AIUsageCommand</key><string>$command_path</string>
+  <key>AIUsageBuildHash</key><string>${AI_USAGE_BUILD_HASH:-}</string>
 </dict>
 </plist>
 EOF

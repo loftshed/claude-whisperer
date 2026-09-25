@@ -82,7 +82,15 @@ fi
 
 if [ "$with_app" = 1 ]; then
   app="$HOME/Applications/AI Usage.app"
-  AI_USAGE_COMMAND="$launcher" "$repo/macos/build.sh" "$app"
+  # Rebuild only when the app itself changes. It is ad-hoc signed, so macOS privacy settings identify it by
+  # its exact code: every rebuild made macOS forget an "Allow" and ask again.
+  build_hash="$(cat "$repo/macos/main.swift" "$repo/macos/build.sh" | shasum -a 256 | cut -c1-16):$launcher"
+  installed_hash="$(/usr/libexec/PlistBuddy -c 'Print :AIUsageBuildHash' "$app/Contents/Info.plist" 2>/dev/null || true)"
+  if [ "$build_hash" != "$installed_hash" ]; then
+    AI_USAGE_COMMAND="$launcher" AI_USAGE_BUILD_HASH="$build_hash" "$repo/macos/build.sh" "$app"
+  else
+    echo "• menu bar app unchanged, not rebuilt (keeps its macOS privacy permissions)"
+  fi
   plist="$HOME/Library/LaunchAgents/local.ai-usage.bar.plist"
   mkdir -p "$(dirname "$plist")"
   cat > "$plist" <<EOF

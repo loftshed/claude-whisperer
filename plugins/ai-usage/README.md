@@ -83,6 +83,10 @@ No config is needed: without `~/.config/ai-usage/config.json`, ai-usage monitors
 
 `install.sh` installs a copy of the CLI to `~/.local/share/ai-usage` and points the launcher there, so the menu bar app and MCP servers never read the checkout. macOS privacy protection makes background access to `~/Documents` wait on a permission prompt, which returns with every rebuild of the ad-hoc-signed app. Re-run `./install.sh` after pulling changes, moving the checkout, or changing Node versions.
 
+## macOS permission prompts
+
+The menu bar app runs the provider CLIs, and macOS charges whatever they touch to "AI Usage". `agy -p /usage` starts every MCP server in agy's config, so a server that lives under `~/Documents` (or needs another protected resource) makes macOS ask "AI Usage" for that access. Allow or Don't Allow both work: denying only stops that MCP server inside agy's usage check. The app is ad-hoc signed, so macOS identifies it by its exact code; `install.sh` rebuilds it only when its source changes, which keeps your answer. If you change `macos/main.swift`, expect to answer once more.
+
 ## Commands
 
 ```
@@ -112,6 +116,7 @@ ai-usage mcp-install       register the MCP server in Claude, Codex, agy, Gemini
 | `accounts[].command` | Explicit path to the provider CLI |
 | `env` | Extra environment for provider CLIs, e.g. `NODE_EXTRA_CA_CERTS` behind a TLS-inspecting proxy |
 | `maxAgeSeconds` | Default cache age before re-querying |
+| `accounts[].minRefreshSeconds` | Never re-query this account more often than this, except on an explicit refresh. Default 600 for Antigravity: `agy /usage` starts every MCP server in agy's config. |
 
 Menu bar refresh interval: `defaults write local.ai-usage.bar refreshSeconds 300` (minimum 60).
 

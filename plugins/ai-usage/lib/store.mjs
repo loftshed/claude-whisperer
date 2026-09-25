@@ -121,12 +121,20 @@ function unlock() {
 
 export const _lockInternals = { lockIsStale, tryLock, unlock, LOCK_DIR };
 
+// Probes that are expensive for their provider are not repeated more often than this, except on an
+// explicit refresh. agy starts every MCP server in its config just to answer /usage (for this user: an LSP
+// via npm, a mock server under ~/Documents that makes macOS ask for Documents access, and so on), and
+// Antigravity usage only moves while agy is in use. Override per account with minRefreshSeconds.
+const MIN_REFRESH_SECONDS = { antigravity: 600 };
+
 function staleIds(config, snapshot, maxAgeMs, now) {
   return config.accounts
     .filter((a) => {
       const entry = snapshot.accounts[a.id];
       const lastAttempt = Math.max(entry?.fetchedAt ?? 0, entry?.errorAt ?? 0);
-      return !entry || entry.provider !== a.provider || now - lastAttempt > maxAgeMs;
+      const floor = (a.minRefreshSeconds ?? MIN_REFRESH_SECONDS[a.provider] ?? 0) * 1000;
+      const limit = maxAgeMs < 0 ? maxAgeMs : Math.max(maxAgeMs, floor);
+      return !entry || entry.provider !== a.provider || now - lastAttempt > limit;
     })
     .map((a) => a.id);
 }
