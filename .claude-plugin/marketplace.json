@@ -8,6 +8,11 @@
       "name": "agent-executor",
       "source": "./plugins/agent-executor",
       "description": "Bounded agent execution, consultation, evidence, and audit."
+    },
+    {
+      "name": "ai-usage",
+      "source": "./plugins/ai-usage",
+      "description": "Remaining quota across Claude Code profiles, Codex and Antigravity, and where to spend it: MCP server, skill, CLI/TUI, macOS menu bar app."
     }
   ],
   "metadata": {

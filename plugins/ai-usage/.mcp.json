@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ai-usage": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/ai-usage.mjs", "mcp"]
+    }
+  }
+}

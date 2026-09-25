@@ -1,0 +1,17 @@
+{
+  "maxAgeSeconds": 180,
+  "env": {},
+  "accounts": [
+    { "id": "claude-work", "provider": "claude", "label": "Claude · work", "short": "CW", "route": "claude" },
+    { "id": "claude-personal", "provider": "claude", "label": "Claude · personal", "short": "CP", "configDir": "~/.claude-personal", "route": "plaude" },
+    { "id": "codex", "provider": "codex", "label": "Codex · ChatGPT", "short": "CX", "route": "codex" },
+    {
+      "id": "antigravity",
+      "provider": "antigravity",
+      "label": "Antigravity",
+      "short": "AG",
+      "route": "agy",
+      "routes": { "gemini": "agy --model gemini-3.8-flash-medium", "claude-gpt": "agy --model claude-opus-4-6-thinking" }
+    }
+  ]
+}
