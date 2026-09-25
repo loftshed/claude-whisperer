@@ -4,9 +4,15 @@ const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g
 
 const WINDOW_MINS = { "5h": 300, weekly: 10080 };
 
+// Families come from the group's model list when present ("Models within this group: Claude Opus, Claude
+// Sonnet, GPT-OSS"); the group name "Claude and GPT models" alone would overstate them. GPT-OSS is its own
+// family: open-weight models, not the GPT models Codex serves, so "gpt" keeps meaning Codex.
 function families(group) {
-  const text = `${group.name} ${group.description ?? ""}`.toLowerCase();
-  return ["gemini", "claude", "gpt"].filter((f) => text.includes(f));
+  const text = (group.description || group.name).toLowerCase();
+  const found = ["gemini", "claude"].filter((f) => text.includes(f));
+  if (text.includes("gpt-oss")) found.push("gpt-oss");
+  if (/gpt(?!-oss)/.test(text)) found.push("gpt");
+  return found;
 }
 
 function shortGroupName(name) {

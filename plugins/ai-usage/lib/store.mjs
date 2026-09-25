@@ -55,25 +55,58 @@ function writeSnapshot(snapshot) {
   renameSync(tmp, SNAPSHOT_PATH);
 }
 
-function tryLock() {
-  mkdirSync(CACHE_DIR, { recursive: true });
+const LOCK_OWNER = join(LOCK_DIR, "owner");
+let holdingLock = false;
+
+// Free the lock when this process exits mid-refresh (e.g. `watch` quitting). A killed process cannot
+// clean up, so waiters also treat a lock whose owner is gone as stale.
+process.on("exit", () => {
+  if (holdingLock) rmSync(LOCK_DIR, { recursive: true, force: true });
+});
+
+function ownerAlive(pid) {
   try {
-    mkdirSync(LOCK_DIR);
+    process.kill(pid, 0);
     return true;
   } catch (err) {
-    if (err.code !== "EEXIST") throw err;
-    try {
-      if (Date.now() - statSync(LOCK_DIR).mtimeMs > LOCK_STALE_MS) {
-        rmSync(LOCK_DIR, { recursive: true, force: true });
-        mkdirSync(LOCK_DIR);
-        return true;
-      }
-    } catch {}
+    return err.code === "EPERM";
+  }
+}
+
+function lockIsStale() {
+  try {
+    const age = Date.now() - statSync(LOCK_DIR).mtimeMs;
+    if (age > LOCK_STALE_MS) return true;
+    const pid = Number(readFileSync(LOCK_OWNER, "utf8"));
+    return Number.isInteger(pid) && pid > 0 && !ownerAlive(pid);
+  } catch (err) {
+    // No owner file yet: fine for a lock created a moment ago, stale if it never gets one.
+    if (err.code === "ENOENT" && existsSync(LOCK_DIR)) return Date.now() - statSync(LOCK_DIR).mtimeMs > 5_000;
     return false;
   }
 }
 
-const unlock = () => rmSync(LOCK_DIR, { recursive: true, force: true });
+function tryLock() {
+  mkdirSync(CACHE_DIR, { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      mkdirSync(LOCK_DIR);
+      writeFileSync(LOCK_OWNER, String(process.pid));
+      holdingLock = true;
+      return true;
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      if (attempt > 0 || !lockIsStale()) return false;
+      rmSync(LOCK_DIR, { recursive: true, force: true });
+    }
+  }
+  return false;
+}
+
+function unlock() {
+  holdingLock = false;
+  rmSync(LOCK_DIR, { recursive: true, force: true });
+}
 
 function staleIds(config, snapshot, maxAgeMs, now) {
   return config.accounts
@@ -121,9 +154,12 @@ export async function getAccounts({ maxAgeSeconds, force = false, config = loadC
       break;
     }
     // Another process is refreshing: wait for its result instead of fetching twice.
-    while (existsSync(LOCK_DIR) && Date.now() < deadline) await sleep(300);
+    const seen = snapshot.updatedAt;
+    while (existsSync(LOCK_DIR) && !lockIsStale() && Date.now() < deadline) await sleep(300);
     snapshot = readSnapshot();
-    if (force || Date.now() > deadline) break;
+    if (Date.now() > deadline) break;
+    // A forced refresh is satisfied by a refresh that completed, not by one that was abandoned.
+    if (force && snapshot.updatedAt !== seen) break;
   }
   return config.accounts.map((account) => ({
     ...(snapshot.accounts[account.id] ?? { id: account.id, provider: account.provider, ok: false, error: "not fetched yet" }),

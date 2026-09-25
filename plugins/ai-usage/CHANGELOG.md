@@ -3,6 +3,19 @@
 All notable changes to this project. Versions follow [semver](https://semver.org); the `ai-usage json`
 schema (`ai-usage.snapshot.v1`) changes its suffix on any breaking change to its shape.
 
+## 0.2.1 (2026-09-25)
+
+Fixes:
+
+- A refresh lock left by a killed or quitting process no longer stalls every other caller for up to 90 s:
+  the lock records its owner, a dead owner's lock is taken over, and `watch` releases it on exit.
+- `codex app-server` exiting between requests no longer crashes ai-usage (and the MCP server) with EPIPE.
+- Unknown options and non-numeric `--max-age`/`--interval` exit 2 with a message; a non-numeric
+  `--max-age` used to return stale data forever.
+- `install.sh` replaces dangling skill links after the checkout moves instead of aborting.
+- `recommend --family gpt` means Codex; Antigravity's GPT-OSS models are their own `gpt-oss` family.
+- `recommend` with an unknown family says so; `mcp-uninstall` reports absent registrations as not registered.
+
 ## 0.2.0 (2026-09-25)
 
 - `accounts[].billing` (`work` | `personal`) in the config and `ai-usage json`, so agent-executor keeps

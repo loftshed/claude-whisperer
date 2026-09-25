@@ -4,6 +4,7 @@ import { childEnv, resolveBinary } from "../exec.mjs";
 import { VERSION } from "../version.mjs";
 
 function windowKind(mins) {
+  if (!Number.isFinite(mins) || mins <= 0) return { kind: "window", label: "rate-limit" };
   if (mins === 300) return { kind: "5h", label: "5-hour" };
   if (mins === 10080) return { kind: "weekly", label: "weekly" };
   if (mins % 1440 === 0) return { kind: `${mins / 1440}d`, label: `${mins / 1440}-day` };
@@ -63,6 +64,8 @@ function rpcRateLimits(bin, env, timeoutMs) {
       fn(value);
     };
     const timer = setTimeout(() => finish(reject, new Error(`codex app-server timed out after ${timeoutMs / 1000}s`)), timeoutMs);
+    // If codex dies between messages, the write fails with EPIPE; the close handler reports the failure.
+    child.stdin.on("error", () => {});
     const send = (msg) => child.stdin.write(`${JSON.stringify(msg)}\n`);
     child.stdout.on("data", (d) => {
       buf += d;
@@ -90,7 +93,10 @@ function rpcRateLimits(bin, env, timeoutMs) {
       if (stderr.length < 16_384) stderr += d;
     });
     child.on("error", (err) => finish(reject, err));
-    child.on("close", (code) => finish(reject, new Error(`codex app-server exited ${code}: ${stderr.trim().slice(0, 200)}`)));
+    child.on("close", (code) => {
+      const detail = stderr.trim().slice(0, 200) || "no output";
+      finish(reject, new Error(`codex app-server exited ${code} before reporting rate limits: ${detail}`));
+    });
     send({ id: 1, method: "initialize", params: { clientInfo: { name: "ai-usage", version: VERSION } } });
   });
 }

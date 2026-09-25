@@ -68,7 +68,7 @@ test("parseAntigravityUsage reads both quota groups", () => {
   const r = parseAntigravityUsage(JSON.parse(fixture("agy-usage.json")));
   assert.deepEqual(r.pools.map((p) => [p.id, p.families, p.windowIds]), [
     ["gemini", ["gemini"], ["gemini-weekly", "gemini-5h"]],
-    ["claude-gpt", ["claude", "gpt"], ["claude-gpt-weekly", "claude-gpt-5h"]],
+    ["claude-gpt", ["claude", "gpt-oss"], ["claude-gpt-weekly", "claude-gpt-5h"]],
   ]);
   const weekly = r.windows.find((w) => w.id === "gemini-weekly");
   assert.equal(weekly.remainingPct, 6.4);

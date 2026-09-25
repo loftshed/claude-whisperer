@@ -35,26 +35,44 @@ Options:
   --no-color                 plain output
 `;
 
-const { values, positionals } = parseArgs({
-  allowPositionals: true,
-  options: {
-    refresh: { type: "boolean", short: "r" },
-    "max-age": { type: "string" },
-    interval: { type: "string" },
-    family: { type: "string" },
-    json: { type: "boolean" },
-    command: { type: "string" },
-    "dry-run": { type: "boolean" },
-    force: { type: "boolean" },
-    "skip-claude": { type: "boolean" },
-    version: { type: "boolean", short: "v" },
-    "no-color": { type: "boolean" },
-    help: { type: "boolean", short: "h" },
-  },
-});
+let parsed;
+try {
+  parsed = parseArgs({
+    allowPositionals: true,
+    options: {
+      refresh: { type: "boolean", short: "r" },
+      "max-age": { type: "string" },
+      interval: { type: "string" },
+      family: { type: "string" },
+      json: { type: "boolean" },
+      command: { type: "string" },
+      "dry-run": { type: "boolean" },
+      force: { type: "boolean" },
+      "skip-claude": { type: "boolean" },
+      version: { type: "boolean", short: "v" },
+      "no-color": { type: "boolean" },
+      help: { type: "boolean", short: "h" },
+    },
+  });
+} catch (err) {
+  console.error(`ai-usage: ${err.message}\n\n${HELP}`);
+  process.exit(2);
+}
+const { values, positionals } = parsed;
+
+// Reject non-numeric durations: NaN would make every cache entry look fresh forever.
+function seconds(name) {
+  if (values[name] === undefined) return undefined;
+  const value = Number(values[name]);
+  if (!Number.isFinite(value) || value < 0) {
+    console.error(`ai-usage: --${name} must be a number of seconds, got "${values[name]}"`);
+    process.exit(2);
+  }
+  return value;
+}
 
 const command = positionals[0] ?? "show";
-const maxAgeSeconds = values["max-age"] ? Number(values["max-age"]) : undefined;
+const maxAgeSeconds = seconds("max-age");
 const color = !values["no-color"] && useColor();
 
 async function show() {
@@ -66,11 +84,12 @@ async function recommend() {
   const view = jsonView(await getAccounts({ force: values.refresh, maxAgeSeconds }));
   const lanes = values.family ? view.lanes.filter((l) => l.families.includes(values.family)) : view.lanes;
   if (values.json) return console.log(JSON.stringify(lanes, null, 2));
+  if (lanes.length === 0) return console.log(`No configured account serves the "${values.family}" family (try claude, gpt or gemini).`);
   console.log(summarizeLanes(lanes));
 }
 
 async function watch() {
-  const interval = Math.max(30, Number(values.interval ?? 120));
+  const interval = Math.max(30, seconds("interval") ?? 120);
   const out = process.stdout;
   let accounts = null;
   let refreshing = false;

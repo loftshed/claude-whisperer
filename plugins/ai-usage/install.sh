@@ -40,14 +40,22 @@ fi
 
 # Skill for harnesses without the Claude/Codex plugin system: ~/.agents/skills is the hub (Gemini CLI reads it
 # directly); agy and OpenCode get a link to it. Claude Code and Codex get the skill from the plugin.
+# Point $2 at $1. Replaces an old or dangling link (e.g. after moving the checkout), never a real file or directory.
+link() {
+  if [ -L "$2" ] || [ ! -e "$2" ]; then
+    ln -sfn "$1" "$2"
+  else
+    echo "• $2 exists and is not a link; left alone" >&2
+  fi
+}
 skill_hub="$HOME/.agents/skills/ai-usage"
 mkdir -p "$HOME/.agents/skills"
-[ -e "$skill_hub" ] || ln -s "$repo/skills/ai-usage" "$skill_hub"
+link "$repo/skills/ai-usage" "$skill_hub"
 for dir in "$HOME/.gemini/config/skills" "$HOME/.config/opencode/skills"; do
   parent="$(dirname "$dir")"
   [ -d "$parent" ] || continue
   mkdir -p "$dir"
-  [ -e "$dir/ai-usage" ] || ln -s "$skill_hub" "$dir/ai-usage"
+  link "$skill_hub" "$dir/ai-usage"
 done
 echo "✓ skill linked: $skill_hub (+ agy and OpenCode where installed)"
 

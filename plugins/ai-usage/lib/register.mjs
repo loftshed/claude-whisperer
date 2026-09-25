@@ -95,8 +95,10 @@ export async function registerMcp(config, { launcher, dryRun = false, remove = f
     try {
       const { code, stdout, stderr } = await run(step.bin, step.args, { env, timeoutMs: 60_000 });
       const output = `${stdout}${stderr}`.trim().split("\n").filter((l) => !/not trusted|^\s*$/i.test(l));
-      const already = output.some((l) => /already exists/i.test(l));
-      console.log(`${code === 0 ? "✓" : already ? "•" : "✗"} ${step.target}: ${already ? "already registered" : output[0] || `exit ${code}`}`);
+      const already = !remove && output.some((l) => /already exists/i.test(l));
+      const absent = remove && code !== 0 && output.some((l) => /not found|no .*(server|mcp)|does not exist/i.test(l));
+      const note = already ? "already registered" : absent ? "not registered" : output[0] || `exit ${code}`;
+      console.log(`${code === 0 ? "✓" : already || absent ? "•" : "✗"} ${step.target}: ${note}`);
     } catch (err) {
       console.log(`✗ ${step.target}: ${err.message}`);
     }
