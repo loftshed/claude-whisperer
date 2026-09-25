@@ -80,6 +80,18 @@ class CheckTests(unittest.TestCase):
         self.assertNotIn("--engine codex", message)
 
 
+    def test_an_account_ai_usage_could_not_read_is_unknown_not_low(self) -> None:
+        failed = view()
+        failed["lanes"][4] = {"label": "Codex · ChatGPT", "accountId": "codex", "poolId": None, "status": "error",
+                              "availableNowPct": 0, "weeklyRemainingPct": 0, "surplusPts": None, "blockedUntil": None,
+                              "advice": "no data: codex app-server exited 1", "stale": True}
+        result = QUOTA.check("codex", "gpt-5.6-luna", failed)
+        self.assertEqual(result, {"status": "unknown", "detail": "no data: codex app-server exited 1"})
+        registry = {"profiles": [{"id": "luna", "model_ids": ["gpt-5.6-luna"], "roles": ["implementation"]}]}
+        [record] = QUOTA.access_records(failed, registry)
+        self.assertEqual((record["available"], record["source"]), (True, "ai-usage:unknown"))
+
+
 class RecommendTests(unittest.TestCase):
     registry = {"profiles": [
         {"id": "luna", "model_ids": ["gpt-5.6-luna"], "roles": ["implementation"], "effort_candidate": "medium", "prompt_adjustment": ""},

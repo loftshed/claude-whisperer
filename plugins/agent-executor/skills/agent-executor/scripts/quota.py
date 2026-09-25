@@ -75,7 +75,9 @@ def pool_lanes(engine: str, model: str, view: dict[str, Any]) -> list[dict[str, 
         return []
     provider, pool = route
     accounts = {account["id"]: account for account in view.get("accounts", [])}
-    lanes = [lane for lane in view.get("lanes", []) if accounts.get(lane.get("accountId"), {}).get("provider") == provider]
+    # An "error" lane means ai-usage has no data for that account at all: unknown, not empty.
+    lanes = [lane for lane in view.get("lanes", [])
+             if accounts.get(lane.get("accountId"), {}).get("provider") == provider and lane.get("status") != "error"]
     chosen: list[dict[str, Any]] = []
     for account_id in dict.fromkeys(lane["accountId"] for lane in lanes):
         own = [lane for lane in lanes if lane["accountId"] == account_id]
@@ -107,7 +109,12 @@ def check(engine: str, model: str, view: dict[str, Any] | None) -> dict[str, Any
         return {"status": "unknown", "detail": "ai-usage is not installed or did not answer"}
     lanes = pool_lanes(engine, model, view)
     if not lanes:
-        return {"status": "unknown", "detail": f"ai-usage has no pool for {engine} {model}"}
+        provider = route_for(engine, model)[0]
+        providers = {account["id"]: account.get("provider") for account in view.get("accounts", [])}
+        failed = [lane for lane in view.get("lanes", [])
+                  if lane.get("status") == "error" and providers.get(lane.get("accountId")) == provider]
+        detail = failed[0].get("advice") if failed else f"ai-usage has no pool for {engine} {model}"
+        return {"status": "unknown", "detail": detail}
     lane = lanes[0]
     return {"status": assess(lane), **summary(lane)}
 
