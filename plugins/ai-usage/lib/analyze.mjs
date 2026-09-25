@@ -164,11 +164,22 @@ function independentPools(account) {
   );
 }
 
-const gauge = (w) => (w ? { pct: w.remainingPct, level: level(w.remainingPct), label: w.label, resetsAt: w.resetsAt ?? null } : null);
+const gauge = (w, now) =>
+  w
+    ? {
+        pct: w.remainingPct,
+        level: level(w.remainingPct),
+        label: w.label,
+        windowMins: w.windowMins ?? null,
+        resetsAt: w.resetsAt ?? null,
+        exhausted: w.remainingPct <= EXHAUSTED_PCT,
+        expiring: isExpiring(w, now),
+      }
+    : null;
 
 /**
- * One pill per independent pool: its short window (5-hour) and its weekly window, separately. Codex has no
- * short window, so its pill has only the weekly half. Antigravity has two pools, so two pills with tags.
+ * Each independent pool's short window (5-hour) and weekly (longest) window. The menu bar draws one pill per
+ * provider from these: Codex has no short window; Antigravity has two pools, told apart by their tags.
  */
 export function pills(account, now = Date.now()) {
   if (!account.windows?.length) return [];
@@ -178,7 +189,7 @@ export function pills(account, now = Date.now()) {
     const ws = pool.windowIds.map((id) => windows.get(id)).filter(Boolean);
     const short = ws.find((w) => (w.windowMins ?? Infinity) < 1440) ?? null;
     const long = ws.filter((w) => (w.windowMins ?? 0) >= 1440).sort((a, b) => a.remainingPct - b.remainingPct)[0] ?? null;
-    return { pool: pool.id, tag: pools.length > 1 ? pool.label.charAt(0).toUpperCase() : null, poolLabel: pool.label, short: gauge(short), weekly: gauge(long) };
+    return { pool: pool.id, tag: pools.length > 1 ? pool.label.charAt(0).toUpperCase() : null, poolLabel: pool.label, short: gauge(short, now), weekly: gauge(long, now) };
   });
 }
 

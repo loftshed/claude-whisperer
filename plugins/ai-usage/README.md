@@ -5,7 +5,7 @@ How much subscription quota is left on every AI account on this machine, and whe
 It reads the rate-limit windows of each account (Claude Code, Codex/ChatGPT, Antigravity/Gemini), keeps them in a shared cache, and shows them three ways:
 
 - **CLI / TUI**: `ai-usage` for a table, `ai-usage watch` for a live full-screen view.
-- **macOS menu bar app**: % left by limit window, one box per window length, then a ☠ box for everything used up for the week: `[5H  CP 40  AG·G 76  AG·C 100]  [WK  CP 81  CX 49  AG·G 3  AG·C 27]  [☠  CW]`. Boxes come from each window's actual length, so a provider on another cycle gets its own (`3H`, `1D`). Codex has no 5-hour limit, so it appears only under WK. Antigravity has two pools, Gemini (G) and Claude & GPT-OSS (C). A pool whose weekly (or other day-or-longer) limit is used up leaves the 5H/WK boxes, since its 5-hour allowance is unusable, and is listed under ☠; an empty 5-hour window alone stays in 5H as a red 0. The dropdown has details, reset times and a ranking.
+- **macOS menu bar app**: one pill per provider: `[CW ☠3h]  [CP 98·75 2d]  [CX 45 4d]  [AG G 76·3 2h │ C 100·27 1d⏳]`. Each pool shows its 5-hour % left (if it has a 5-hour limit), then its weekly % left followed by the time until the weekly rollover (`2d`, or `2h` once under a day). A pool whose week is used up shows ☠ and the time until it is back; a pool near its rollover with capacity left shows its time in orange with ⏳. Antigravity has two pools, Gemini (G) and Claude & GPT-OSS (C). Numbers are coloured by how much is left; the dropdown has details, reset times and a ranking.
 - **MCP server**: `get_usage` and `recommend` tools, so agents can check quota before choosing where to run work.
 
 ```
@@ -93,7 +93,7 @@ The menu bar app runs the provider CLIs, and macOS charges whatever they touch t
 ai-usage [show]            table of every window plus where to spend next
 ai-usage watch             live view (r = refresh now, q = quit)
 ai-usage json              machine-readable snapshot, schema "ai-usage.snapshot.v1"
-ai-usage line              one line for tmux or a status line: "5h CP 40 · … | wk CP 81 · CX 49 · … | ☠ CW"
+ai-usage line              one line for tmux or a status line: "CW ☠3h · CP 98·75 2d · CX 45 4d · AG G76·3 2h C100·27 1d⏳"
 ai-usage recommend         ranked pools [--family claude|gpt|gemini] [--json]
 ai-usage mcp               MCP server on stdio
 ai-usage init              detect accounts and write the config

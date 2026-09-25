@@ -139,74 +139,105 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pct <= 0.5 ? "out" : pct < 20 ? "low" : pct < 50 ? "mid" : "ok"
     }
 
-    // MARK: - Menu bar sections
+    // MARK: - Menu bar pills, one per provider
 
     /// Text-style skull (U+2620 with the text variation selector) so it takes a colour.
     static let skull = "\u{2620}\u{FE0E}"
+    /// Marks a pool near its weekly rollover with capacity left: spend it before it is lost.
+    static let expiringMark = "\u{23F3}"
 
-    /// `value` is empty for entries in the ☠ group, which lists names only.
-    private struct Entry { let label: String; let tag: String?; let value: String; let level: String; let stale: Bool; let expiring: Bool }
-    private struct Section { let header: String; let skull: Bool; let entries: [Entry] }
-    private typealias BarModel = (sections: [Section], unavailable: [String], refreshFailed: Bool)
+    private struct Gauge { let pct: Double; let level: String; let resetsAt: Date?; let exhausted: Bool; let expiring: Bool }
+    /// One independently limited pool: its short (5-hour) window and its weekly window.
+    private struct PoolReading { let tag: String?; let short: Gauge?; let weekly: Gauge? }
+    private struct ProviderPill { let label: String; let pools: [PoolReading]; let stale: Bool }
+    private typealias BarModel = (pills: [ProviderPill], unavailable: [String], refreshFailed: Bool)
 
-    private let barHeaderFont = NSFont.systemFont(ofSize: 9, weight: .heavy)
     private let barLabelFont = NSFont.systemFont(ofSize: 10.5, weight: .medium)
     private let barTagFont = NSFont.systemFont(ofSize: 8, weight: .bold)
     private let barNumberFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .semibold)
+    private let barTimeFont = NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .semibold)
     // The skull glyph is drawn small by the symbol font; a larger size makes it read at a glance.
-    private let barSkullFont = NSFont.systemFont(ofSize: 14, weight: .regular)
+    private let barSkullFont = NSFont.systemFont(ofSize: 13, weight: .regular)
     private let barMarkFont = NSFont.systemFont(ofSize: 8.5, weight: .regular)
-    /// After a pool that is near its weekly rollover with capacity left: spend it before it is lost.
-    static let expiringMark = "\u{23F3}"
 
-    /// `ai-usage json`: one section per limit window length ("5h", "wk", …), then a ☠ section for pools
-    /// whose weekly (or longer) limit is used up, then accounts with no data.
+    /// `ai-usage json` accounts → one pill per provider, from each account's `pills` (pool readings).
     private func barModel() -> BarModel {
-        func entry(_ raw: [String: Any], withValue: Bool) -> Entry {
-            let pct = raw["pct"] as? Double ?? 0
-            return Entry(label: raw["label"] as? String ?? "?", tag: raw["tag"] as? String,
-                         value: withValue ? String(Int(pct.rounded(.down))) : "",
-                         level: raw["level"] as? String ?? level(for: pct), stale: (raw["stale"] as? Bool) == true,
-                         expiring: withValue && (raw["expiring"] as? Bool) == true)
+        func gauge(_ raw: Any?) -> Gauge? {
+            guard let g = raw as? [String: Any], let pct = g["pct"] as? Double else { return nil }
+            return Gauge(pct: pct, level: g["level"] as? String ?? level(for: pct),
+                         resetsAt: (g["resetsAt"] as? String).flatMap { AppDelegate.iso.date(from: $0) },
+                         exhausted: (g["exhausted"] as? Bool) == true, expiring: (g["expiring"] as? Bool) == true)
         }
-        var sections = (snapshot?["sections"] as? [[String: Any]] ?? []).map { section in
-            Section(header: (section["label"] as? String ?? "?").uppercased(), skull: false,
-                    entries: (section["entries"] as? [[String: Any]] ?? []).map { entry($0, withValue: true) })
+        var pills: [ProviderPill] = []
+        var unavailable: [String] = []
+        for account in accounts {
+            let label = account["short"] as? String ?? "?"
+            let pools = (account["pills"] as? [[String: Any]] ?? []).map {
+                PoolReading(tag: $0["tag"] as? String, short: gauge($0["short"]), weekly: gauge($0["weekly"]))
+            }
+            if pools.isEmpty { unavailable.append(label); continue }
+            pills.append(ProviderPill(label: label, pools: pools, stale: (account["ok"] as? Bool) == false))
         }
-        let exhausted = (snapshot?["exhausted"] as? [[String: Any]] ?? []).map { entry($0, withValue: false) }
-        if !exhausted.isEmpty { sections.append(Section(header: AppDelegate.skull, skull: true, entries: exhausted)) }
-        let unavailable = (snapshot?["unavailable"] as? [[String: Any]] ?? []).map { $0["label"] as? String ?? "?" }
-        return (sections, unavailable, lastError != nil)
+        return (pills, unavailable, lastError != nil)
+    }
+
+    /// Time until a rollover in the largest whole unit: "3d", "5h", "40m".
+    private func timeLeft(_ date: Date?) -> String {
+        guard let date else { return "" }
+        let minutes = Int(date.timeIntervalSinceNow / 60)
+        if minutes <= 0 { return "now" }
+        if minutes >= 1440 { return "\(minutes / 1440)d" }
+        if minutes >= 60 { return "\(minutes / 60)h" }
+        return "\(minutes)m"
     }
 
     private func width(_ text: String, _ font: NSFont) -> CGFloat {
         ceil(NSAttributedString(string: text, attributes: [.font: font]).size().width)
     }
 
-    /// One rounded box per section: "5H", "WK", … with each account's % left, then "☠" with the names of
-    /// everything used up for the week.
+    /// A piece of text in a pill; the same list is used to measure and to draw.
+    private struct Run { let text: String; let font: NSFont; let color: NSColor; let gap: CGFloat; var raise: CGFloat = 0 }
+
+    /// "CP 16·78 3d": label, 5-hour % left, weekly % left, time to the weekly rollover. A pool whose week is
+    /// used up shows ☠ and the time until it is back; one near its rollover with capacity left gets ⏳.
+    private func runs(for pill: ProviderPill) -> [Run] {
+        let muted = labelTint(0.75)
+        var out = [Run(text: pill.label, font: barLabelFont, color: .labelColor, gap: 0)]
+        for (i, pool) in pill.pools.enumerated() {
+            if i > 0 { out.append(Run(text: "\u{2502}", font: barLabelFont, color: labelTint(0.35), gap: 3)) }
+            if let tag = pool.tag { out.append(Run(text: tag, font: barTagFont, color: muted, gap: i > 0 ? 3 : 4, raise: -2)) }
+            let lead: CGFloat = pool.tag == nil ? 4 : 1
+            if let weekly = pool.weekly, weekly.exhausted {
+                out.append(Run(text: AppDelegate.skull, font: barSkullFont, color: levelText(color(for: "out")), gap: lead))
+                out.append(Run(text: timeLeft(weekly.resetsAt), font: barTimeFont, color: muted, gap: 1, raise: -1.5))
+                continue
+            }
+            if let short = pool.short {
+                out.append(Run(text: String(Int(short.pct.rounded(.down))), font: barNumberFont, color: levelText(color(for: short.level)), gap: lead))
+            }
+            if let weekly = pool.weekly {
+                if pool.short != nil { out.append(Run(text: "\u{00B7}", font: barNumberFont, color: muted, gap: 1)) }
+                out.append(Run(text: String(Int(weekly.pct.rounded(.down))), font: barNumberFont, color: levelText(color(for: weekly.level)), gap: pool.short == nil ? lead : 1))
+                out.append(Run(text: timeLeft(weekly.resetsAt), font: barTimeFont, color: weekly.expiring ? levelText(.systemOrange) : muted, gap: 2, raise: -1.5))
+                if weekly.expiring { out.append(Run(text: AppDelegate.expiringMark, font: barMarkFont, color: .labelColor, gap: 1)) }
+            }
+        }
+        if pill.stale { out.append(Run(text: "!", font: barNumberFont, color: .systemRed, gap: 1)) }
+        return out
+    }
+
     private func barImage(_ model: BarModel) -> NSImage {
-        let height: CGFloat = 22, boxHeight: CGFloat = 18, inset: CGFloat = 5, headerGap: CGFloat = 5
-        let entryGap: CGFloat = 6, labelGap: CGFloat = 2, sectionGap: CGFloat = 4
-        func headerFont(_ section: Section) -> NSFont { section.skull ? barSkullFont : barHeaderFont }
-        func entryWidth(_ entry: Entry) -> CGFloat {
-            width(entry.label, barLabelFont) + (entry.tag.map { width($0, barTagFont) + 1 } ?? 0)
-                + (entry.value.isEmpty ? 0 : labelGap + width(entry.value, barNumberFont))
-                + (entry.stale ? width("!", barNumberFont) : 0)
-                + (entry.expiring ? 1 + width(AppDelegate.expiringMark, barMarkFont) : 0)
-        }
-        func sectionWidth(_ section: Section) -> CGFloat {
-            2 * inset + width(section.header, headerFont(section)) + headerGap
-                + section.entries.map(entryWidth).reduce(0, +) + CGFloat(max(0, section.entries.count - 1)) * entryGap
-        }
+        let height: CGFloat = 22, boxHeight: CGFloat = 18, inset: CGFloat = 6, pillGap: CGFloat = 4
+        let pillRuns = model.pills.map(runs(for:))
+        let boxWidths = pillRuns.map { runs in 2 * inset + runs.reduce(0) { $0 + $1.gap + width($1.text, $1.font) } }
         let unavailableText = model.unavailable.map { "\($0) ?" }.joined(separator: "  ")
-        var total = model.sections.map(sectionWidth).reduce(0, +) + CGFloat(max(0, model.sections.count - 1)) * sectionGap
-        if !unavailableText.isEmpty { total += (total > 0 ? sectionGap : 0) + width(unavailableText, barLabelFont) }
         // The last refresh failed as a whole: the numbers are from the previous one.
         let failedMark = "\u{26A0}\u{FE0E}"
-        if model.refreshFailed { total += (total > 0 ? sectionGap : 0) + width(failedMark, barLabelFont) }
+        var total = boxWidths.reduce(0, +) + CGFloat(max(0, boxWidths.count - 1)) * pillGap
+        if !unavailableText.isEmpty { total += (total > 0 ? pillGap : 0) + width(unavailableText, barLabelFont) }
+        if model.refreshFailed { total += (total > 0 ? pillGap : 0) + width(failedMark, barLabelFont) }
 
-        let image = NSImage(size: NSSize(width: max(total, 1), height: height), flipped: false) { [self] _ in
+        let image = NSImage(size: NSSize(width: max(total, 1), height: height), flipped: false) { _ in
             @discardableResult
             func draw(_ string: String, _ font: NSFont, _ color: NSColor, at x: CGFloat, raise: CGFloat = 0) -> CGFloat {
                 let text = NSAttributedString(string: string, attributes: [.font: font, .foregroundColor: color])
@@ -214,42 +245,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 text.draw(at: NSPoint(x: x, y: (height - size.height) / 2 + raise))
                 return ceil(size.width)
             }
-            // Not secondaryLabelColor: inside an image it gets no vibrancy and vanishes over the translucent bar.
-            let muted = NSColor.labelColor.withAlphaComponent(0.75)
             var x: CGFloat = 0
-            for (i, section) in model.sections.enumerated() {
-                if i > 0 { x += sectionGap }
-                let boxWidth = sectionWidth(section)
-                let box = NSRect(x: x, y: (height - boxHeight) / 2, width: boxWidth, height: boxHeight)
+            for (i, runs) in pillRuns.enumerated() {
+                if i > 0 { x += pillGap }
+                let box = NSRect(x: x, y: (height - boxHeight) / 2, width: boxWidths[i], height: boxHeight)
                 NSColor.labelColor.withAlphaComponent(0.13).setFill()
                 NSBezierPath(roundedRect: box, xRadius: 5, yRadius: 5).fill()
                 var cx = x + inset
-                cx += draw(section.header, headerFont(section), section.skull ? levelText(color(for: "out")) : muted, at: cx) + headerGap
-                for (j, entry) in section.entries.enumerated() {
-                    if j > 0 { cx += entryGap }
-                    cx += draw(entry.label, barLabelFont, .labelColor, at: cx)
-                    if let tag = entry.tag { cx += 1 + draw(tag, barTagFont, muted, at: cx + 1, raise: -2) }
-                    if !entry.value.isEmpty {
-                        cx += labelGap
-                        cx += draw(entry.value, barNumberFont, levelText(color(for: entry.level)), at: cx)
-                    }
-                    if entry.stale { cx += draw("!", barNumberFont, .systemRed, at: cx) }
-                    if entry.expiring { cx += 1 + draw(AppDelegate.expiringMark, barMarkFont, .labelColor, at: cx + 1) }
+                for run in runs {
+                    cx += run.gap
+                    cx += draw(run.text, run.font, run.color, at: cx, raise: run.raise)
                 }
-                x += boxWidth
+                x += boxWidths[i]
             }
             if !unavailableText.isEmpty {
-                if x > 0 { x += sectionGap }
-                x += draw(unavailableText, barLabelFont, .systemRed, at: x)
+                if x > 0 { x += pillGap }
+                x += draw(unavailableText, self.barLabelFont, .systemRed, at: x)
             }
             if model.refreshFailed {
-                if x > 0 { x += sectionGap }
-                draw(failedMark, barLabelFont, .systemRed, at: x)
+                if x > 0 { x += pillGap }
+                draw(failedMark, self.barLabelFont, .systemRed, at: x)
             }
             return true
         }
         image.isTemplate = false
         return image
+    }
+
+    /// Label colour at reduced opacity, resolved when drawn. (labelColor.withAlphaComponent resolves immediately,
+    /// freezing the appearance at build time; secondaryLabelColor gets no vibrancy inside an image.)
+    private func labelTint(_ alpha: CGFloat) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            return (dark ? NSColor.white : NSColor.black).withAlphaComponent(alpha)
+        }
     }
 
     /// Level colour for numbers, darkened in light mode where bright green is hard to read.
@@ -260,17 +289,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// Same layout as text, for accessibility and `--dump-menu`: "CW ☠5h · CP 16·78 3d · …".
     private func barSummary(_ model: BarModel) -> String {
-        var parts = model.sections.map { section -> String in
-            let entries = section.entries.map { entry -> String in
-                let label = entry.tag.map { tag in "\(entry.label)·\(tag)" } ?? entry.label
-                return (entry.value.isEmpty ? label : "\(label) \(entry.value)") + (entry.stale ? "!" : "") + (entry.expiring ? AppDelegate.expiringMark : "")
+        var parts = model.pills.map { pill -> String in
+            let pools = pill.pools.map { pool -> String in
+                let tag = pool.tag ?? ""
+                if let weekly = pool.weekly, weekly.exhausted { return "\(tag)\(AppDelegate.skull)\(timeLeft(weekly.resetsAt))" }
+                var values: [String] = []
+                if let short = pool.short { values.append(String(Int(short.pct.rounded(.down)))) }
+                if let weekly = pool.weekly {
+                    values.append("\(Int(weekly.pct.rounded(.down))) \(timeLeft(weekly.resetsAt))" + (weekly.expiring ? AppDelegate.expiringMark : ""))
+                }
+                return tag + values.joined(separator: "\u{00B7}")
             }
-            return "\(section.header) " + entries.joined(separator: " · ")
+            return "\(pill.label) \(pools.joined(separator: " "))\(pill.stale ? "!" : "")"
         }
         if !model.unavailable.isEmpty { parts.append(model.unavailable.map { "\($0) ?" }.joined(separator: " · ")) }
         if model.refreshFailed { parts.append("refresh failed") }
-        return parts.joined(separator: " | ")
+        return parts.joined(separator: " · ")
     }
 
     private func updateTitle() {
@@ -281,7 +317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let model = barModel()
-        if model.sections.isEmpty && model.unavailable.isEmpty {
+        if model.pills.isEmpty && model.unavailable.isEmpty {
             // Nothing to draw (no accounts configured, or output from an older ai-usage without sections).
             button.image = nil
             button.attributedTitle = NSAttributedString(string: model.refreshFailed ? "AI ⚠" : "AI –", attributes: [.font: titleFont])
@@ -292,7 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.image = barImage(model)
         button.imagePosition = .imageOnly
         button.setAccessibilityLabel("AI usage, % left: " + barSummary(model))
-        button.toolTip = "% left, grouped by limit window: 5H = 5-hour, WK = weekly.\n☠ = used up for the week · ⏳ = weekly rollover soon with capacity left: spend it (details in the menu).\nAntigravity pools: G = Gemini, C = Claude & GPT-OSS. ! = last refresh failed."
+        button.toolTip = "One pill per provider: 5-hour % left · weekly % left, then time to the weekly rollover (3d, 5h).\n☠ = used up for the week, then time until it is back · ⏳ = rollover soon with capacity left: spend it.\nAntigravity pools: G = Gemini, C = Claude & GPT-OSS. ! = last refresh failed."
     }
 
     /// `AIUsageBar --render-title <png> [--light]`: draw the menu bar pills to a PNG for checking.
@@ -372,7 +408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             status = "Updated \(clock(date))"
         }
         menu.addItem(infoItem(text("AI usage · \(status)", monoBold, .secondaryLabelColor)))
-        menu.addItem(infoItem(text("Menu bar: % left by limit window (5H, WK) · ⏳ = rollover soon, spend it · ☠ = used up for the week · G = Gemini, C = Claude & GPT-OSS", mono, .tertiaryLabelColor)))
+        menu.addItem(infoItem(text("Menu bar: 5-hour % · weekly % + time to rollover · ☠ used up for the week · ⏳ spend before rollover · G Gemini, C Claude & GPT-OSS", mono, .tertiaryLabelColor)))
         if let lastError {
             menu.addItem(infoItem(text("⚠ \(lastError.prefix(120))", mono, .systemRed)))
         }

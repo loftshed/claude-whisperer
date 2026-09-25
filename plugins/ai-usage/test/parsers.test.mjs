@@ -5,7 +5,7 @@ import { blockedWindows, buildLanes, durationLabel, headline, pills, sections } 
 import { parseAntigravityUsage } from "../lib/providers/antigravity.mjs";
 import { parseClaudeUsage } from "../lib/providers/claude.mjs";
 import { parseCodexRateLimits } from "../lib/providers/codex.mjs";
-import { jsonView } from "../lib/render.mjs";
+import { jsonView, pillText, renderLine } from "../lib/render.mjs";
 import { parseResetText } from "../lib/time.mjs";
 
 const fixture = (name) => readFileSync(new URL(`fixtures/${name}`, import.meta.url), "utf8");
@@ -167,6 +167,22 @@ test("an exhausted longer limit makes shorter ones unusable, never the other way
   const split = sections([{ ...agSpent, short: "AG" }], NOW);
   assert.deepEqual(split.exhausted.map((e) => `${e.label}·${e.tag}`), ["AG·G"]);
   assert.deepEqual(split.sections.map((s) => s.entries.map((e) => e.tag)), [["C"], ["C"]]);
+});
+
+test("line: one group per provider, 5-hour · weekly, time to rollover, ☠ when the week is used up", () => {
+  const [work, personal, ag] = sampleAccounts();
+  const codex = { id: "codex", short: "CX", provider: "codex", ok: true, ...parseCodexRateLimits({ rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 48, windowDurationMins: 10080, resetsAt: 1790779510 } } } }) };
+  // At NOW: work's week is gone until 00:59Z (8 h); personal has 57% of 5 h and 89% of a week ending in 3 days;
+  // Codex is weekly-only; both Antigravity pools are in the last 20% of their weeks with more than 5% left.
+  assert.equal(pillText(work, NOW), "☠8h");
+  assert.equal(pillText(personal, NOW), "57·89 3d");
+  assert.equal(pillText(codex, NOW), "52 4d");
+  assert.equal(pillText(ag, NOW), "G100·6 8h⏳ C100·27 1d⏳");
+  assert.equal(pillText({ ...codex, ok: false }, NOW), "52 4d!");
+  assert.equal(
+    renderLine([{ ...work, short: "CW" }, { ...personal, short: "CP" }, codex, { ...ag, short: "AG" }], NOW),
+    "CW ☠8h · CP 57·89 3d · CX 52 4d · AG G100·6 8h⏳ C100·27 1d⏳",
+  );
 });
 
 test("jsonView exposes ISO reset times and minutes until reset", () => {

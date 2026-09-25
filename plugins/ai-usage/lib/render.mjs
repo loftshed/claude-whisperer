@@ -80,15 +80,40 @@ export function renderReport(accounts, { color = false, now = Date.now(), refres
 // Marks limits that are used up: the ☠ group in the menu bar and `line`, and dead rows in the terminal view.
 export const SKULL = "☠";
 
-const entryLabel = (e) => (e.tag ? `${e.label}·${e.tag}` : e.label);
+// Marks the pool that is expiring: near its weekly rollover with capacity left.
+export const HOURGLASS = "⏳";
 
-/** One line for tmux or a status line: "5h CP 53 · … | wk CP 82 · CX 49 · … | ☠ CW" (☠ = used up for the week). */
+/** Time until a rollover in the largest whole unit: "3d", "5h", "40m". */
+export function timeLeft(resetsAt, now = Date.now()) {
+  if (!resetsAt) return "";
+  const minutes = Math.floor((resetsAt - now) / 60_000);
+  if (minutes <= 0) return "now";
+  if (minutes >= 1440) return `${Math.floor(minutes / 1440)}d`;
+  if (minutes >= 60) return `${Math.floor(minutes / 60)}h`;
+  return `${minutes}m`;
+}
+
+/**
+ * One provider's pill as text: "16·78 3d" (5-hour % left · weekly % left, then time to the weekly rollover),
+ * "49 4d" when there is no 5-hour limit, "☠5h" when the week is used up (then time until it is back).
+ * Antigravity's pools are tagged: "G76·3 4h C100·27 1d⏳".
+ */
+export function pillText(account, now = Date.now()) {
+  const list = pills(account, now);
+  if (list.length === 0) return "?";
+  const pct = (g) => String(Math.floor(g.pct));
+  const pools = list.map((p) => {
+    const tag = p.tag ?? "";
+    if (p.weekly?.exhausted) return `${tag}${SKULL}${timeLeft(p.weekly.resetsAt, now)}`;
+    const weekly = p.weekly ? `${pct(p.weekly)} ${timeLeft(p.weekly.resetsAt, now)}`.trim() + (p.weekly.expiring ? HOURGLASS : "") : "";
+    return tag + [p.short && pct(p.short), weekly].filter(Boolean).join("·");
+  });
+  return pools.join(" ") + (account.ok === false ? "!" : "");
+}
+
+/** One line for tmux or a status line, one group per provider: "CW ☠5h · CP 16·78 3d · CX 49 4d · AG …". */
 export function renderLine(accounts, now = Date.now()) {
-  const { sections: list, exhausted, unavailable } = sections(accounts, now);
-  const parts = list.map((s) => `${s.label} ${s.entries.map((e) => `${entryLabel(e)} ${Math.floor(e.pct)}${e.stale ? "!" : ""}`).join(" · ")}`);
-  if (exhausted.length) parts.push(`${SKULL} ${exhausted.map((e) => entryLabel(e)).join(" · ")}`);
-  if (unavailable.length) parts.push(unavailable.map((u) => `${u.label} ?`).join(" · "));
-  return parts.join(" | ");
+  return accounts.map((a) => `${a.short} ${pillText(a, now)}`).join(" · ");
 }
 
 const iso = (ms) => (ms ? new Date(ms).toISOString() : null);

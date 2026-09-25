@@ -52,7 +52,8 @@ test("a refresh lock left by a dead process is taken over instead of waited on",
   const started = Date.now();
   const result = runCli(["line", "--max-age", "0"], cache);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), "wk CX 75");
+  // One pill per provider: 75% of the week left, rollover in under a day with capacity left, so it is expiring.
+  assert.match(result.stdout.trim(), /^CX 75 2[34]h⏳$/);
   assert.ok(Date.now() - started < 15_000, "did not wait for the dead owner");
   assert.equal(existsSync(join(cache, "refresh.lock")), false, "lock released afterwards");
 });

@@ -3,6 +3,14 @@
 All notable changes to this project. Versions follow [semver](https://semver.org); the `ai-usage json`
 schema (`ai-usage.snapshot.v1`) changes its suffix on any breaking change to its shape.
 
+## 0.8.0 (2026-09-25)
+
+- Menu bar redesigned around providers: one pill each, showing every pool's 5-hour % left and weekly % left,
+  with the time until the weekly rollover as its unit (`3d`, `5h`) instead of a WK header. ☠ plus the time until
+  it is back replaces a week that is used up; an expiring pool's time turns orange with ⏳. `ai-usage line`
+  uses the same layout; `accounts[].pills` gauges carry `windowMins`, `exhausted` and `expiring`.
+- Muted menu bar colours resolve when drawn, so they follow the menu bar between light and dark.
+
 ## 0.7.1 (2026-09-25)
 
 - Repeated macOS permission prompts for "AI Usage": `install.sh` rebuilt and re-signed the ad-hoc-signed app on
