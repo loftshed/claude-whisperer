@@ -51,7 +51,7 @@ export function parseAntigravityUsage(payload) {
       windowIds.push(id);
     }
     const models = (group.description ?? "").replace(/^Models within this group:\s*/i, "");
-    pools.push({ id: poolId, label, families: families(group), models, windowIds });
+    if (windowIds.length) pools.push({ id: poolId, label, families: families(group), models, windowIds });
   }
   return { windows, pools, notes: [] };
 }

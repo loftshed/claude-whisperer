@@ -23,6 +23,8 @@ Results are cached for about 3 minutes. Pass `refresh: true` only after heavy us
 - `status: "blocked"`: a window in that pool is exhausted; `blockedUntil` says when it refills.
 - `availableNowPct`: the tightest window right now, usually the 5-hour window. Below ~20%, a long task
   may stall mid-way.
+- `expiring` (with `expiresAt`, `burnPctPerHour`): the pool is near its weekly rollover with capacity left.
+  That remainder is lost at the rollover. Pools are ranked with expiring ones first.
 - `surplusPts`: weekly % left minus what even use until reset would leave. Positive means the account
   is under-used and that capacity is lost at reset unless spent; negative means it is being used faster
   than it refills, so conserve it.
@@ -33,7 +35,8 @@ Results are cached for about 3 minutes. Pass `refresh: true` only after heavy us
 1. **The ranking is advice, not authorization.** Only route to accounts the user allows for this work.
    Switching between work and personal accounts switches billing context. Follow the user's standing
    rules (for example, personal Claude only when the user asked for personal quota). Otherwise ask.
-2. Among allowed pools, prefer the highest positive `surplusPts` whose models fit the task. Quota never
+2. Among allowed pools whose models fit the task, prefer an `expiring` pool first and give it the larger
+   tasks, aiming for about `burnPctPerHour`; otherwise prefer the highest positive `surplusPts`. Quota never
    overrides capability: do not send work to a weaker model just because it has quota to spare.
 3. If the natural route is blocked, say so with its refill time, then offer the next allowed route or
    waiting, whichever the task tolerates.

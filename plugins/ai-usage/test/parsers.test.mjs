@@ -84,15 +84,25 @@ function sampleAccounts() {
   ];
 }
 
-test("buildLanes ranks under-used pools first and exhausted ones last", () => {
-  const lanes = buildLanes(sampleAccounts(), NOW);
-  assert.equal(lanes[0].accountId, "claude-personal");
-  assert.equal(lanes.at(-1).accountId, "claude-work");
-  assert.equal(lanes.at(-1).status, "blocked");
-  assert.equal(new Date(lanes.at(-1).blockedUntil).toISOString(), "2026-09-26T00:59:00.000Z");
-  const gemini = lanes.find((l) => l.poolId === "gemini");
-  assert.match(gemini.advice, /on pace/);
-  const fable = lanes.find((l) => l.accountId === "claude-personal" && l.poolId === "fable");
+test("buildLanes ranks expiring pools first, then roomy ones, then nearly empty, then blocked", () => {
+  const lanes = buildLanes(sampleAccounts(), NOW).filter((l) => !l.redundant);
+  // At NOW: Antigravity's Claude & GPT pool has 27.8% left and resets in ~32 h (last 20% of its week), so it is
+  // expiring and goes first; personal Claude is under-used but has 3 days; Gemini has 6% usable (low room);
+  // work Claude is out for the week.
+  assert.deepEqual(lanes.map((l) => [l.accountId, l.poolId, l.status]), [
+    ["antigravity", "claude-gpt", "available"],
+    ["claude-personal", "all", "available"],
+    ["antigravity", "gemini", "available"],
+    ["claude-work", "all", "blocked"],
+  ]);
+  const [expiring, personal, gemini, work] = lanes;
+  assert.equal(expiring.expiring, true);
+  assert.match(expiring.advice, /^use it or lose it: 27% of the weekly limit resets .* \(in 31h 4\dm\); ~0\.9%\/h uses it all$/);
+  assert.match(personal.advice, /under-used, spend freely/);
+  assert.equal(gemini.lowRoom, true);
+  assert.match(gemini.advice, /only 6% usable now: small tasks only/);
+  assert.equal(new Date(work.blockedUntil).toISOString(), "2026-09-26T00:59:00.000Z");
+  const fable = buildLanes(sampleAccounts(), NOW).find((l) => l.accountId === "claude-personal" && l.poolId === "fable");
   assert.equal(fable.subPoolOf, "all");
   assert.equal(fable.redundant, true, "Fable row adds nothing while the all-models limit binds");
 });

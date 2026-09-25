@@ -98,8 +98,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // e.g. on a macOS permission prompt. Stop it so the menu shows an error instead of "AI …" forever.
         let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
         DispatchQueue.global().asyncAfter(deadline: .now() + 180, execute: watchdog)
+        // Drain stderr concurrently: reading stdout to the end first would deadlock if the child filled the
+        // stderr pipe (64 KB) before closing stdout.
+        var errData = Data()
+        let stderrDone = DispatchGroup()
+        stderrDone.enter()
+        DispatchQueue.global(qos: .utility).async {
+            errData = err.fileHandleForReading.readDataToEndOfFile()
+            stderrDone.leave()
+        }
         let data = out.fileHandleForReading.readDataToEndOfFile()
-        let errData = err.fileHandleForReading.readDataToEndOfFile()
+        stderrDone.wait()
         process.waitUntilExit()
         watchdog.cancel()
         if process.terminationReason == .uncaughtSignal {
@@ -136,9 +145,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static let skull = "\u{2620}\u{FE0E}"
 
     /// `value` is empty for entries in the ☠ group, which lists names only.
-    private struct Entry { let label: String; let tag: String?; let value: String; let level: String; let stale: Bool }
+    private struct Entry { let label: String; let tag: String?; let value: String; let level: String; let stale: Bool; let expiring: Bool }
     private struct Section { let header: String; let skull: Bool; let entries: [Entry] }
-    private typealias BarModel = (sections: [Section], unavailable: [String])
+    private typealias BarModel = (sections: [Section], unavailable: [String], refreshFailed: Bool)
 
     private let barHeaderFont = NSFont.systemFont(ofSize: 9, weight: .heavy)
     private let barLabelFont = NSFont.systemFont(ofSize: 10.5, weight: .medium)
@@ -146,6 +155,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let barNumberFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .semibold)
     // The skull glyph is drawn small by the symbol font; a larger size makes it read at a glance.
     private let barSkullFont = NSFont.systemFont(ofSize: 14, weight: .regular)
+    private let barMarkFont = NSFont.systemFont(ofSize: 8.5, weight: .regular)
+    /// After a pool that is near its weekly rollover with capacity left: spend it before it is lost.
+    static let expiringMark = "\u{23F3}"
 
     /// `ai-usage json`: one section per limit window length ("5h", "wk", …), then a ☠ section for pools
     /// whose weekly (or longer) limit is used up, then accounts with no data.
@@ -154,7 +166,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let pct = raw["pct"] as? Double ?? 0
             return Entry(label: raw["label"] as? String ?? "?", tag: raw["tag"] as? String,
                          value: withValue ? String(Int(pct.rounded(.down))) : "",
-                         level: raw["level"] as? String ?? level(for: pct), stale: (raw["stale"] as? Bool) == true)
+                         level: raw["level"] as? String ?? level(for: pct), stale: (raw["stale"] as? Bool) == true,
+                         expiring: withValue && (raw["expiring"] as? Bool) == true)
         }
         var sections = (snapshot?["sections"] as? [[String: Any]] ?? []).map { section in
             Section(header: (section["label"] as? String ?? "?").uppercased(), skull: false,
@@ -163,7 +176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let exhausted = (snapshot?["exhausted"] as? [[String: Any]] ?? []).map { entry($0, withValue: false) }
         if !exhausted.isEmpty { sections.append(Section(header: AppDelegate.skull, skull: true, entries: exhausted)) }
         let unavailable = (snapshot?["unavailable"] as? [[String: Any]] ?? []).map { $0["label"] as? String ?? "?" }
-        return (sections, unavailable)
+        return (sections, unavailable, lastError != nil)
     }
 
     private func width(_ text: String, _ font: NSFont) -> CGFloat {
@@ -180,6 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             width(entry.label, barLabelFont) + (entry.tag.map { width($0, barTagFont) + 1 } ?? 0)
                 + (entry.value.isEmpty ? 0 : labelGap + width(entry.value, barNumberFont))
                 + (entry.stale ? width("!", barNumberFont) : 0)
+                + (entry.expiring ? 1 + width(AppDelegate.expiringMark, barMarkFont) : 0)
         }
         func sectionWidth(_ section: Section) -> CGFloat {
             2 * inset + width(section.header, headerFont(section)) + headerGap
@@ -188,6 +202,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let unavailableText = model.unavailable.map { "\($0) ?" }.joined(separator: "  ")
         var total = model.sections.map(sectionWidth).reduce(0, +) + CGFloat(max(0, model.sections.count - 1)) * sectionGap
         if !unavailableText.isEmpty { total += (total > 0 ? sectionGap : 0) + width(unavailableText, barLabelFont) }
+        // The last refresh failed as a whole: the numbers are from the previous one.
+        let failedMark = "\u{26A0}\u{FE0E}"
+        if model.refreshFailed { total += (total > 0 ? sectionGap : 0) + width(failedMark, barLabelFont) }
 
         let image = NSImage(size: NSSize(width: max(total, 1), height: height), flipped: false) { [self] _ in
             @discardableResult
@@ -217,12 +234,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         cx += draw(entry.value, barNumberFont, levelText(color(for: entry.level)), at: cx)
                     }
                     if entry.stale { cx += draw("!", barNumberFont, .systemRed, at: cx) }
+                    if entry.expiring { cx += 1 + draw(AppDelegate.expiringMark, barMarkFont, .labelColor, at: cx + 1) }
                 }
                 x += boxWidth
             }
             if !unavailableText.isEmpty {
                 if x > 0 { x += sectionGap }
-                draw(unavailableText, barLabelFont, .systemRed, at: x)
+                x += draw(unavailableText, barLabelFont, .systemRed, at: x)
+            }
+            if model.refreshFailed {
+                if x > 0 { x += sectionGap }
+                draw(failedMark, barLabelFont, .systemRed, at: x)
             }
             return true
         }
@@ -242,11 +264,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var parts = model.sections.map { section -> String in
             let entries = section.entries.map { entry -> String in
                 let label = entry.tag.map { tag in "\(entry.label)·\(tag)" } ?? entry.label
-                return (entry.value.isEmpty ? label : "\(label) \(entry.value)") + (entry.stale ? "!" : "")
+                return (entry.value.isEmpty ? label : "\(label) \(entry.value)") + (entry.stale ? "!" : "") + (entry.expiring ? AppDelegate.expiringMark : "")
             }
             return "\(section.header) " + entries.joined(separator: " · ")
         }
         if !model.unavailable.isEmpty { parts.append(model.unavailable.map { "\($0) ?" }.joined(separator: " · ")) }
+        if model.refreshFailed { parts.append("refresh failed") }
         return parts.joined(separator: " | ")
     }
 
@@ -258,11 +281,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let model = barModel()
+        if model.sections.isEmpty && model.unavailable.isEmpty {
+            // Nothing to draw (no accounts configured, or output from an older ai-usage without sections).
+            button.image = nil
+            button.attributedTitle = NSAttributedString(string: model.refreshFailed ? "AI ⚠" : "AI –", attributes: [.font: titleFont])
+            button.toolTip = lastError ?? "ai-usage returned no accounts; run ai-usage config to check the configuration"
+            return
+        }
         button.attributedTitle = NSAttributedString(string: "")
         button.image = barImage(model)
         button.imagePosition = .imageOnly
         button.setAccessibilityLabel("AI usage, % left: " + barSummary(model))
-        button.toolTip = "% left, grouped by limit window: 5H = 5-hour, WK = weekly.\n☠ = used up for the week (details in the menu).\nAntigravity pools: G = Gemini, C = Claude & GPT-OSS. ! = last refresh failed."
+        button.toolTip = "% left, grouped by limit window: 5H = 5-hour, WK = weekly.\n☠ = used up for the week · ⏳ = weekly rollover soon with capacity left: spend it (details in the menu).\nAntigravity pools: G = Gemini, C = Claude & GPT-OSS. ! = last refresh failed."
     }
 
     /// `AIUsageBar --render-title <png> [--light]`: draw the menu bar pills to a PNG for checking.
@@ -342,7 +372,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             status = "Updated \(clock(date))"
         }
         menu.addItem(infoItem(text("AI usage · \(status)", monoBold, .secondaryLabelColor)))
-        menu.addItem(infoItem(text("Menu bar: % left by limit window (5H, WK) · ☠ = used up for the week · G = Gemini, C = Claude & GPT-OSS", mono, .tertiaryLabelColor)))
+        menu.addItem(infoItem(text("Menu bar: % left by limit window (5H, WK) · ⏳ = rollover soon, spend it · ☠ = used up for the week · G = Gemini, C = Claude & GPT-OSS", mono, .tertiaryLabelColor)))
         if let lastError {
             menu.addItem(infoItem(text("⚠ \(lastError.prefix(120))", mono, .systemRed)))
         }

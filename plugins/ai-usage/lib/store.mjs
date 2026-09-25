@@ -14,7 +14,9 @@ export const CONFIG_PATH = expandHome(process.env.AI_USAGE_CONFIG ?? join(homedi
 export const CACHE_DIR = expandHome(process.env.AI_USAGE_CACHE_DIR ?? join(homedir(), ".cache", "ai-usage"));
 const SNAPSHOT_PATH = join(CACHE_DIR, "snapshot.json");
 const LOCK_DIR = join(CACHE_DIR, "refresh.lock");
-const LOCK_STALE_MS = 120_000;
+// A live owner keeps its lock however slow the providers are; only a lock this old is presumed abandoned
+// (hung owner, or its pid reused by another process).
+const LOCK_MAX_AGE_MS = 10 * 60_000;
 
 // Without a config file, monitor whatever is installed, so a fresh machine or plugin install works as-is.
 export function loadConfig() {
@@ -35,9 +37,12 @@ export function loadConfig() {
   return config;
 }
 
+// Atomic, so an MCP server reading the config mid-write never sees half a file.
 export function writeConfig(config) {
   mkdirSync(dirname(CONFIG_PATH), { recursive: true });
-  writeFileSync(CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`);
+  const tmp = `${CONFIG_PATH}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`);
+  renameSync(tmp, CONFIG_PATH);
 }
 
 function readSnapshot() {
@@ -61,7 +66,7 @@ let holdingLock = false;
 // Free the lock when this process exits mid-refresh (e.g. `watch` quitting). A killed process cannot
 // clean up, so waiters also treat a lock whose owner is gone as stale.
 process.on("exit", () => {
-  if (holdingLock) rmSync(LOCK_DIR, { recursive: true, force: true });
+  if (holdingLock) unlock();
 });
 
 function ownerAlive(pid) {
@@ -76,7 +81,7 @@ function ownerAlive(pid) {
 function lockIsStale() {
   try {
     const age = Date.now() - statSync(LOCK_DIR).mtimeMs;
-    if (age > LOCK_STALE_MS) return true;
+    if (age > LOCK_MAX_AGE_MS) return true;
     const pid = Number(readFileSync(LOCK_OWNER, "utf8"));
     return Number.isInteger(pid) && pid > 0 && !ownerAlive(pid);
   } catch (err) {
@@ -103,10 +108,18 @@ function tryLock() {
   return false;
 }
 
+// Remove the lock only if it is still ours: after a takeover, another process owns the directory.
 function unlock() {
   holdingLock = false;
+  try {
+    if (Number(readFileSync(LOCK_OWNER, "utf8")) !== process.pid) return;
+  } catch {
+    return;
+  }
   rmSync(LOCK_DIR, { recursive: true, force: true });
 }
+
+export const _lockInternals = { lockIsStale, tryLock, unlock, LOCK_DIR };
 
 function staleIds(config, snapshot, maxAgeMs, now) {
   return config.accounts
@@ -146,6 +159,8 @@ export async function getAccounts({ maxAgeSeconds, force = false, config = loadC
         const accounts = config.accounts.filter((a) => ids.includes(a.id));
         const results = await Promise.all(accounts.map((a) => fetchAccount(a, config, snapshot.accounts[a.id])));
         for (const entry of results) snapshot.accounts[entry.id] = entry;
+        // Drop accounts that are no longer configured instead of carrying them forever.
+        for (const id of Object.keys(snapshot.accounts)) if (!config.accounts.some((a) => a.id === id)) delete snapshot.accounts[id];
         snapshot.updatedAt = Date.now();
         writeSnapshot(snapshot);
       } finally {

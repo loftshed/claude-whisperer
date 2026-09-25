@@ -45,8 +45,15 @@ function isValidZone(timeZone) {
  * "Sep 28, 5pm (America/Toronto)" or "3pm (America/Toronto)". The year is never printed,
  * so it is inferred as the nearest occurrence that is not far in the past.
  */
+const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+
 export function parseResetText(text, now = Date.now()) {
   if (!text) return null;
+  // Relative form: "in 2h 15m", "in 45 minutes", "in 3 days".
+  const rel = text.match(/^\s*in\s+(?:(\d+)\s*d(?:ays?)?\b\s*)?(?:(\d+)\s*h(?:ours?|rs?)?\b\s*)?(?:(\d+)\s*m(?:in(?:ute)?s?)?\b)?/i);
+  if (rel && (rel[1] || rel[2] || rel[3])) {
+    return now + Number(rel[1] ?? 0) * DAY + Number(rel[2] ?? 0) * HOUR + Number(rel[3] ?? 0) * 60_000;
+  }
   const tzMatch = text.match(/\(([^()]+)\)\s*$/);
   const timeZone = tzMatch && isValidZone(tzMatch[1].trim()) ? tzMatch[1].trim() : Intl.DateTimeFormat().resolvedOptions().timeZone;
   const body = tzMatch ? text.slice(0, tzMatch.index) : text;
@@ -65,8 +72,17 @@ export function parseResetText(text, now = Date.now()) {
     const candidates = [today.year - 1, today.year, today.year + 1].map((y) => zonedTimeToUtc(y, month, day, hour, minute, timeZone));
     return candidates.find((t) => t >= now - DAY) ?? candidates.at(-1);
   }
-  let t = zonedTimeToUtc(today.year, today.month, today.day, hour, minute, timeZone);
-  if (t < now - 60_000) t += DAY;
+  // No date: today, "tomorrow", or the next given weekday. Roll forward by recomputing in the zone, not by
+  // adding 24 h, so a daylight-saving change in between does not shift the hour.
+  let offset = 0;
+  const weekday = body.match(/\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*\b/i);
+  if (/\btomorrow\b/i.test(body)) offset = 1;
+  else if (weekday) {
+    const todayDow = new Date(Date.UTC(today.year, today.month, today.day)).getUTCDay();
+    offset = (WEEKDAYS.indexOf(weekday[1].toLowerCase()) - todayDow + 7) % 7;
+  }
+  let t = zonedTimeToUtc(today.year, today.month, today.day + offset, hour, minute, timeZone);
+  if (t < now - 60_000) t = zonedTimeToUtc(today.year, today.month, today.day + offset + (weekday ? 7 : 1), hour, minute, timeZone);
   return t;
 }
 

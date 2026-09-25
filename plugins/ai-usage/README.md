@@ -39,9 +39,12 @@ The default Claude profile must run with `CLAUDE_CONFIG_DIR` **unset**: Claude C
 Percentages are relative to each account's own allowance; 1% of one plan is not 1% of another. The ranking asks a question that is comparable across accounts: **how much of this allowance is lost at reset unless spent?**
 
 - `pts` (surplus) = weekly % remaining minus the % that would remain if the window were used evenly until it resets. +44 means 44 points of this week's allowance are unused beyond an even pace.
-- A pool is **blocked** when any of its windows is exhausted, and ranks last with its unblock time.
-- The score is `min(surplus, % usable right now)`, so a full weekly allowance behind an exhausted 5-hour window does not rank first.
-- Advice flags `use it or lose it` when ≥10% of a weekly window expires within 24 h.
+- Pools are ranked in tiers:
+  1. **Expiring**: in the last 20% of a day-or-longer window (about 34 h of a week) with at least 5% left. That remainder is lost at the rollover, so these go first, most urgent first (highest %/h needed to use it all), with advice like "use it or lose it: 27% of the weekly limit resets Sat 8:25 PM (in 28h); ~1%/h uses it all". The menu bar marks them ⏳.
+  2. **Pools with room**, by `min(surplus, % usable right now)`, so a full week behind an exhausted 5-hour window does not rank first.
+  3. **Nearly empty**: under 10% usable right now ("small tasks only"), whatever their surplus. A cheap pool that stalls mid-task costs more than it saves.
+  4. **Blocked** (a window exhausted), soonest back first; then accounts with no data.
+- Every provider reports exact reset times (Codex and Antigravity as timestamps, Claude as local times), and a window past its reset counts as full again without waiting for a refetch.
 
 Pools are the independently limited groups inside an account: Antigravity's Gemini pool and its Claude/GPT pool, or Claude's all-models limit and a per-model weekly cap such as Fable. A per-model cap is hidden from the ranking unless it binds harder than its parent.
 

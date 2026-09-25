@@ -36,7 +36,9 @@ export function parseCodexRateLimits(result) {
       });
       windowIds.push(id);
     }
-    pools.push({ id: limitId, label: limitId === "codex" ? "Codex models" : (limit.limitName ?? limitId), families: ["gpt"], windowIds });
+    // A limit with no windows (e.g. a feature-specific entry) is not a pool; an empty pool would look like the
+    // parent of every other pool and hide them.
+    if (windowIds.length) pools.push({ id: limitId, label: limitId === "codex" ? "Codex models" : (limit.limitName ?? limitId), families: ["gpt"], windowIds });
     if (limit.rateLimitReachedType) notes.push(`limit reached: ${limit.rateLimitReachedType}`);
     if (limit.spendControlReached) notes.push("spend control reached");
     const credits = limit.credits;
@@ -79,6 +81,8 @@ function rpcRateLimits(bin, env, timeoutMs) {
         } catch {
           continue;
         }
+        // The server can send its own requests (with a method) whose ids overlap ours; only answers count.
+        if ("method" in msg) continue;
         if (msg.id === 1) {
           if (msg.error) return finish(reject, new Error(`codex initialize: ${msg.error.message}`));
           send({ method: "initialized" });

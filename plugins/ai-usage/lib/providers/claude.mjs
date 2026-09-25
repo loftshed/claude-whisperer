@@ -17,12 +17,16 @@ export function parseClaudeUsage(text, now = Date.now()) {
   const scoped = [];
   for (const raw of text.split("\n")) {
     const line = raw.trim();
-    const m = line.match(/^Current (session|week)(?:\s*\(([^)]+)\))?\s*:\s*(\d+(?:\.\d+)?)%\s*used(?:\s*·\s*resets?\s+(.+))?$/i);
+    const m = line.match(/^Current (session|week)(?:\s*\(([^)]+)\))?\s*:\s*(\d+(?:\.\d+)?)%\s*used\b(.*)$/i);
     if (!m) {
       if (/^extra usage/i.test(line)) notes.push(line);
       continue;
     }
-    const [, period, scope, used, reset] = m;
+    const [, period, scope, used, rest] = m;
+    // Whatever separates "used" from the reset ("·", "-", "(resets …)"), take the text after "resets" and drop
+    // one unbalanced closing parenthesis left by the "(resets … (Zone))" form.
+    let reset = rest.match(/resets?\s+(.+?)\s*$/i)?.[1];
+    if (reset && (reset.match(/\)/g) ?? []).length > (reset.match(/\(/g) ?? []).length) reset = reset.replace(/\)\s*$/, "");
     const usedPct = Number(used);
     const resetsAt = reset ? parseResetText(reset, now) : null;
     if (period.toLowerCase() === "session") {

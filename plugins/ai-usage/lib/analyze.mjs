@@ -37,28 +37,52 @@ function pace(w, now) {
   };
 }
 
+// Below this much usable right now a pool can barely take a task, whatever its weekly surplus.
+const LOW_ROOM_PCT = 10;
+// A day-or-longer limit is expiring in the last 20% of its window (about 34 h of a week) with at least 5%
+// left: that remainder is lost at the rollover unless it is spent, so it goes first.
+const EXPIRING_FRACTION = 0.2;
+const EXPIRING_MIN_PCT = 5;
+
+export function isExpiring(w, now = Date.now()) {
+  if (!w.resetsAt || !w.windowMins || w.windowMins < 1440 || w.remainingPct < EXPIRING_MIN_PCT) return false;
+  const hoursLeft = (w.resetsAt - now) / HOUR;
+  return hoursLeft > 0 && hoursLeft <= (w.windowMins / 60) * EXPIRING_FRACTION;
+}
+
+const rate = (pctPerHour) => (pctPerHour >= 10 ? Math.round(pctPerHour) : Math.round(pctPerHour * 10) / 10);
+
 function laneAdvice(lane, now) {
   if (lane.status === "error") return `no data: ${lane.error}`;
   if (lane.status === "blocked") {
     return lane.blockedUntil ? `out until ${formatClock(lane.blockedUntil, now)} (in ${formatDuration(lane.blockedUntil - now)})` : "out (reset time unknown)";
   }
   const parts = [];
-  const p = lane.pace;
-  if (p) {
-    if (p.hoursLeft < 24 && lane.weeklyRemainingPct >= 10) parts.push(`${Math.round(lane.weeklyRemainingPct)}% expires in ${formatDuration(p.hoursLeft * HOUR)}, use it or lose it`);
-    else if (p.surplus >= 15) parts.push("under-used, spend freely");
-    else if (p.surplus <= -10) parts.push("ahead of pace, conserve");
+  const e = lane.expiringWindow;
+  if (e) {
+    parts.push(`use it or lose it: ${Math.floor(e.remainingPct)}% of the ${durationName(e.windowMins)} limit resets ${formatClock(e.resetsAt, now)} (in ${formatDuration(e.resetsAt - now)}); ~${rate(lane.burnPctPerHour)}%/h uses it all`);
+  } else if (lane.pace) {
+    if (lane.pace.surplus >= 15) parts.push("under-used, spend freely");
+    else if (lane.pace.surplus <= -10) parts.push("ahead of pace, conserve");
     else parts.push("on pace");
   }
-  if (lane.shortWindow && lane.shortWindow.remainingPct < 20) {
-    const w = lane.shortWindow;
-    parts.push(`5-hour window ${Math.round(w.remainingPct)}% left${w.resetsAt ? `, refills in ${formatDuration(w.resetsAt - now)}` : ""}`);
+  const w = lane.shortWindow;
+  if (lane.lowRoom) {
+    const refill = w && w.remainingPct < LOW_ROOM_PCT && w.resetsAt ? `, refills in ${formatDuration(w.resetsAt - now)}` : "";
+    parts.push(`only ${Math.floor(lane.availableNowPct)}% usable now: small tasks only${refill}`);
+  } else if (w && w.remainingPct < 20) {
+    parts.push(`${durationName(w.windowMins)} window ${Math.round(w.remainingPct)}% left${w.resetsAt ? `, refills in ${formatDuration(w.resetsAt - now)}` : ""}`);
   }
   if (lane.stale) parts.push(`data ${formatDuration(now - lane.fetchedAt)} old`);
   return parts.join("; ") || "available";
 }
 
-/** Every routable pool across all accounts, ranked best-to-spend first. */
+/**
+ * Every routable pool across all accounts, best to spend first:
+ *   1. expiring pools with room, most urgent (highest %/h needed to use it all) first;
+ *   2. other pools with room, by min(surplus vs even pace, % usable now);
+ *   3. pools with under 10% usable now; 4. blocked pools, soonest back first; 5. pools with no data.
+ */
 export function buildLanes(accounts, now = Date.now()) {
   const lanes = [];
   for (const account of accounts) {
@@ -82,7 +106,14 @@ export function buildLanes(accounts, now = Date.now()) {
       const stale = account.ok === false || (account.fetchedAt && now - account.fetchedAt > HOUR);
       const status = exhausted.length ? "blocked" : "available";
       const surplus = binding?.surplus ?? 0;
-      const score = status === "blocked" ? -1000 - (blockedUntil ? (blockedUntil - now) / HOUR : 999) : Math.min(surplus, availableNowPct);
+      const expiringWindow = status === "available" ? long.filter((w) => isExpiring(w, now)).sort((a, b) => a.resetsAt - b.resetsAt)[0] ?? null : null;
+      const burnPctPerHour = expiringWindow ? Math.min(expiringWindow.remainingPct, weeklyRemainingPct) / Math.max((expiringWindow.resetsAt - now) / HOUR, 0.25) : null;
+      const lowRoom = status === "available" && availableNowPct < LOW_ROOM_PCT;
+      let score;
+      if (status === "blocked") score = -1000 - (blockedUntil ? (blockedUntil - now) / HOUR : 999);
+      else if (lowRoom) score = -500 + Math.min(surplus, availableNowPct);
+      else if (expiringWindow) score = 1000 + burnPctPerHour;
+      else score = Math.min(surplus, availableNowPct);
       const lane = {
         ...base,
         poolId: pool.id,
@@ -96,6 +127,10 @@ export function buildLanes(accounts, now = Date.now()) {
         blockedUntil,
         pace: binding,
         shortWindow,
+        expiringWindow,
+        expiring: Boolean(expiringWindow),
+        burnPctPerHour,
+        lowRoom,
         stale: Boolean(stale),
         score,
       };
@@ -123,7 +158,7 @@ function markRedundantSubPools(lanes, pools) {
 // A pool whose windows are a strict superset of another pool's (e.g. Claude's per-model weekly cap) is a
 // sub-limit of that pool; compact views show only the independent pools.
 function independentPools(account) {
-  const pools = account.pools ?? [];
+  const pools = (account.pools ?? []).filter((p) => p.windowIds.length > 0);
   return pools.filter(
     (p) => !pools.some((q) => q !== p && q.windowIds.length < p.windowIds.length && q.windowIds.every((id) => p.windowIds.includes(id))),
   );
@@ -177,6 +212,14 @@ export function blockedWindows(account, now = Date.now()) {
   return blocked;
 }
 
+/** Name for a window length in prose: "weekly", "daily", "5-hour", else the short label. */
+export function durationName(mins) {
+  if (mins === 10080) return "weekly";
+  if (mins === 1440) return "daily";
+  if (Number.isFinite(mins) && mins > 0 && mins < 1440 && mins % 60 === 0) return `${mins / 60}-hour`;
+  return durationLabel(mins);
+}
+
 /** Short name for a window length: "5h", "wk", "1d", "30d". Unknown lengths are "limit". */
 export function durationLabel(mins) {
   if (!Number.isFinite(mins) || mins <= 0) return "limit";
@@ -226,6 +269,7 @@ export function sections(accounts, now = Date.now()) {
           pct: w.remainingPct,
           level: level(w.remainingPct),
           exhausted: w.remainingPct <= EXHAUSTED_PCT,
+          expiring: isExpiring(w, now),
           resetsAt: w.resetsAt ?? null,
         });
       }
@@ -240,6 +284,7 @@ export function headline(account, now = Date.now()) {
   if (!account.windows?.length) return { text: "?", level: "error" };
   const windows = new Map(effectiveWindows(account, now).map((w) => [w.id, w]));
   const independent = independentPools(account);
+  if (independent.length === 0) return { text: "?", level: "error" };
   const values = independent.map((p) => Math.min(...p.windowIds.map((id) => windows.get(id)?.remainingPct ?? 100)));
   const best = Math.max(...values);
   return { text: values.map((v) => String(Math.floor(v))).join("/"), level: level(best), values, levels: values.map(level) };

@@ -3,6 +3,31 @@
 All notable changes to this project. Versions follow [semver](https://semver.org); the `ai-usage json`
 schema (`ai-usage.snapshot.v1`) changes its suffix on any breaking change to its shape.
 
+## 0.7.0 (2026-09-25)
+
+Use it or lose it:
+
+- Ranking tiers: expiring pools (last 20% of a day-or-longer window with at least 5% left) first, by the
+  %/h needed to use them up; then pools with room; then pools under 10% usable now ("small tasks only");
+  then blocked. Lanes carry `expiring`, `expiresAt`, `burnPctPerHour`, `lowRoom`; the menu bar marks
+  expiring pools ⏳ and the MCP tools open with an "Expiring soon, spend first" line.
+
+Fixes from a deep bug hunt:
+
+- A slow refresh's lock (a live owner past 120 s) could be taken over, and the original owner's unlock then
+  deleted the new owner's lock. Live owners keep their lock (up to 10 min); unlock removes only its own.
+- `codex app-server` requests that reuse our JSON-RPC ids were taken for its answers.
+- A Codex or Antigravity limit with no windows became an empty pool that hid the real one (headline
+  "Infinity", no Codex in the menu bar).
+- Claude `/usage` lines with a separator other than "·", or "(resets …)", lost their reset time or window.
+- Reset text "in 2h 15m" was read as 2 AM; "tomorrow" and weekday forms are handled; rolling to the next
+  day recomputes in the zone instead of adding 24 h across a daylight-saving change.
+- MCP: `arguments: null` failed the call; JSON-RPC batches got no reply; invalid messages got no error.
+  `get_usage` output is about half the size (compact JSON without display-only fields) and includes billing.
+- Menu bar: a failed refresh kept showing old numbers without notice (now ⚠); no accounts or an older
+  ai-usage showed an invisible bar (now "AI –").
+- Accounts removed from the config are dropped from the cache.
+
 ## 0.6.0 (2026-09-25)
 
 - Menu bar: pools whose weekly (or other day-or-longer) limit is used up leave the 5H/WK boxes and are
