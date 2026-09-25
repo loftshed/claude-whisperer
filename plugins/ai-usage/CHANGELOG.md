@@ -3,6 +3,13 @@
 All notable changes to this project. Versions follow [semver](https://semver.org); the `ai-usage json`
 schema (`ai-usage.snapshot.v1`) changes its suffix on any breaking change to its shape.
 
+## 0.2.0 (2026-09-25)
+
+- `accounts[].billing` (`work` | `personal`) in the config and `ai-usage json`, so agent-executor keeps
+  personal accounts behind its personal-quota authorization.
+- MCP registration limited to the harnesses in use: Claude Code, Codex, agy, Gemini CLI and OpenCode.
+- The skill points agents at agent-executor's built-in quota check.
+
 ## 0.1.0 (2026-09-25)
 
 First release.

@@ -2,8 +2,8 @@
   "maxAgeSeconds": 180,
   "env": {},
   "accounts": [
-    { "id": "claude-work", "provider": "claude", "label": "Claude · work", "short": "CW", "route": "claude" },
-    { "id": "claude-personal", "provider": "claude", "label": "Claude · personal", "short": "CP", "configDir": "~/.claude-personal", "route": "plaude" },
+    { "id": "claude-work", "provider": "claude", "label": "Claude · work", "short": "CW", "route": "claude", "billing": "work" },
+    { "id": "claude-personal", "provider": "claude", "label": "Claude · personal", "short": "CP", "configDir": "~/.claude-personal", "route": "plaude", "billing": "personal" },
     { "id": "codex", "provider": "codex", "label": "Codex · ChatGPT", "short": "CX", "route": "codex" },
     {
       "id": "antigravity",

@@ -43,8 +43,7 @@ Results are cached for about 3 minutes. Pass `refresh: true` only after heavy us
 
 ## With agent-executor
 
-Before choosing `--engine` and `--model`, map the ranking onto routes: `codex` pools map to
-`--engine codex`, Antigravity's Gemini pool to `--engine agy --model gemini-*`, and its Claude & GPT
-pool to `--engine agy` with a Claude or GPT-OSS model. Claude profiles are native to Claude Code
-hosts. The ranking breaks ties between validated routes; it does not replace the skill's own route
-table or its live model catalog check.
+agent-executor reads this data itself: `run_agent.py quota` shows quota per route (`codex`, `agy`
+Gemini, `agy` Claude/GPT-OSS), the runner refuses to launch into an exhausted pool (exit 15), and
+`coordinator.py recommend` with `"access": "live"` ranks candidates by it. The ranking breaks ties
+between validated routes; it does not replace agent-executor's route table or live model catalog check.

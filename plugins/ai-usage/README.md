@@ -104,6 +104,7 @@ ai-usage mcp-install       register the MCP server in Claude, Codex, agy, Gemini
 | `accounts[].provider` | `claude`, `codex` or `antigravity` |
 | `accounts[].configDir` | Claude only: the profile's `CLAUDE_CONFIG_DIR`. Omit for the default profile. |
 | `accounts[].short` | Menu bar and `line` abbreviation |
+| `accounts[].billing` | `work` or `personal`. agent-executor treats `personal` accounts as `personal_subscription` and only routes to them when the user authorizes personal quota |
 | `accounts[].route` / `routes` | How to use this account (shown in rankings and to agents); `routes` is per pool id |
 | `accounts[].command` | Explicit path to the provider CLI |
 | `env` | Extra environment for provider CLIs, e.g. `NODE_EXTRA_CA_CERTS` behind a TLS-inspecting proxy |

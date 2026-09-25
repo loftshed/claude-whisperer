@@ -131,5 +131,6 @@ export async function getAccounts({ maxAgeSeconds, force = false, config = loadC
     short: account.short ?? account.id.slice(0, 2).toUpperCase(),
     route: account.route,
     routes: account.routes ?? {},
+    billing: account.billing ?? null,
   }));
 }

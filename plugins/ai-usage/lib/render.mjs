@@ -91,6 +91,7 @@ export function jsonView(accounts, now = Date.now()) {
       short: a.short,
       provider: a.provider,
       plan: a.plan ?? null,
+      billing: a.billing ?? null,
       ok: a.ok !== false,
       error: a.ok === false ? a.error : null,
       fetchedAt: iso(a.fetchedAt),
