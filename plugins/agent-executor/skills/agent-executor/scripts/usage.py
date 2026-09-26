@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import datetime as dt
+import re
 from typing import Any
 
 BUCKETS = ("fresh_input", "cache_read", "cache_write", "output")
@@ -219,7 +220,9 @@ def estimate_tariff(
         "estimated_usd": None, "actual_charge_usd": None,
         "tariff_verified_at": registry.get("verified_at"), "gaps": [],
     }
-    entry = registry.get("models", {}).get(model)
+    models = registry.get("models", {})
+    # AGY encodes effort in the model slug (gemini-3.8-flash-high); the tariff is per base model.
+    entry = models.get(model) or models.get(re.sub(r"-(low|medium|high)$", "", model))
     if entry is None:
         result["gaps"].append("model_has_no_verified_tariff")
         return result

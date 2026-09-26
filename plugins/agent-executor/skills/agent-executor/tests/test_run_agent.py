@@ -849,10 +849,14 @@ else:
         "Created conversation 11111111-1111-1111-1111-111111111111\n",
         encoding="utf-8",
     )
+    stream_input = None
+    if "--input-format" in sys.argv:
+        stream_input = [json.loads(line) for line in sys.stdin.read().splitlines() if line.strip()]
     capture(
         {
             "term": os.environ.get("TERM"),
             "no_color": os.environ.get("NO_COLOR"),
+            "stream_input": stream_input,
         }
     )
     if "--output-format" in sys.argv:
@@ -1204,6 +1208,16 @@ else:
         self.assertIn("--print=<brief omitted>", result["command"])
         self.assertEqual(capture["term"], "dumb")
         self.assertEqual(capture["no_color"], "1")
+
+    def test_current_agy_reads_the_brief_from_stdin(self) -> None:
+        with mock.patch.dict(os.environ, {"FAKE_AGY_VERSION": "agy 1.2.11"}):
+            exit_code, result, _out_dir, _summary, capture = self.run_main(engine="agy")
+        self.assertEqual(exit_code, 0)
+        self.assertIn("--input-format", result["command"])
+        self.assertNotIn("--print=<brief omitted>", result["command"])
+        [message] = capture["stream_input"]
+        self.assertEqual(message["event"], "user")
+        self.assertIn("EXECUTION AND REPORT CONTRACT", message["message"]["content"])
 
     def test_opencode_glm_uses_high_variant_and_nonsharing_full_permissions(
         self,

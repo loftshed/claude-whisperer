@@ -1,7 +1,7 @@
 {
   "schema": "agent-executor.tariffs.v1",
   "verified_at": "2026-09-18T15:33:00+00:00",
-  "max_age_seconds": 86400,
+  "max_age_seconds": 2592000,
   "currency": "USD",
   "service": "standard_public_api",
   "models": {
@@ -156,6 +156,6 @@
   "limitations": [
     "API reference prices do not establish CLI availability, subscription cost, or quota.",
     "Roles and routing preferences remain hypotheses until measured on accepted tasks.",
-    "Refresh official sources before changing verified_at; never extend freshness without retrieval."
+    "Refresh official sources before changing verified_at; never move verified_at without retrieval. Rates stay usable for 30 days; an entry with an announced change carries revalidate_on and expires on that date."
   ]
 }

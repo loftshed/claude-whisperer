@@ -1489,7 +1489,7 @@ def prepare_job_dir(requested: Path | None, repo: Path) -> Path:
 
 def command_preview(command: list[str]) -> list[str]:
     return [
-        "--print=<brief omitted>" if item.startswith("--print=") else item
+        "--print=<brief omitted>" if item.startswith("--print=") and item != "--print=" else item
         for item in command
     ]
 
@@ -2702,6 +2702,18 @@ def executor_preflight(
     )
 
 
+AGY_STDIN_MIN_VERSION = (1, 1, 15)
+
+
+def version_at_least(version: str | None, minimum: tuple[int, ...]) -> bool:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", version or "")
+    return bool(match) and tuple(int(part) for part in match.groups()) >= minimum
+
+
+def agy_stream_input(brief: str) -> bytes:
+    return (json.dumps({"event": "user", "message": {"content": brief}}) + "\n").encode("utf-8")
+
+
 def build_executor_command(
     *,
     executable: str,
@@ -2717,6 +2729,7 @@ def build_executor_command(
     final_output_path: Path,
     log_path: Path,
     effort: str | None = None,
+    agy_stdin: bool = False,
 ) -> list[str]:
     if engine == "agy":
         command = [executable]
@@ -2738,8 +2751,13 @@ def build_executor_command(
             timeout,
             "--log-file",
             str(log_path),
-            f"--print={submitted_brief_path.read_text(encoding='utf-8')}",
         ]
+        if agy_stdin:
+            # The brief arrives as one stream-json message on stdin, keeping it out of argv
+            # (visible in the process table and bounded by ARG_MAX).
+            command += ["--input-format", "stream-json", "--print="]
+        else:
+            command.append(f"--print={submitted_brief_path.read_text(encoding='utf-8')}")
         return command
 
     if engine == "claude":
@@ -3625,6 +3643,11 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         or previous_result.get("git_identity_after") != git_identity_before
     ):
         raise RunnerError("workspace or history changed since the resume result; investigate before correction", 4)
+    agy_stdin = args.engine == "agy" and version_at_least(version, AGY_STDIN_MIN_VERSION)
+    stdin_path = submitted_brief_path
+    if agy_stdin:
+        stdin_path = submitted_brief_path.with_name("agy-input.jsonl")
+        stdin_path.write_bytes(agy_stream_input(submitted_brief_path.read_text(encoding="utf-8")))
     command = build_executor_command(
         executable=executable,
         engine=args.engine,
@@ -3639,6 +3662,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         final_output_path=final_output_path,
         log_path=log_path,
         effort=effort["bound"] if args.engine in ("codex", "claude") else None,
+        agy_stdin=agy_stdin,
     )
 
     base_result: dict[str, Any] = {
@@ -3736,8 +3760,8 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         attempt_number += 1
         remaining = deadline_remaining(args.deadline)
         stdin_handle: Any = (
-            submitted_brief_path.open("rb")
-            if args.engine in ("codex", "claude")
+            stdin_path.open("rb")
+            if args.engine in ("codex", "claude") or agy_stdin
             else subprocess.DEVNULL
         )
         try:

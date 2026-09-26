@@ -8,7 +8,7 @@ billing, or when changing the runner.
 | Engine | Invocation | Brief | Permissions |
 | --- | --- | --- | --- |
 | `codex` | `codex exec` JSONL plus `--output-last-message` | stdin | `--dangerously-bypass-approvals-and-sandbox` |
-| `agy` | `agy -p` structured output, terminal presentation disabled | argument | `--dangerously-skip-permissions` |
+| `agy` | `agy -p` stream-json output, terminal presentation disabled | stdin (one stream-json message; agy ≥ 1.1.15, else argument) | `--dangerously-skip-permissions` |
 | `claude` | `claude -p --output-format json` (Claude Code) | stdin | `--permission-mode bypassPermissions`, `--add-dir <repo>` |
 | `opencode` | `opencode run --pure --auto`, all-allow agent overrides, no sharing or auto-update | file attachment | inline overrides |
 
@@ -33,7 +33,8 @@ ID is accepted unverified. None of these prompt a model. Always filter:
 
 Pass `--effort` for reproducible runs. Codex effort is validated against the model's catalog and bound
 as `model_reasoning_effort`; claude takes `low|medium|high|xhigh|max`; agy effort must match the
-catalog slug (`gemini-3.8-flash-high`). OpenCode keeps its provider `--variant`; never translate
+catalog slug (`gemini-3.8-flash-high`); agy rejects `--effort` alongside a slug, and no current
+agy model offers `max`. OpenCode keeps its provider `--variant`; never translate
 effort names across providers. Results keep requested, command-bound, and provider-observed settings
 separately; unknown observed settings stay null.
 
@@ -47,7 +48,8 @@ estimate (`native_cost_usd`). Unknown is never zero.
 
 `--billing-mode api|subscription|unknown` declares the billing context without inspecting credentials.
 [The dated registry](model-registry.json) holds verified public API tariffs; a reference estimate is
-emitted only when usage, rate freshness and tariff tier permit. It is not an invoice. See
+emitted only when usage, rate freshness (30 days, or an entry's `revalidate_on`) and tariff tier permit.
+agy slugs use their base model's tariff. It is not an invoice. See
 [verification findings](research-verification-2026-09-18.md).
 
 ## Audit and classification
