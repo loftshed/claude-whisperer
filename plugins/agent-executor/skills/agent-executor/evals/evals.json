@@ -15,8 +15,8 @@
     },
     {
       "id": 3,
-      "prompt": "Use OpenCode with GLM-5.2 on high to execute docs/plans/result-migration.md. The implementation paths are already listed in that plan.",
-      "expected_output": "The skill selects openrouter/z-ai/glm-5.2 with --variant high, scopes every approved path, disables sharing, audits the final-state delta, and supplies exact deterministic gates as runner-owned verification.",
+      "prompt": "Use OpenCode with GLM-5.3 Flash on high to execute docs/plans/result-migration.md. The implementation paths are already listed in that plan.",
+      "expected_output": "The skill selects openrouter/z-ai/glm-5.3-flash with --variant high, scopes every approved path, disables sharing, audits the final-state delta, and supplies exact deterministic gates as runner-owned verification.",
       "files": []
     },
     {

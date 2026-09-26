@@ -31,13 +31,28 @@ except ImportError:  # pragma: no cover - Windows falls back to atomic replaceme
 
 
 DEFAULT_ENGINE = "codex"
-EXECUTION_ENGINES = ("codex", "agy", "opencode")
-CATALOG_ENGINES = (*EXECUTION_ENGINES, "claude")
+EXECUTION_ENGINES = ("codex", "agy", "opencode", "claude")
+CATALOG_ENGINES = EXECUTION_ENGINES
 PREFERRED_MODELS = {
     "codex": "gpt-5.6-luna",
     "agy": "gemini-3.8-flash-medium",
-    "opencode": "openrouter/z-ai/glm-5.2",
+    "opencode": "openrouter/z-ai/glm-5.3-flash",
+    "claude": "opus",
 }
+# Claude Code has no model-list command. Its aliases resolve to the current model of each tier; exact
+# `claude-*` IDs are passed through and recorded as unverified.
+CLAUDE_MODEL_ALIASES = ("opus", "sonnet", "haiku", "fable")
+CLAUDE_MODEL_ID = re.compile(r"^claude-[a-z0-9][a-z0-9.\-]*(\[1m\])?$")
+# Host session state that must not leak into an executor: Claude Code messaging tokens and the host's
+# account profile (an executor could otherwise act inside, or bill to, the host session).
+HOST_SESSION_ENV = re.compile(r"^(CLAUDECODE|CLAUDE_CODE_.*|CLAUDE_CONFIG_DIR|AI_AGENT)$")
+# Provider messages that mean the account is out of quota or credits, not that the task failed.
+PROVIDER_QUOTA_MARKERS = ("resource_exhausted", "code 429", "http 429", "status 429", "error 429",
+                          "rate limit", "rate-limit", "quota exceeded", "usage limit", "insufficient credits",
+                          "insufficient_quota", "credit balance")
+EXIT_PROVIDER_QUOTA = 16
+EXIT_ROUTE_NOT_ALLOWED = 17
+
 DEFAULT_OPENCODE_VARIANT = "high"
 OPENCODE_RUNTIME_CONFIG = {
     "permission": "allow",
@@ -140,6 +155,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--refresh-models",
         action="store_true",
         help="Bypass the model cache before execution",
+    )
+    parser.add_argument(
+        "--claude-config-dir",
+        type=Path,
+        help="Claude account profile (CLAUDE_CONFIG_DIR) for --engine claude; default is Claude Code's default "
+        "profile. Choosing an account chooses its billing: follow the user's rules",
     )
     parser.add_argument(
         "--ignore-quota",
@@ -696,18 +717,17 @@ def discover_live_engine_catalog(
     try:
         version = version or cli_version(executable, environment)
         if engine == "claude":
+            # No safe model-list command: offer the tier aliases (never invoke Claude to discover models).
             return {
                 "engine": engine,
-                "status": "unsupported",
-                "source": "claude --help",
+                "status": "live",
+                "source": "claude aliases (Claude Code has no model-list command)",
                 "executable": executable,
                 "version": version,
                 "discovered_at": discovered_at,
-                "models": [],
-                "error": (
-                    "Claude CLI exposes --model but no safe model-list command; "
-                    "the executor will not guess or invoke Claude to discover one"
-                ),
+                "models": [{"id": alias, "name": f"Claude {alias.title()} (current)", "hidden": False}
+                           for alias in CLAUDE_MODEL_ALIASES],
+                "error": None,
             }
         if engine == "codex":
             models = codex_model_records(executable, environment)
@@ -2182,6 +2202,32 @@ def parse_agy_output(text: str) -> tuple[str, str | None, str | None]:
     return response if isinstance(response, str) else "", final.get("conversation_id"), status.strip().lower() if isinstance(status, str) and status.strip() else "unknown"
 
 
+def agy_terminal_error(text: str) -> str | None:
+    results = [event for event in bundled_module("usage").agy_events(text) if event.get("type") == "result"]
+    error = results[-1].get("error") if results else None
+    return error.strip() if isinstance(error, str) and error.strip() else None
+
+
+def parse_claude_output(text: str) -> tuple[str, str | None, str, str | None]:
+    """Claude Code `-p --output-format json`: (report, session id, "success"|"error", error text)."""
+    final: dict[str, Any] | None = None
+    for event in parse_jsonl_events(text):
+        if isinstance(event, dict) and event.get("type") == "result":
+            final = event
+    if final is None:
+        return "", None, "unknown", None
+    result = final.get("result") if isinstance(final.get("result"), str) else ""
+    if final.get("is_error"):
+        return "", final.get("session_id"), "error", result or final.get("subtype") or "error"
+    return result, final.get("session_id"), "success", None
+
+
+def provider_quota_exhausted(*evidence: str | None) -> bool:
+    """True when a provider-side failure names quota, credits or rate limits (e.g. agy 429 RESOURCE_EXHAUSTED)."""
+    text = "\n".join(part for part in evidence if part).lower()
+    return any(marker in text for marker in PROVIDER_QUOTA_MARKERS)
+
+
 def parse_codex_session_id(stdout: str) -> str | None:
     for event in parse_jsonl_events(stdout):
         if event.get("type") == "thread.started" and isinstance(
@@ -2242,6 +2288,12 @@ def nonempty_line_count(text: str) -> int:
 
 
 def git_identity(repo: Path) -> dict[str, Any]:
+    """What this run must not change: this worktree's HEAD, branch, HEAD reflog and the stash.
+
+    Other worktrees and other branches move on their own when work runs in parallel; comparing them made
+    any commit or `worktree add` elsewhere fail the job. They are tracked by git_activity() instead and
+    reported as concurrent activity, not as a history violation.
+    """
     common_dir = git_optional_output(repo, "rev-parse", "--git-common-dir")
     if common_dir:
         common_path = Path(common_dir)
@@ -2254,28 +2306,31 @@ def git_identity(repo: Path) -> dict[str, Any]:
     head_reflog = git_optional_output(
         repo, "reflog", "show", "-1", "--format=%H%x00%gs", "HEAD"
     )
-    local_refs = git_optional_output(
-        repo,
-        "for-each-ref",
-        "--format=%(refname)%00%(objectname)",
-        "refs/heads",
-        "refs/stash",
+    branch_ref = (
+        git_optional_output(repo, "rev-parse", "--verify", f"refs/heads/{branch}") if branch else ""
     )
     stash = git_optional_output(repo, "stash", "list", "--format=%H%x00%gd%x00%gs")
-    worktrees = git_optional_output(repo, "worktree", "list", "--porcelain")
     return {
         "head": git_optional_output(repo, "rev-parse", "--verify", "HEAD") or None,
         "branch": branch,
+        "branch_ref": branch_ref or None,
         "head_reflog_sha256": text_fingerprint(head_reflog),
-        "local_refs_sha256": text_fingerprint(local_refs),
-        "local_ref_count": nonempty_line_count(local_refs),
         "stash_sha256": text_fingerprint(stash),
         "stash_count": nonempty_line_count(stash),
-        "worktrees_sha256": text_fingerprint(worktrees),
-        "worktree_count": sum(
-            1 for line in worktrees.splitlines() if line.startswith("worktree ")
-        ),
         "common_dir": common_dir or None,
+    }
+
+
+def git_activity(repo: Path) -> dict[str, Any]:
+    """Repository state shared with other worktrees: branch names and worktree paths (not their HEADs)."""
+    ref_names = git_optional_output(repo, "for-each-ref", "--format=%(refname)", "refs/heads")
+    worktrees = git_optional_output(repo, "worktree", "list", "--porcelain")
+    paths = sorted(line[len("worktree "):] for line in worktrees.splitlines() if line.startswith("worktree "))
+    return {
+        "local_ref_names_sha256": text_fingerprint(ref_names),
+        "local_ref_count": nonempty_line_count(ref_names),
+        "worktree_paths_sha256": text_fingerprint("\n".join(paths)),
+        "worktree_count": len(paths),
     }
 
 
@@ -2498,8 +2553,13 @@ def resolve_additional_directories(values: list[Path]) -> list[Path]:
     return resolved
 
 
-def executor_environment(engine: str, repo: Path | None = None) -> dict[str, str]:
-    environment = dict(os.environ)
+def executor_environment(
+    engine: str, repo: Path | None = None, claude_config_dir: Path | None = None
+) -> dict[str, str]:
+    environment = {key: value for key, value in os.environ.items() if not HOST_SESSION_ENV.match(key)}
+    if engine == "claude" and claude_config_dir is not None:
+        # Chooses the Claude account. Unset means Claude Code's default profile (~/.claude).
+        environment["CLAUDE_CONFIG_DIR"] = str(claude_config_dir.expanduser())
     if repo is not None:
         environment["PWD"] = str(repo)
     if engine == "agy":
@@ -2513,6 +2573,44 @@ def executor_environment(engine: str, repo: Path | None = None) -> dict[str, str
         environment["OPENCODE_DISABLE_AUTOUPDATE"] = "true"
         environment["OPENCODE_CONFIG_CONTENT"] = json.dumps(OPENCODE_RUNTIME_CONFIG)
     return environment
+
+
+_NATIVE_FAMILIES = (
+    ("claude", {"anthropic"}, {"claude", "opus", "sonnet", "haiku", "fable"}),
+    ("codex", {"openai"}, {"gpt", "chatgpt"}),
+    ("agy", {"google", "google-ai-studio", "google-vertex", "vertex"}, {"gemini"}),
+)
+
+
+def native_engine_for(model: str) -> str | None:
+    """The engine whose first-party harness owns this model family (Claude, GPT, Gemini), or None.
+
+    Those families always run in their own harness: Claude Code, Codex, Antigravity. OpenCode/OpenRouter
+    is for families without one here: GLM, DeepSeek, Qwen, Kimi and the like. Open-weight GPT-OSS and
+    Gemma are not the hosted families and stay allowed.
+    """
+    segments = model.lower().split("/")
+    tokens = re.split(r"[-_.:~]", segments[-1])
+    if "gemma" in tokens or any(a == "gpt" and b == "oss" for a, b in zip(tokens, tokens[1:])):
+        return None
+    for engine, providers, names in _NATIVE_FAMILIES:
+        if any(segment in providers for segment in segments[:-1]):
+            return engine
+        for index, token in enumerate(tokens):
+            if token in names and not (token == "gpt" and index + 1 < len(tokens) and tokens[index + 1] == "oss"):
+                return engine
+    return None
+
+
+def enforce_native_route(engine: str, model: str) -> None:
+    native = native_engine_for(model) if engine == "opencode" else None
+    if native:
+        raise RunnerError(
+            f"{model} belongs to a family with its own harness; run it with --engine {native}, not through "
+            "OpenCode/OpenRouter. OpenCode is only for families without a native harness (GLM, DeepSeek, Qwen, "
+            "Kimi, ...).",
+            EXIT_ROUTE_NOT_ALLOWED,
+        )
 
 
 def select_live_model(
@@ -2533,6 +2631,8 @@ def select_live_model(
     if model in available_models:
         reason = "exact_user_request" if requested_model else "validated_preference"
         return model, reason
+    if engine == "claude" and CLAUDE_MODEL_ID.match(model):
+        return model, "unverified_claude_id"
 
     suggestions = difflib.get_close_matches(model, available_models, n=3, cutoff=0.35)
     suggestion_text = (
@@ -2556,6 +2656,8 @@ def executor_preflight(
     *,
     refresh: bool = False,
 ) -> tuple[str, str, list[str], str, str, dict[str, Any]]:
+    if requested_model:
+        enforce_native_route(engine, requested_model)
     catalog = discover_engine_catalog(engine, refresh=refresh)
     try:
         model, selection_reason = select_live_model(
@@ -2624,6 +2726,19 @@ def build_executor_command(
             str(log_path),
             f"--print={submitted_brief_path.read_text(encoding='utf-8')}",
         ]
+        return command
+
+    if engine == "claude":
+        command = [executable, "-p", "--output-format", "json", "--model", model,
+                   "--permission-mode", "bypassPermissions", "--add-dir", str(repo)]
+        for directory in add_dirs:
+            command += ["--add-dir", str(directory)]
+        if effort is not None:
+            command += ["--effort", effort]
+        if session_id:
+            command += ["--resume", session_id]
+        elif continue_last:
+            command += ["--continue"]
         return command
 
     if engine == "codex":
@@ -2852,6 +2967,8 @@ def detached_runner_command(
         command.append("--refresh-models")
     if args.ignore_quota:
         command.append("--ignore-quota")
+    if args.claude_config_dir:
+        command.extend(["--claude-config-dir", str(args.claude_config_dir.expanduser())])
     for extra in args.add_dir:
         command.extend(["--add-dir", str(extra)])
     if task_spec_path is None:
@@ -3160,6 +3277,13 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
     started_at = utc_now()
     monotonic_start = time.monotonic()
     model = args.model or PREFERRED_MODELS[args.engine]
+    selected_effort = args.effort
+    if (
+        args.engine == "codex"
+        and model == PREFERRED_MODELS["codex"]
+        and selected_effort is None
+    ):
+        selected_effort = "max"
     cwd = args.cwd.expanduser().resolve()
     if not cwd.is_dir():
         raise RunnerError(f"target directory does not exist: {cwd}", 4)
@@ -3207,7 +3331,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         quota_gate(args.engine, model, ignore=args.ignore_quota or args.dry_run)
         support = bundled_module("execution_support")
         try:
-            effort = support.bind_effort(args.engine, model, args.effort, model_catalog)
+            effort = support.bind_effort(args.engine, model, selected_effort, model_catalog)
             previous_result = None
             if args.resume_result:
                 previous_result = json.loads(args.resume_result.expanduser().read_text(encoding="utf-8"))
@@ -3237,7 +3361,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
             "engine": args.engine,
             "model": model,
             "requested_model": args.model,
-            "requested_effort": args.effort,
+            "requested_effort": selected_effort,
             "variant": variant,
             "full_permissions": True,
             "repository": str(repo),
@@ -3259,6 +3383,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
 
     before = git_state(repo, tracked_paths)
     git_identity_before = git_identity(repo)
+    git_activity_before = git_activity(repo)
     if previous_result is not None and (
         previous_result.get("git_after", {}).get("fingerprint") != before["fingerprint"]
         or previous_result.get("git_identity_after") != git_identity_before
@@ -3277,7 +3402,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         submitted_brief_path=submitted_brief_path,
         final_output_path=final_output_path,
         log_path=log_path,
-        effort=effort["bound"] if args.engine == "codex" else None,
+        effort=effort["bound"] if args.engine in ("codex", "claude") else None,
     )
 
     base_result: dict[str, Any] = {
@@ -3362,7 +3487,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
             completion_hook=completion_hook,
         )
 
-    environment = executor_environment(args.engine, repo)
+    environment = executor_environment(args.engine, repo, args.claude_config_dir)
     remaining = deadline_remaining(args.deadline)
     if remaining is not None and remaining <= 0:
         raise RunnerError("task deadline expired before executor dispatch", 28)
@@ -3376,7 +3501,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         remaining = deadline_remaining(args.deadline)
         stdin_handle: Any = (
             submitted_brief_path.open("rb")
-            if args.engine == "codex"
+            if args.engine in ("codex", "claude")
             else subprocess.DEVNULL
         )
         try:
@@ -3430,10 +3555,15 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
             git_identity_before, git_identity_after_attempt
         )
         attempt_workspace_changed = before["fingerprint"] != after_attempt["fingerprint"]
+        # agy reports provider errors (e.g. 429) as a terminal status with exit 0; count those as well.
+        terminal_error = (
+            agy_terminal_error(stdout_text) if args.engine == "agy"
+            else parse_claude_output(stdout_text)[3] if args.engine == "claude" else None
+        )
         transient_failure = (
             not timed_out
-            and process.returncode not in (None, 0)
-            and transient_provider_failure(stdout_text, stderr_text)
+            and (process.returncode not in (None, 0) or terminal_error is not None)
+            and (transient_provider_failure(stdout_text, stderr_text) or provider_quota_exhausted(terminal_error))
         )
         retry_eligible = (
             args.retry_read_only > len(executor_attempts)
@@ -3502,6 +3632,10 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         session_id = parse_codex_session_id(stdout_text)
     elif args.engine == "opencode":
         candidate_message, session_id = parse_opencode_output(stdout_text)
+    elif args.engine == "claude":
+        candidate_message, session_id, agy_status, _claude_error = parse_claude_output(stdout_text)
+        final_output_path.write_text(candidate_message, encoding="utf-8")
+        final_output_path.chmod(0o600)
     else:
         candidate_message, session_id, agy_status = parse_agy_output(stdout_text)
         session_id = session_id or parse_agy_session_id(log_path)
@@ -3574,6 +3708,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
 
     after = git_state(repo, tracked_paths)
     git_identity_after = git_identity(repo)
+    git_activity_after = git_activity(repo)
     run_delta = state_delta(before, after)
     verification_delta = state_delta(after_executor, after)
     history_violations = find_history_violations(
@@ -3596,6 +3731,18 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         status, exit_code = "verification_mutation", 26
     elif verification["status"] in {"failed", "timed_out"}:
         status, exit_code = "verification_failed", 25
+    provider_error = (
+        agy_terminal_error(stdout_text) if args.engine == "agy"
+        else parse_claude_output(stdout_text)[3] if args.engine == "claude" else None
+    )
+    provider_failed = provider_error is not None or (agy_status not in (None, "success", "waiting_for_input"))
+    if (
+        status in {"failed", "malformed_report", "empty_output"}
+        and (provider_failed or process.returncode not in (None, 0))
+        and provider_quota_exhausted(provider_error, stderr_text, stdout_text if provider_failed else None)
+    ):
+        # The account ran out of quota or credits mid-run: not a task failure; retry elsewhere or later.
+        status, exit_code = "provider_quota_exhausted", EXIT_PROVIDER_QUOTA
 
     post_failure_catalog: dict[str, Any] | None = None
     if process.returncode not in (None, 0):
@@ -3634,6 +3781,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         "task_outcome": task_outcome_for_status(status),
         "reported_outcome": reported_outcome,
         "provider_terminal_status": agy_status,
+        "provider_error": provider_error,
         "exit_code": exit_code,
         "executor_exit_code": process.returncode,
         "executor_attempts": executor_attempts,
@@ -3650,6 +3798,8 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         "history_violations_after_executor": history_violations_after_executor,
         "scope_violations": scope_violations,
         "history_violations": history_violations,
+        # Other worktrees or branches changed during the run: informational, never a failure.
+        "concurrent_activity": find_history_violations(git_activity_before, git_activity_after),
         "workspace_changed": workspace_changed,
         "workspace_changed_after_executor": workspace_changed_after_executor,
         "verification_changed_workspace": verification_changed_workspace,

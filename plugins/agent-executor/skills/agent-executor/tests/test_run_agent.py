@@ -143,7 +143,21 @@ class GitStateTests(unittest.TestCase):
         violations = RUNNER.find_history_violations(before, after)
         self.assertIn("head", violations)
         self.assertIn("head_reflog_sha256", violations)
-        self.assertIn("local_refs_sha256", violations)
+        self.assertIn("branch_ref", violations)
+
+    def test_sibling_worktree_activity_is_not_a_history_violation(self) -> None:
+        before, activity_before = RUNNER.git_identity(self.repository.path), RUNNER.git_activity(self.repository.path)
+        sibling = self.repository.path.parent / (self.repository.path.name + "-sibling")
+        self.repository.git("worktree", "add", "-q", "-b", "sibling-work", str(sibling))
+        (sibling / "sibling.txt").write_text("parallel work\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(sibling), "add", "sibling.txt"], check=True)
+        subprocess.run(["git", "-C", str(sibling), "commit", "-qm", "sibling commit"], check=True)
+        after, activity_after = RUNNER.git_identity(self.repository.path), RUNNER.git_activity(self.repository.path)
+        self.assertEqual(RUNNER.find_history_violations(before, after), [])
+        self.assertEqual(
+            RUNNER.find_history_violations(activity_before, activity_after),
+            ["local_ref_count", "local_ref_names_sha256", "worktree_count", "worktree_paths_sha256"],
+        )
 
     def test_detects_branch_switches_and_stashes(self) -> None:
         before_branch = RUNNER.git_identity(self.repository.path)
@@ -159,7 +173,6 @@ class GitStateTests(unittest.TestCase):
         after_stash = RUNNER.git_identity(self.repository.path)
         stash_violations = RUNNER.find_history_violations(before_stash, after_stash)
         self.assertIn("stash_sha256", stash_violations)
-        self.assertIn("local_refs_sha256", stash_violations)
 
 
 class ReportingAndArtifactTests(unittest.TestCase):
@@ -774,6 +787,7 @@ elif sys.argv[1:3] == ["app-server", "--stdio"]:
                     "supportedReasoningEfforts": [
                         {"reasoningEffort": "low"},
                         {"reasoningEffort": "high"},
+                        {"reasoningEffort": "max"},
                     ],
                     "defaultReasoningEffort": "high",
                 },
@@ -842,7 +856,7 @@ else:
     )
     if "--output-format" in sys.argv:
         print(json.dumps({"type": "init", "conversation_id": "11111111-1111-1111-1111-111111111111", "model": sys.argv[sys.argv.index("--model") + 1]}))
-        print(json.dumps({"type": "result", "status": os.environ.get("FAKE_AGY_STATUS", "success"), "conversation_id": "11111111-1111-1111-1111-111111111111", "response": report(), "usage": {"input_tokens": 278, "output_tokens": 4, "cache_read_tokens": 30214, "total_tokens": 282}}))
+        print(json.dumps({"type": "result", "status": os.environ.get("FAKE_AGY_STATUS", "success"), "conversation_id": "11111111-1111-1111-1111-111111111111", "response": report(), "error": os.environ.get("FAKE_AGY_ERROR", ""), "usage": {"input_tokens": 278, "output_tokens": 4, "cache_read_tokens": 30214, "total_tokens": 282}}))
     else:
         print(report())
 """,
@@ -862,7 +876,7 @@ elif len(sys.argv) > 1 and sys.argv[1] == "models":
     print(
         os.environ.get(
             "FAKE_OPENCODE_MODELS",
-            "openrouter/z-ai/glm-5.2\nopenrouter/deepseek/deepseek-v4-flash",
+            "openrouter/z-ai/glm-5.3-flash\nopenrouter/deepseek/deepseek-v4-flash",
         )
     )
 else:
@@ -892,6 +906,17 @@ else:
             + r"""
 if "--version" in sys.argv:
     print("claude test 0.0")
+elif "-p" in sys.argv:
+    # An execution run: the brief arrives on stdin.
+    prompt = sys.stdin.read()
+    mutate()
+    capture({"stdin": prompt, "argv": sys.argv[1:], "claudecode": os.environ.get("CLAUDECODE"),
+             "claude_code_token": os.environ.get("CLAUDE_CODE_MESSAGING_TOKEN"),
+             "claude_config_dir": os.environ.get("CLAUDE_CONFIG_DIR")})
+    error = os.environ.get("FAKE_CLAUDE_ERROR")
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": bool(error), "session_id": "claude-session-1",
+                      "result": error or report(), "total_cost_usd": 0.25,
+                      "usage": {"input_tokens": 10, "cache_read_input_tokens": 200, "cache_creation_input_tokens": 30, "output_tokens": 40}}))
 else:
     pathlib.Path(os.environ["FAKE_CLAUDE_UNSAFE_CALL"]).write_text(
         "called\n", encoding="utf-8"
@@ -1010,6 +1035,8 @@ else:
         self.assertEqual(result["verification"]["status"], "not_requested")
         self.assertEqual(result["engine"], "codex")
         self.assertEqual(result["model"], "gpt-5.6-luna")
+        self.assertEqual(result["effort"]["bound"], "max")
+        self.assertIn('model_reasoning_effort="max"', result["command"])
         self.assertEqual(result["session_id"], "codex-thread-1")
         self.assertEqual(result["run_delta"]["changed_paths"], ["allowed/output.txt"])
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", result["command"])
@@ -1028,6 +1055,13 @@ else:
         self.assertEqual(stat.S_IMODE(out_dir.stat().st_mode), 0o700)
         for artifact in out_dir.iterdir():
             self.assertEqual(stat.S_IMODE(artifact.stat().st_mode), 0o600)
+
+    def test_explicit_effort_overrides_preferred_luna_effort(self) -> None:
+        exit_code, result, _out_dir, _summary, _capture = self.run_main(
+            extra_args=["--effort", "low"]
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result["effort"]["bound"], "low")
 
     def test_model_catalog_uses_cache_and_force_refreshes(self) -> None:
         count_path = self.external_path / "catalog-count.txt"
@@ -1122,7 +1156,9 @@ else:
             [model["id"] for model in codex["models"]],
         )
         self.assertNotIn("codex-hidden", [model["id"] for model in codex["models"]])
-        self.assertEqual(claude["status"], "unsupported")
+        # Claude has no model-list command: the catalog offers tier aliases without invoking Claude.
+        self.assertEqual(claude["status"], "live")
+        self.assertEqual([model["id"] for model in claude["models"]], ["opus", "sonnet", "haiku", "fable"])
         self.assertFalse(unsafe_call.exists())
 
     def test_catalog_filters_by_engine_and_model_substring(self) -> None:
@@ -1175,7 +1211,7 @@ else:
             engine="opencode"
         )
         self.assertEqual(exit_code, 0)
-        self.assertEqual(result["model"], "openrouter/z-ai/glm-5.2")
+        self.assertEqual(result["model"], "openrouter/z-ai/glm-5.3-flash")
         self.assertEqual(result["variant"], "high")
         self.assertEqual(result["session_id"], "ses_opencode_1")
         self.assertEqual(capture["permission"], json.dumps("allow"))
@@ -1653,6 +1689,48 @@ else:
             self.assertRaises(RUNNER.RunnerError),
         ):
             RUNNER.main()
+
+
+class NativeRouteAndProviderErrorTests(unittest.TestCase):
+    # Reuse the integration fixtures without re-running the inherited tests.
+    setUp = RunnerIntegrationTests.setUp
+    tearDown = RunnerIntegrationTests.tearDown
+    _write_executable = RunnerIntegrationTests._write_executable
+    _write_fake_executors = RunnerIntegrationTests._write_fake_executors
+    run_main = RunnerIntegrationTests.run_main
+
+    def test_hosted_families_never_route_through_opencode(self) -> None:
+        cases = {
+            "openrouter/anthropic/claude-opus-4.6": "claude", "gitlab/duo-chat-opus-4-6": "claude",
+            "gitlab/duo-chat-sonnet-4-5": "claude", "openrouter/openai/gpt-5.6": "codex",
+            "gitlab/duo-chat-gpt-5": "codex", "openrouter/google/gemini-3.1-pro": "agy",
+            "openrouter/z-ai/glm-5.3-flash": None, "openrouter/deepseek/deepseek-v4-flash": None,
+            "openrouter/qwen/qwen3-coder": None, "~moonshotai/kimi-latest": None,
+            "openrouter/openai/gpt-oss-120b": None, "openrouter/google/gemma-3-27b": None,
+        }
+        self.assertEqual({model: RUNNER.native_engine_for(model) for model in cases}, cases)
+
+    def test_opencode_refuses_a_claude_model_before_any_provider_call(self) -> None:
+        exit_code, result, _out, _summary, _capture = self.run_main(engine="opencode", model="openrouter/anthropic/claude-opus-4.6")
+        self.assertEqual(exit_code, 17)
+        self.assertIn("--engine claude", result["error"])
+
+    def test_claude_engine_runs_claude_code_with_the_brief_on_stdin_and_no_host_session(self) -> None:
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1", "CLAUDE_CODE_MESSAGING_TOKEN": "host-secret", "CLAUDE_CONFIG_DIR": "/host/profile"}):
+            exit_code, result, _out, _summary, capture = self.run_main(engine="claude", model="opus", extra_args=["--effort", "high"])
+        self.assertEqual(exit_code, 0, result.get("error"))
+        self.assertEqual(result["session_id"], "claude-session-1")
+        self.assertIn("EXECUTION AND REPORT CONTRACT", capture["stdin"])
+        self.assertIn("bypassPermissions", capture["argv"])
+        self.assertEqual(capture["argv"][capture["argv"].index("--effort") + 1], "high")
+        self.assertEqual((capture["claudecode"], capture["claude_code_token"], capture["claude_config_dir"]), (None, None, None))
+        self.assertEqual(result["usage"]["totals"], {"fresh_input": 10, "cache_read": 200, "cache_write": 30, "output": 40})
+
+    def test_agy_quota_error_is_reported_as_provider_quota_exhausted(self) -> None:
+        with mock.patch.dict(os.environ, {"FAKE_AGY_STATUS": "error", "FAKE_AGY_ERROR": "RESOURCE_EXHAUSTED (code 429): quota"}):
+            exit_code, result, _out, _summary, _capture = self.run_main(engine="agy")
+        self.assertEqual((result["status"], exit_code), ("provider_quota_exhausted", 16))
+        self.assertIn("RESOURCE_EXHAUSTED", result["provider_error"])
 
 
 if __name__ == "__main__":

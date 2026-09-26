@@ -138,6 +138,19 @@ def normalize_usage(
             result.update(totals=totals, request_context_tokens=contexts, requests=requests, native_cost_usd=native_cost)
         if unidentified:
             result["gaps"].append("step_usage_without_identity_cannot_be_deduplicated")
+    elif engine == "claude":
+        finals = [event for event in parsed if event.get("type") == "result" and isinstance(event.get("usage"), dict)]
+        result["raw"] = [event["usage"] for event in finals]
+        result["accounting"] = "process_session_cumulative"
+        if finals:
+            raw = finals[-1]["usage"]
+            result["cumulative"] = raw
+            result["totals"] = {"fresh_input": count(raw.get("input_tokens")), "cache_read": count(raw.get("cache_read_input_tokens")),
+                                "cache_write": count(raw.get("cache_creation_input_tokens")), "output": count(raw.get("output_tokens"))}
+            cost = finals[-1].get("total_cost_usd")
+            if isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(cost) and cost >= 0:
+                result["native_cost_usd"] = cost
+        result["gaps"].append("per_request_context_sizes_not_reported")
     elif engine == "agy":
         snapshots = {}
         final = []
