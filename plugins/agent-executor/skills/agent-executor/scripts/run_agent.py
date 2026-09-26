@@ -70,7 +70,7 @@ MAX_FINAL_MESSAGE_CHARS = 4000
 MAX_COMPLETION_SIGNAL_ERROR_CHARS = 500
 MAX_VERIFICATION_TAIL_BYTES = 64 * 1024
 MAX_VERIFICATION_TAIL_LINE_CHARS = 500
-RUNNER_VERSION = "0.9.0"
+RUNNER_VERSION = "0.10.0"
 RESULT_SCHEMA = "agent-executor.result.v2"
 MODEL_CATALOG_SCHEMA = "agent-executor.models.v1"
 MODEL_CACHE_SCHEMA = "agent-executor.model-cache.v1"
@@ -142,10 +142,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--route",
+        help="Role from the route config (implementation, consultation, gemini, claude, opencode, or your "
+        "own): fills in engine, model and effort. Explicit --engine/--model/--effort still win",
+    )
+    parser.add_argument(
         "--engine",
         choices=EXECUTION_ENGINES,
-        default=DEFAULT_ENGINE,
-        help="Local executor CLI (default: codex)",
+        help="Local executor CLI (default: the --route's engine, else codex)",
     )
     parser.add_argument(
         "--model",
@@ -423,10 +427,10 @@ def utc_now() -> str:
 
 
 def parse_duration(value: str, *, option: str = "--timeout") -> float:
-    units = {"h": 3600, "m": 60, "s": 1}
+    units = {"d": 86400, "h": 3600, "m": 60, "s": 1}
     position = 0
     seconds = 0.0
-    for match in re.finditer(r"(\d+(?:\.\d+)?)(h|m|s)", value):
+    for match in re.finditer(r"(\d+(?:\.\d+)?)(d|h|m|s)", value):
         if match.start() != position:
             raise RunnerError(f"invalid {option}: {value!r}")
         seconds += float(match.group(1)) * units[match.group(2)]
@@ -773,6 +777,9 @@ def discover_live_engine_catalog(
 
 
 def default_agent_cache_dir() -> Path:
+    home = os.environ.get("AGENT_EXECUTOR_HOME")
+    if home:
+        return Path(home).expanduser()
     configured_root = os.environ.get("XDG_CACHE_HOME")
     cache_root = (
         Path(configured_root).expanduser()
@@ -1446,7 +1453,10 @@ def prepare_out_dir(requested: Path | None, repo: Path) -> Path:
         out_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
         out_dir.chmod(0o700)
         return out_dir
-    base = Path(tempfile.gettempdir()).resolve() / "codex-agent-runs"
+    # Under the cache (not $TMPDIR, which macOS cleans) so --resume-result paths stay valid; pruned by age.
+    base = default_agent_cache_dir().resolve() / "runs-v1"
+    if base == resolved_repo or resolved_repo in base.parents:
+        raise RunnerError("the agent-executor cache must be outside the target repository", 4)
     base.mkdir(parents=True, exist_ok=True, mode=0o700)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     out_dir = base / f"{repo.name}-{stamp}-{uuid.uuid4().hex[:8]}"
@@ -2008,7 +2018,7 @@ def extract_final_report(stdout: str) -> tuple[str, bool]:
 
 def extract_raw_final_report(stdout: str) -> tuple[str, bool]:
     matches = list(
-        re.finditer(r"^(?:#{1,6}\s+)?STATUS\s*$", stdout, re.MULTILINE | re.IGNORECASE)
+        re.finditer(r"^(?:#{1,6}\s+)?(?:\*\*|__)?STATUS(?:\*\*|__)?:?\s*$", stdout, re.MULTILINE | re.IGNORECASE)
     )
     if not matches:
         return bound_final_message(stdout.strip()[-MAX_FINAL_MESSAGE_CHARS:]), False
@@ -2025,7 +2035,7 @@ def parse_reported_outcome(report: str, report_extracted: bool) -> str | None:
             index
             for index, line in enumerate(lines)
             if re.fullmatch(
-                r"(?:#{1,6}\s+)?STATUS\s*",
+                r"(?:#{1,6}\s+)?(?:\*\*|__)?STATUS(?:\*\*|__)?:?\s*",
                 line,
                 re.IGNORECASE,
             )
@@ -2042,6 +2052,10 @@ def parse_reported_outcome(report: str, report_extracted: bool) -> str | None:
         ),
         "",
     )
+    # Models often format the token: `COMPLETE`, **COMPLETE**, COMPLETE. all mean COMPLETE.
+    status_line = re.sub(r"^[-*]\s+", "", status_line)
+    status_line = re.sub(r"^[`*_]+([A-Za-z]+)[`*_]+", r"\1", status_line)
+    status_line = re.sub(r"^([A-Za-z]+)\.$", r"\1", status_line.strip())
     match = re.fullmatch(
         (
             r"(?:[-*]\s*)?"
@@ -2071,9 +2085,9 @@ def report_contract_violations(
 
     heading_pattern = re.compile(
         (
-            r"(?:#{1,6}\s+)?"
+            r"(?:#{1,6}\s+)?(?:\*\*|__)?"
             r"(STATUS|FILES CHANGED|COMMANDS RUN|VERIFICATION|RISKS OR BLOCKERS)"
-            r"\s*"
+            r"(?:\*\*|__)?:?\s*"
         ),
         re.IGNORECASE,
     )
@@ -2627,7 +2641,7 @@ def select_live_model(
         for model in catalog.get("models", [])
         if not model.get("hidden", False)
     ]
-    model = requested_model or PREFERRED_MODELS[engine]
+    model = requested_model or preferred_model(engine)
     if model in available_models:
         reason = "exact_user_request" if requested_model else "validated_preference"
         return model, reason
@@ -3009,7 +3023,23 @@ def launch_detached(args: argparse.Namespace) -> int:
         args, task_spec=task_spec
     )
     # Check before detaching so the caller hears about an exhausted pool now, not in a completion event.
-    quota_gate(args.engine, args.model or PREFERRED_MODELS.get(args.engine, ""), ignore=args.ignore_quota)
+    # Fail before reporting "started": model and effort against the live catalog, the native-route rule,
+    # quota, and whether another executor already holds this worktree.
+    _executable, _version, _models, model, _reason, catalog = executor_preflight(
+        args.engine, args.model, refresh=args.refresh_models
+    )
+    support = bundled_module("execution_support")
+    effort = args.effort
+    try:
+        support.bind_effort(args.engine, model, effort, catalog)
+    except support.ContractError as error:
+        raise RunnerError(str(error), 4) from error
+    quota_gate(args.engine, model, ignore=args.ignore_quota)
+    try:
+        with support.workspace_lease(repo, default_agent_cache_dir()):
+            pass
+    except support.ContractError as error:
+        raise RunnerError(str(error), 27) from error
     event_dir = default_completion_event_dir().resolve()
     if event_dir == repo or repo in event_dir.parents:
         raise RunnerError(
@@ -3132,6 +3162,10 @@ def publish_uncaught_completion_failure(error: Exception, exit_code: int) -> Non
         args = parse_args(sys.argv[1:])
     except SystemExit:
         return
+    try:
+        args = resolve_route(args)
+    except RunnerError:
+        args.engine = args.engine or DEFAULT_ENGINE
     if not args.completion_event or not args.out_dir:
         return
     try:
@@ -3153,7 +3187,7 @@ def publish_uncaught_completion_failure(error: Exception, exit_code: int) -> Non
             "started_at": utc_now(),
             "finished_at": utc_now(),
             "engine": args.engine,
-            "model": args.model or PREFERRED_MODELS[args.engine],
+            "model": args.model or preferred_model(args.engine),
             "variant": args.variant,
             "full_permissions": True,
             "repository": str(repository),
@@ -3185,6 +3219,204 @@ def publish_uncaught_completion_failure(error: Exception, exit_code: int) -> Non
             f"agent-executor: could not publish failure event: {notification_error}",
             file=sys.stderr,
         )
+
+
+AUTO_PRUNE_SECONDS = 30 * 24 * 60 * 60
+
+
+def _tree_size(path: Path) -> int:
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file()) if path.is_dir() else 0
+
+
+def prune_state(older_than_seconds: float, *, dry_run: bool = False) -> dict[str, Any]:
+    """Remove runner state older than the cutoff. Unacknowledged completion events, and the job
+    directories they point to, are always kept: they are results nobody has reviewed yet."""
+    cache = default_agent_cache_dir()
+    cutoff = time.time() - older_than_seconds
+    removed = {"events": 0, "jobs": 0, "runs": 0, "bytes": 0}
+    protected: set[Path] = set()
+    for event_path in sorted((cache / "completions-v1").glob("*.json")):
+        try:
+            event = json.loads(event_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        result_path = Path(str(event.get("result_path") or ""))
+        job_dir = next((parent for parent in result_path.parents if parent.parent == cache / "jobs-v1"), None)
+        if not event.get("acknowledged_at") or event_path.stat().st_mtime > cutoff:
+            if job_dir is not None:
+                protected.add(job_dir)
+            continue
+        removed["events"] += 1
+        removed["bytes"] += event_path.stat().st_size
+        if not dry_run:
+            event_path.unlink(missing_ok=True)
+    for kind, directory in (("jobs", cache / "jobs-v1"), ("runs", cache / "runs-v1")):
+        for entry in sorted(directory.glob("*")) if directory.is_dir() else []:
+            if not entry.is_dir() or entry in protected or entry.stat().st_mtime > cutoff:
+                continue
+            removed[kind] += 1
+            removed["bytes"] += _tree_size(entry)
+            if not dry_run:
+                shutil.rmtree(entry, ignore_errors=True)
+    return {"dry_run": dry_run, "older_than_seconds": older_than_seconds, "cache": str(cache), **removed}
+
+
+def auto_prune() -> None:
+    """At most once a day, drop state older than 30 days. Best effort; never fails a run."""
+    marker = default_agent_cache_dir() / "last-prune"
+    try:
+        if marker.exists() and time.time() - marker.stat().st_mtime < 24 * 60 * 60:
+            return
+        prune_state(AUTO_PRUNE_SECONDS)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    except OSError:
+        pass
+
+
+def prune_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog=f"{Path(__file__).name} prune",
+                                     description="Remove acknowledged events and job/run directories older than a cutoff.")
+    parser.add_argument("--older-than", default="14d", help="Age cutoff such as 14d, 12h (default 14d)")
+    parser.add_argument("--dry-run", action="store_true", help="Report what would be removed")
+    args = parser.parse_args(argv)
+    print(json.dumps(prune_state(parse_duration(args.older_than, option="--older-than"), dry_run=args.dry_run), indent=2))
+    return 0
+
+
+def routes_module() -> Any:
+    return bundled_module("routes")
+
+
+def preferred_model(engine: str) -> str:
+    """The model an engine runs when none is given: its default route, else the built-in fallback."""
+    try:
+        route = routes_module().engine_default(engine)
+    except (OSError, ValueError):
+        route = None
+    return (route or {}).get("model") or PREFERRED_MODELS[engine]
+
+
+def resolve_route(args: argparse.Namespace) -> argparse.Namespace:
+    """Fill engine, model, effort and variant from --route, or from the engine's default route."""
+    module = routes_module()
+    try:
+        routes = module.load_routes()
+    except (OSError, ValueError) as error:
+        raise RunnerError(f"cannot load routes: {error}", 4) from error
+    route = None
+    if args.route:
+        if args.route not in routes:
+            raise RunnerError(f"unknown --route {args.route!r}; configured: {', '.join(sorted(routes))}", 4)
+        route = routes[args.route]
+        if args.engine and args.engine != route["engine"]:
+            route = None  # an explicit engine overrides the route entirely
+    args.engine = args.engine or (route or {}).get("engine") or DEFAULT_ENGINE
+    route = route or module.engine_default(args.engine, routes)
+    if route and route.get("engine") == args.engine:
+        if args.model is None and args.route:
+            args.model = route.get("model")
+        model = args.model or route.get("model")
+        if args.effort is None and route.get("effort") and model == route.get("model"):
+            args.effort = route["effort"]
+        if getattr(args, "variant", None) is None and route.get("variant") and args.engine == "opencode":
+            args.variant = route["variant"]
+    args.resolved_route = args.route
+    return args
+
+
+def routes_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog=f"{Path(__file__).name} routes",
+                                     description="Show the role routes in effect (defaults plus your config).")
+    parser.add_argument("--format", choices=("text", "json"), default="text")
+    args = parser.parse_args(argv)
+    module = routes_module()
+    routes = module.load_routes()
+    if args.format == "json":
+        print(json.dumps({"config": str(module.config_path()), "routes": routes}, indent=2))
+        return 0
+    print(f"config: {module.config_path()}{'' if module.config_path().exists() else ' (not present: defaults only)'}")
+    for role, route in routes.items():
+        extra = " ".join(f"--{key} {value}" for key, value in route.items() if key in ("effort", "variant"))
+        print(f"  {role:<15} --engine {route['engine']} --model {route.get('model', '(engine default)')} {extra}".rstrip())
+    return 0
+
+
+def init_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog=f"{Path(__file__).name} init", description="Write a starter route config.")
+    parser.add_argument("--force", action="store_true", help="Replace an existing config")
+    args = parser.parse_args(argv)
+    module = routes_module()
+    path = module.config_path()
+    if path.exists() and not args.force:
+        print(f"{path} exists; pass --force to replace it")
+        return 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(module.starter_config(), indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {path}; edit the routes there")
+    return 0
+
+
+HOST_MARKERS = {
+    "claude": ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"),
+    "codex": ("CODEX_SANDBOX", "CODEX_THREAD_ID", "CODEX_MANAGED_BY_NPM"),
+    "opencode": ("OPENCODE", "OPENCODE_SESSION_ID"),
+    "agy": ("ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_AGENT"),
+}
+
+
+def doctor_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog=f"{Path(__file__).name} doctor",
+                                     description="Report host, installed CLIs, routes, quota source, paths and skill installs.")
+    parser.add_argument("--format", choices=("text", "json"), default="text")
+    args = parser.parse_args(argv)
+    hosts = [host for host, keys in HOST_MARKERS.items() if any(os.environ.get(key) for key in keys)]
+    clis = {}
+    for engine in EXECUTION_ENGINES:
+        executable = shutil.which(engine)
+        version = None
+        if executable:
+            try:
+                version = cli_version(executable, executor_environment(engine))
+            except (OSError, RunnerError) as error:
+                version = f"error: {error}"
+        clis[engine] = {"executable": executable, "version": version}
+    skill_dir = Path(__file__).resolve().parent.parent
+    installs = {}
+    for location in ("~/.agents/skills", "~/.claude/skills", "~/.claude-personal/skills", "~/.codex/skills",
+                     "~/.config/opencode/skills", "~/.gemini/config/skills"):
+        entry = Path(location).expanduser() / "agent-executor"
+        if entry.exists() or entry.is_symlink():
+            resolved = entry.resolve()
+            installs[location] = {"resolves_to": str(resolved), "same_as_this": resolved == skill_dir,
+                                  "kind": "link" if entry.is_symlink() else "copy"}
+    quota = bundled_module("quota")
+    report = {
+        "runner_version": RUNNER_VERSION,
+        "skill_dir": str(skill_dir),
+        "host": hosts or ["unknown"],
+        "clis": clis,
+        "routes_config": str(routes_module().config_path()),
+        "routes": routes_module().load_routes(),
+        "ai_usage": quota.ai_usage_command(),
+        "cache_dir": str(default_agent_cache_dir()),
+        "skill_installs": installs,
+        "stale_copies": [loc for loc, info in installs.items() if not info["same_as_this"]],
+    }
+    if args.format == "json":
+        print(json.dumps(report, indent=2))
+        return 0
+    print(f"agent-executor {RUNNER_VERSION} at {skill_dir}")
+    print(f"host: {', '.join(report['host'])}")
+    for engine, info in clis.items():
+        print(f"  {engine:<9} {info['executable'] or 'not installed'}{'  ' + info['version'] if info['version'] else ''}")
+    print(f"routes: {report['routes_config']} ({len(report['routes'])} roles; run `routes` for detail)")
+    print(f"quota source: {report['ai_usage'] or 'ai-usage not installed (quota unknown, runs not blocked)'}")
+    print(f"cache: {report['cache_dir']}")
+    for location, info in installs.items():
+        flag = "" if info["same_as_this"] else "  <- different copy: update or relink it"
+        print(f"  skill {location}: {info['kind']} -> {info['resolves_to']}{flag}")
+    return 0
 
 
 def quota_gate(engine: str, model: str, *, ignore: bool) -> None:
@@ -3244,7 +3476,16 @@ def main() -> int:
         return events_main(argv[1:])
     if argv and argv[0] == "quota":
         return quota_main(argv[1:])
-    args = parse_args(argv)
+    if argv and argv[0] == "prune":
+        return prune_main(argv[1:])
+    if argv and argv[0] == "routes":
+        return routes_main(argv[1:])
+    if argv and argv[0] == "init":
+        return init_main(argv[1:])
+    if argv and argv[0] == "doctor":
+        return doctor_main(argv[1:])
+    auto_prune()
+    args = resolve_route(parse_args(argv))
     if args.detach:
         return execute(args)
     repo = git_root(args.cwd.expanduser().resolve())
@@ -3276,14 +3517,9 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
     completion_hook = resolve_completion_hook(args.completion_hook)
     started_at = utc_now()
     monotonic_start = time.monotonic()
-    model = args.model or PREFERRED_MODELS[args.engine]
+    model = args.model or preferred_model(args.engine)
+    # resolve_route() already applied the route's effort when the model is the route's model.
     selected_effort = args.effort
-    if (
-        args.engine == "codex"
-        and model == PREFERRED_MODELS["codex"]
-        and selected_effort is None
-    ):
-        selected_effort = "max"
     cwd = args.cwd.expanduser().resolve()
     if not cwd.is_dir():
         raise RunnerError(f"target directory does not exist: {cwd}", 4)

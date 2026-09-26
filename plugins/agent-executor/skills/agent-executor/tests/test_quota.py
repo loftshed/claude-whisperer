@@ -162,11 +162,12 @@ class DispatchableRecommendTests(unittest.TestCase):
         result = POLICY.recommend({"role": "implementation", "host": host, "access": records, **packet}, self.registry)
         return [candidate["model"] for candidate in result["candidates"]]
 
-    def test_a_codex_host_is_never_offered_claude_it_cannot_dispatch(self) -> None:
+    def test_a_codex_host_is_offered_claude_through_the_claude_engine(self) -> None:
         roomy = view()
         roomy["lanes"][3] = lane("antigravity", "gemini", "Antigravity · Gemini", usable=60, surplus=2)
-        self.assertNotIn("claude-sonnet-5", self.ranked("codex", roomy, personal_quota_authorized=True))
-        self.assertIn("claude-sonnet-5", self.ranked("claude", roomy, personal_quota_authorized=True))
+        self.assertIn("claude-sonnet-5", self.ranked("codex", roomy, personal_quota_authorized=True))
+        records = QUOTA.access_records(roomy, self.registry, "opencode")
+        self.assertNotIn("opencode", {record["engine"] for record in records}, "never route hosted models via OpenCode")
 
     def test_expiring_pools_come_first_then_native(self) -> None:
         current = view()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import contextlib
 import importlib.util
 import io
@@ -1599,6 +1600,22 @@ else:
         self.assertEqual(event_id_line.partition("=")[2], event_path.stem)
         self.assertNotIn("AGENT_PROGRESS", output.getvalue())
 
+    def test_detached_launch_fails_fast_when_another_executor_holds_the_worktree(self) -> None:
+        brief = self.external_path / "held-brief.md"
+        brief.write_text("# Objective\n\nCreate the fixture output.\n", encoding="utf-8")
+        cache_root = self.external_path / "held-cache"
+        environment = {"PATH": f"{self.external_path}{os.pathsep}{os.environ['PATH']}", "XDG_CACHE_HOME": str(cache_root)}
+        argv = [str(SCRIPT), "--cwd", str(self.repository.path), "--brief", str(brief), "--detach", "--notify", "none",
+                "--allow-path", "allowed", "--expect-changes"]
+        support = RUNNER.bundled_module("execution_support")
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), mock.patch.dict(os.environ, environment), contextlib.redirect_stdout(output):
+            with support.workspace_lease(self.repository.path, RUNNER.default_agent_cache_dir()):
+                with self.assertRaises(RUNNER.RunnerError) as caught:
+                    RUNNER.main()
+        self.assertEqual(caught.exception.exit_code, 27)
+        self.assertNotIn("AGENT_JOB_STATUS=started", output.getvalue(), "no job may be reported as started")
+
     def test_detached_task_spec_preserves_derived_scope(self) -> None:
         task_spec = self.external_path / "detached-task-spec.json"
         task_spec.write_text(
@@ -1691,6 +1708,74 @@ else:
             RUNNER.main()
 
 
+class RouteTests(unittest.TestCase):
+    def resolve(self, *extra: str, config: dict | None = None) -> argparse.Namespace:
+        with tempfile.TemporaryDirectory() as home:
+            path = Path(home) / "config.json"
+            if config is not None:
+                path.write_text(json.dumps(config), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"AGENT_EXECUTOR_CONFIG": str(path)}):
+                return RUNNER.resolve_route(RUNNER.parse_args(["--brief", "b.md", *extra]))
+
+    def test_defaults_and_roles(self) -> None:
+        plain = self.resolve()
+        self.assertEqual((plain.engine, plain.model, plain.effort), ("codex", None, "max"))
+        self.assertEqual(RUNNER.preferred_model("codex"), "gpt-5.6-luna")
+        consult = self.resolve("--route", "consultation")
+        self.assertEqual((consult.engine, consult.model, consult.effort), ("codex", "gpt-5.6-sol", "high"))
+        glm = self.resolve("--route", "opencode")
+        self.assertEqual((glm.engine, glm.model, glm.variant), ("opencode", "openrouter/z-ai/glm-5.3-flash", "high"))
+        claude = self.resolve("--route", "claude")
+        self.assertEqual((claude.engine, claude.model, claude.effort), ("claude", "opus", "high"))
+
+    def test_explicit_flags_win_and_config_overrides(self) -> None:
+        self.assertEqual(self.resolve("--route", "consultation", "--effort", "low").effort, "low")
+        self.assertIsNone(self.resolve("--model", "gpt-6-luna").effort, "the route's effort belongs to the route's model")
+        custom = self.resolve("--route", "implementation", config={"routes": {"implementation": {"engine": "codex", "model": "gpt-6-luna", "effort": "high"}}})
+        self.assertEqual((custom.model, custom.effort), ("gpt-6-luna", "high"))
+        with self.assertRaises(RUNNER.RunnerError) as caught:
+            self.resolve("--route", "nonexistent")
+        self.assertEqual(caught.exception.exit_code, 4)
+
+
+class PruneTests(unittest.TestCase):
+    def test_prune_removes_old_acknowledged_state_and_keeps_unreviewed_results(self) -> None:
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {"AGENT_EXECUTOR_HOME": home}):
+            root = Path(home)
+            old = time.time() - 40 * 86400
+
+            def job(name: str) -> Path:
+                directory = root / "jobs-v1" / name / "run"
+                directory.mkdir(parents=True)
+                (directory / "result.json").write_text("{}", encoding="utf-8")
+                return directory / "result.json"
+
+            def event(name: str, result: Path, acknowledged: bool) -> Path:
+                path = root / "completions-v1" / f"{name}.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"result_path": str(result), "acknowledged_at": "x" if acknowledged else None}), encoding="utf-8")
+                return path
+
+            reviewed, pending = job("reviewed"), job("pending")
+            orphan_run = root / "runs-v1" / "old-foreground"
+            orphan_run.mkdir(parents=True)
+            paths = [event("reviewed", reviewed, True), event("pending", pending, False), root / "jobs-v1" / "reviewed",
+                     root / "jobs-v1" / "pending", orphan_run]
+            for path in paths:
+                os.utime(path, (old, old))
+            dry = RUNNER.prune_state(14 * 86400, dry_run=True)
+            self.assertEqual((dry["events"], dry["jobs"], dry["runs"]), (1, 1, 1))
+            self.assertTrue((root / "jobs-v1" / "reviewed").exists(), "dry run removes nothing")
+            RUNNER.prune_state(14 * 86400)
+            self.assertFalse((root / "jobs-v1" / "reviewed").exists())
+            self.assertFalse(orphan_run.exists())
+            self.assertTrue((root / "jobs-v1" / "pending").exists(), "unacknowledged results are kept")
+            self.assertTrue((root / "completions-v1" / "pending.json").exists())
+
+    def test_durations_accept_days(self) -> None:
+        self.assertEqual(RUNNER.parse_duration("14d", option="--older-than"), 14 * 86400)
+
+
 class NativeRouteAndProviderErrorTests(unittest.TestCase):
     # Reuse the integration fixtures without re-running the inherited tests.
     setUp = RunnerIntegrationTests.setUp
@@ -1735,3 +1820,23 @@ class NativeRouteAndProviderErrorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StatusFormattingTests(unittest.TestCase):
+    def outcome(self, text: str) -> str | None:
+        report, extracted = RUNNER.extract_raw_final_report(text)
+        return RUNNER.parse_reported_outcome(report, extracted)
+
+    def test_decorated_status_tokens_parse(self) -> None:
+        for text in (
+            "STATUS\n`COMPLETE`",
+            "**STATUS**\n**COMPLETE**",
+            "## STATUS:\nCOMPLETE.",
+            "## **STATUS**\n- `COMPLETE`",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.outcome(text), "complete")
+        self.assertEqual(self.outcome("STATUS\n`BLOCKED` - no network"), "blocked")
+
+    def test_qualified_complete_stays_unknown(self) -> None:
+        self.assertEqual(self.outcome("STATUS\nCOMPLETE - except tests"), "unknown")

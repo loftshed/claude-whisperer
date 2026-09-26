@@ -1,5 +1,7 @@
 # Implementation and measurement status
 
+Version 0.10.0 (2026-09-25): native `claude` engine; hosted models refused on OpenCode (exit 17); provider quota errors surfaced (exit 16); history judged on this worktree only; detached launches validated before detaching; config-file routes with `routes`/`init`/`doctor`; retention via `prune`; decorated STATUS tolerated; SKILL.md reduced to a core with detail in `runner.md` and `completion.md`; `install.sh` links all harnesses to one checkout. 127 local tests pass.
+
 Version 0.9.0, checkpointed on 2026-09-18. This is a private working backup. Routing calibration is deferred at the maintainer's request to conserve usage. Resume model trials only when the maintainer requests calibration again.
 
 Implemented: native and external host binding, durable reservations and completion events, exact review-before-ack, bounded consultation and correction, task invocation allowance and deadline, captured evidence and independent checks, reusable decisions with invalidation, conservative provider usage, and access-filtered provisional profiles.

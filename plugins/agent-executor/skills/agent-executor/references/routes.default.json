@@ -1,0 +1,11 @@
+{
+  "schema": "agent-executor.routes.v1",
+  "note": "Defaults for each role. Override any of them in ~/.config/agent-executor/config.json (run_agent.py init writes a starter). Claude, GPT and Gemini always run in their own harness; opencode routes are for families without one (GLM, DeepSeek, Qwen, Kimi).",
+  "routes": {
+    "implementation": { "engine": "codex", "model": "gpt-5.6-luna", "effort": "max" },
+    "consultation": { "engine": "codex", "model": "gpt-5.6-sol", "effort": "high" },
+    "gemini": { "engine": "agy", "model": "gemini-3.8-flash-medium" },
+    "claude": { "engine": "claude", "model": "opus", "effort": "high" },
+    "opencode": { "engine": "opencode", "model": "openrouter/z-ai/glm-5.3-flash", "variant": "high" }
+  }
+}

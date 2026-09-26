@@ -160,8 +160,8 @@ def blocked_message(engine: str, model: str, result: dict[str, Any], view: dict[
     return text + " Pass --ignore-quota only when the user asks to launch anyway."
 
 
-# Engines the runner can dispatch to from any host. Claude is reachable only natively, from a Claude host.
-DISPATCHABLE = ("codex", "agy")
+# Engines the runner can dispatch to from any host (a Claude host uses its native sub-agents for Claude).
+DISPATCHABLE = ("codex", "agy", "claude")
 
 
 def access_records(view: dict[str, Any] | None, registry: dict[str, Any], host: str | None = None) -> list[dict[str, Any]]:
