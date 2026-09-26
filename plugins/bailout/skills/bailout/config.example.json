@@ -1,0 +1,18 @@
+{
+  "enabled": true,
+
+  "bailoutPercent": 95,
+  "checkpointPercent": 90,
+  "checkpointEnabled": true,
+
+  "modelMarginPercent": {
+    "opus": 3,
+    "fable": 3,
+    "sonnet": 1,
+    "haiku": 0,
+    "default": 1
+  },
+
+  "staleAfterSeconds": 900,
+  "maxStopBlocks": 2
+}

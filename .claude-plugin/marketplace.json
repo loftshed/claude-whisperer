@@ -13,6 +13,11 @@
       "name": "ai-usage",
       "source": "./plugins/ai-usage",
       "description": "Remaining quota across Claude Code profiles, Codex and Antigravity, and where to spend it: MCP server, skill, CLI/TUI, macOS menu bar app."
+    },
+    {
+      "name": "bailout",
+      "source": "./plugins/bailout",
+      "description": "Hand off a task before the five-hour Claude usage window runs out; ends a /goal loop after the handoff."
     }
   ],
   "metadata": {
