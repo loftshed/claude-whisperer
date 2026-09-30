@@ -756,12 +756,35 @@ def discover_live_engine_catalog(
             models = simple_model_records(output)
             source = "agy models"
         else:
-            command = [executable, "models", "--pure"]
-            if refresh:
-                command.append("--refresh")
-            output = run_checked(command, timeout=120, environment=environment).stdout.decode("utf-8", errors="replace")
+            version = version or get_cached_cli_version(executable, environment)
+            major = opencode_major_version(version)
+
+            def _build_opencode_models_cmd(ver_major: int) -> tuple[list[str], str]:
+                if ver_major >= 2:
+                    return [executable, "models"], "opencode models"
+                cmd = [executable, "models", "--pure"]
+                if refresh:
+                    cmd.append("--refresh")
+                return cmd, "opencode models --pure" + (" --refresh" if refresh else "")
+
+            command, source = _build_opencode_models_cmd(major)
+            try:
+                output = run_checked(command, timeout=120, environment=environment).stdout.decode(
+                    "utf-8", errors="replace"
+                )
+            except RunnerError:
+                fresh_version = get_cached_cli_version(executable, environment, force_refresh=True)
+                fresh_major = opencode_major_version(fresh_version)
+                if fresh_major != major:
+                    version = fresh_version
+                    major = fresh_major
+                    command, source = _build_opencode_models_cmd(major)
+                    output = run_checked(command, timeout=120, environment=environment).stdout.decode(
+                        "utf-8", errors="replace"
+                    )
+                else:
+                    raise
             models = simple_model_records(output)
-            source = "opencode models --pure" + (" --refresh" if refresh else "")
         if not models:
             raise RunnerError(f"{engine} returned an empty model catalog", 11)
         return {
@@ -830,6 +853,81 @@ def write_model_cache(payload: dict[str, Any], path: Path | None = None) -> None
     finally:
         with contextlib.suppress(FileNotFoundError):
             temporary_path.unlink()
+
+
+def default_cli_version_cache_path() -> Path:
+    return default_agent_cache_dir() / "cli-versions-v1.json"
+
+
+def read_cli_version_cache(path: Path | None = None) -> dict[str, str]:
+    cache_path = path or default_cli_version_cache_path()
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {k: str(v) for k, v in payload.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def write_cli_version_cache(payload: dict[str, str], path: Path | None = None) -> None:
+    cache_path = path or default_cli_version_cache_path()
+    cache_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    cache_path.parent.chmod(0o700)
+    temporary_path = cache_path.parent / f".{cache_path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        write_private_text(
+            temporary_path,
+            json.dumps(payload, indent=2, ensure_ascii=True) + "\n",
+        )
+        os.replace(temporary_path, cache_path)
+        cache_path.chmod(0o600)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary_path.unlink()
+
+
+def get_cached_cli_version(
+    executable: str,
+    environment: dict[str, str],
+    *,
+    force_refresh: bool = False,
+    cache_path: Path | None = None,
+) -> str:
+    path = cache_path or default_cli_version_cache_path()
+    if not force_refresh:
+        cache = read_cli_version_cache(path)
+        cached = cache.get(executable)
+        if cached:
+            return cached
+    try:
+        version = cli_version(executable, environment)
+    except Exception:
+        cache = read_cli_version_cache(path)
+        return cache.get(executable, "unknown")
+    cache = read_cli_version_cache(path)
+    cache[executable] = version
+    write_cli_version_cache(cache, path)
+    return version
+
+
+def record_cli_version(
+    executable: str,
+    version: str,
+    *,
+    cache_path: Path | None = None,
+) -> None:
+    path = cache_path or default_cli_version_cache_path()
+    cache = read_cli_version_cache(path)
+    cache[executable] = version
+    write_cli_version_cache(cache, path)
+
+
+def opencode_major_version(version: str | None) -> int:
+    match = re.search(r"(?:opencode\s+)?v?(\d+)", version or "")
+    if match:
+        return int(match.group(1))
+    return 1
 
 
 def cached_catalog_entry(
@@ -915,7 +1013,10 @@ def discover_engine_catalog(
         return discover_live_engine_catalog(engine, refresh=refresh)
     environment = executor_environment(engine)
     try:
-        version = cli_version(executable, environment)
+        if engine == "opencode":
+            version = get_cached_cli_version(executable, environment, force_refresh=refresh)
+        else:
+            version = cli_version(executable, environment)
     except (OSError, RunnerError):
         return discover_live_engine_catalog(engine, refresh=refresh, executable=executable)
 
@@ -2741,6 +2842,7 @@ def build_executor_command(
     effort: str | None = None,
     agy_stdin: bool = False,
     new_session_id: str | None = None,
+    executor_version: str | None = None,
 ) -> list[str]:
     if engine == "agy":
         command = [executable]
@@ -2816,6 +2918,29 @@ def build_executor_command(
             "--output-last-message",
             str(final_output_path),
             "-",
+        ]
+        return command
+
+    ver_str = executor_version or get_cached_cli_version(executable, executor_environment("opencode"))
+    major = opencode_major_version(ver_str)
+    if major >= 2:
+        effective_model = f"{model}#{variant}" if variant else model
+        command = [executable, "run"]
+        if session_id:
+            command += ["--session", session_id]
+        elif continue_last:
+            command += ["--continue"]
+        command += [
+            "--model",
+            effective_model,
+            "--agent",
+            "build",
+            "--format",
+            "json",
+            "--auto",
+            "Execute the attached execution brief exactly and return its required report.",
+            "--file",
+            str(submitted_brief_path),
         ]
         return command
 
@@ -4207,6 +4332,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         effort=effort["bound"] if args.engine in ("codex", "claude") else None,
         agy_stdin=agy_stdin,
         new_session_id=segment_session if args.engine == "claude" and not segment_resumed else None,
+        executor_version=version,
     )
 
     base_result: dict[str, Any] = {
@@ -4391,6 +4517,37 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         attempt_delta = state_delta(before, after_attempt)
         attempt_history_violations = find_history_violations(git_identity_before, git_identity_after_attempt)
         attempt_workspace_changed = before["fingerprint"] != after_attempt["fingerprint"]
+        if (
+            args.engine == "opencode"
+            and process.returncode not in (None, 0)
+            and attempt_number == 1
+            and not attempt_workspace_changed
+            and not attempt_history_violations
+        ):
+            fresh_ver = get_cached_cli_version(executable, environment, force_refresh=True)
+            if opencode_major_version(fresh_ver) != opencode_major_version(version):
+                version = fresh_ver
+                command = build_executor_command(
+                    executable=executable,
+                    engine=args.engine,
+                    model=model,
+                    variant=variant,
+                    repo=repo,
+                    add_dirs=add_dirs,
+                    session_id=args.session,
+                    continue_last=args.continue_last,
+                    timeout=args.timeout,
+                    submitted_brief_path=submitted_brief_path,
+                    final_output_path=final_output_path,
+                    log_path=log_path,
+                    effort=effort["bound"] if args.engine in ("codex", "claude") else None,
+                    agy_stdin=agy_stdin,
+                    new_session_id=segment_session if args.engine == "claude" and not segment_resumed else None,
+                    executor_version=version,
+                )
+                base_result.update(command=command_preview(command), executor_version=version)
+                attempt_usage.clear()
+                continue
         # agy reports provider errors (e.g. 429) as a terminal status with exit 0; count those as well.
         terminal_error = provider_terminal_error(args.engine, stdout_text)
         transient_failure = (
@@ -4543,6 +4700,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
                 log_path=log_path,
                 effort=effort["bound"] if args.engine in ("codex", "claude") else None,
                 agy_stdin=agy_stdin,
+                executor_version=version,
             )
             base_result.update(
                 command=command_preview(command),

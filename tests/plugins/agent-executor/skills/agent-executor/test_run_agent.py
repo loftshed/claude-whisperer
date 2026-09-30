@@ -892,6 +892,9 @@ else:
             "#!/usr/bin/env python3\n"
             + common
             + r"""
+if "--pure" in sys.argv and (os.environ.get("FAKE_OPENCODE_VERSION", "").startswith("2.") or os.environ.get("FAKE_OPENCODE_REJECT_PURE") == "1"):
+    print("Unrecognized flag: --pure", file=sys.stderr)
+    sys.exit(1)
 if "--version" in sys.argv:
     print(os.environ.get("FAKE_OPENCODE_VERSION", "1.18.4-test"))
 elif len(sys.argv) > 1 and sys.argv[1] == "models":
@@ -1263,6 +1266,42 @@ else:
         self.assertEqual(exit_code, 0)
         self.assertEqual(result["model"], model)
         self.assertEqual(result["variant"], "high")
+
+    def test_opencode_v2_command_flags(self) -> None:
+        with mock.patch.dict(os.environ, {"FAKE_OPENCODE_VERSION": "opencode v2.0.20"}):
+            exit_code, result, _out_dir, _summary, _capture = self.run_main(engine="opencode")
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result["model"], "openrouter/z-ai/glm-5.3-flash")
+        self.assertEqual(result["variant"], "high")
+        self.assertIn("--auto", result["command"])
+        self.assertNotIn("--pure", result["command"])
+        self.assertNotIn("--variant", result["command"])
+        self.assertNotIn("--dir", result["command"])
+        self.assertIn("openrouter/z-ai/glm-5.3-flash#high", result["command"])
+        self.assertIn("--file", result["command"])
+
+    def test_opencode_caches_version_and_switches_when_upgraded_to_v2(self) -> None:
+        cache_root = self.external_path / "opencode-cache"
+        env_v1 = {
+            "FAKE_OPENCODE_VERSION": "1.18.4-test",
+            "XDG_CACHE_HOME": str(cache_root),
+        }
+        with mock.patch.dict(os.environ, env_v1):
+            exit_code, result1, _out1, _sum1, _cap1 = self.run_main(engine="opencode")
+            self.assertEqual(exit_code, 0)
+            self.assertIn("--pure", result1["command"])
+
+        # Simulate user upgrading opencode to v2
+        self.repository.git("clean", "-fd")
+        env_v2 = {
+            "FAKE_OPENCODE_VERSION": "2.0.20",
+            "XDG_CACHE_HOME": str(cache_root),
+        }
+        with mock.patch.dict(os.environ, env_v2):
+            exit_code, result2, _out2, _sum2, _cap2 = self.run_main(engine="opencode")
+            self.assertEqual(exit_code, 0)
+            self.assertNotIn("--pure", result2["command"])
+            self.assertIn("openrouter/z-ai/glm-5.3-flash#high", result2["command"])
 
     def test_exact_sessions_are_forwarded(self) -> None:
         exit_code, result, _out_dir, _summary, _capture = self.run_main(session="codex-thread-existing")
