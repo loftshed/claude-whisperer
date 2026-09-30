@@ -1,0 +1,32 @@
+{
+  "version": "0.2",
+  "language": "en,en-GB",
+  "useGitignore": true,
+  "allowCompoundWords": true,
+  "dictionaries": [
+    "bash",
+    "css",
+    "git",
+    "html",
+    "node",
+    "npm",
+    "python",
+    "softwareTerms",
+    "swift",
+    "words"
+  ],
+  "dictionaryDefinitions": [{ "name": "words", "path": "./project-words.txt", "addWords": true }],
+  "ignorePaths": [
+    ".git/**",
+    ".yarn/**",
+    "node_modules/**",
+    "project-words.txt",
+    "tests/**/fixtures/**",
+    "yarn.lock"
+  ],
+  "ignoreRegExpList": [
+    "/\\b[0-9a-f]{32,64}\\b/gi",
+    "/https?:\\/\\/\\S+/g",
+    "/\\b[A-Z0-9_]{15,}\\b/g"
+  ]
+}

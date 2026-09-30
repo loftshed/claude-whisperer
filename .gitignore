@@ -1,0 +1,26 @@
+# Dependencies and tool state
+node_modules/
+.yarn/*
+!.yarn/releases/
+.pnp.*
+.ruff_cache/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Output
+*.log
+junit.xml
+artifacts/
+
+# Local and editor files
+.DS_Store
+.env
+.env.*
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+.claude/.cc-writes/
+**/.claude/**/*.local.*

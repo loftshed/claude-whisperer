@@ -1,0 +1,32 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "minimumReleaseAge": "2 days",
+  "packageRules": [
+    {
+      "description": "One pull request for routine updates, opened once three have accumulated",
+      "groupName": "routine updates",
+      "groupSlug": "routine",
+      "matchPackageNames": ["*"],
+      "matchUpdateTypes": ["digest", "minor", "patch", "pin"],
+      "minimumGroupSize": 3
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "datasourceTemplate": "pypi",
+      "depNameTemplate": "ruff",
+      "description": "The ruff version pinned in the lint gate",
+      "managerFilePatterns": ["/^scripts/check\\.sh$/"],
+      "matchStrings": ["RUFF_VERSION=(?<currentValue>\\S+)"]
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "description": "Security fixes skip the waiting period and the grouping",
+    "groupName": null,
+    "labels": ["security"],
+    "minimumGroupSize": 1,
+    "minimumReleaseAge": null
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "[python]": { "editor.defaultFormatter": "charliermarsh.ruff" },
+  "editor.codeActionsOnSave": { "source.fixAll.eslint": "explicit" },
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSave": true,
+  "prettier.prettierPath": "./node_modules/prettier"
+}

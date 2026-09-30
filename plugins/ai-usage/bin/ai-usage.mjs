@@ -1,0 +1,229 @@
+#!/usr/bin/env node
+import { existsSync } from "node:fs";
+import { parseArgs } from "node:util";
+
+import { expandHome } from "../lib/exec.mjs";
+import { detectConfig } from "../lib/init.mjs";
+import { serveMcp, summarizeLanes } from "../lib/mcp.mjs";
+import { registerMcp } from "../lib/register.mjs";
+import { jsonView, renderLine, renderReport, shouldUseColor } from "../lib/render.mjs";
+import { CACHE_DIR, CONFIG_PATH, getAccounts, loadConfig, writeConfig } from "../lib/store.mjs";
+import { VERSION } from "../lib/version.mjs";
+
+const HELP = `ai-usage: remaining quota across your Claude, Codex and Antigravity accounts
+
+Usage:
+  ai-usage [show]            table of every window plus where to spend next
+  ai-usage watch             live full-screen view (r = refresh now, q = quit)
+  ai-usage json              machine-readable snapshot (used by the menu bar app)
+  ai-usage line              one-line summary for tmux or a status line
+  ai-usage recommend         ranked pools to use next  [--family claude|gpt|gemini]
+  ai-usage mcp               run as an MCP server on stdio
+  ai-usage init              detect this machine's accounts and write the config [--force] [--dry-run]
+  ai-usage config            show config and cache locations
+  ai-usage mcp-install       register the MCP server in Claude Code profiles, Codex, agy,
+                             Gemini CLI and OpenCode
+                             [--dry-run] [--command <launcher path>]
+                             [--skip-claude] when Claude Code gets it from the ai-usage plugin
+  ai-usage mcp-uninstall     remove those registrations
+  ai-usage --version
+
+Options:
+  -r, --refresh              ignore the cache and query every provider now
+  --max-age <seconds>        reuse cached data younger than this (default from config, 180)
+  --interval <seconds>       watch: how often to re-query providers (default 120)
+  --family <name>            recommend: claude, gpt or gemini
+  --no-color                 plain output
+`;
+
+let parsed;
+try {
+  parsed = parseArgs({
+    allowPositionals: true,
+    options: {
+      refresh: { type: "boolean", short: "r" },
+      "max-age": { type: "string" },
+      interval: { type: "string" },
+      family: { type: "string" },
+      json: { type: "boolean" },
+      command: { type: "string" },
+      "dry-run": { type: "boolean" },
+      force: { type: "boolean" },
+      "skip-claude": { type: "boolean" },
+      version: { type: "boolean", short: "v" },
+      "no-color": { type: "boolean" },
+      help: { type: "boolean", short: "h" },
+    },
+  });
+} catch (error) {
+  console.error(`ai-usage: ${error.message}\n\n${HELP}`);
+  process.exit(2);
+}
+const { values, positionals } = parsed;
+
+// Reject non-numeric durations: NaN would make every cache entry look fresh forever.
+function seconds(name) {
+  if (values[name] === undefined) return;
+  const value = Number(values[name]);
+  if (!Number.isFinite(value) || value < 0) {
+    console.error(`ai-usage: --${name} must be a number of seconds, got "${values[name]}"`);
+    process.exit(2);
+  }
+  return value;
+}
+
+const command = positionals[0] ?? "show";
+const maxAgeSeconds = seconds("max-age");
+const color = !values["no-color"] && shouldUseColor();
+
+async function show() {
+  const accounts = await getAccounts({ force: values.refresh, maxAgeSeconds });
+  console.log(renderReport(accounts, { color }));
+}
+
+async function recommend() {
+  const view = jsonView(await getAccounts({ force: values.refresh, maxAgeSeconds }));
+  const lanes = values.family
+    ? view.lanes.filter((l) => l.families.includes(values.family))
+    : view.lanes;
+  if (values.json) return console.log(JSON.stringify(lanes, null, 2));
+  if (lanes.length === 0)
+    return console.log(
+      `No configured account serves the "${values.family}" family (try claude, gpt or gemini).`,
+    );
+  console.log(summarizeLanes(lanes));
+}
+
+async function watch() {
+  const interval = Math.max(30, seconds("interval") ?? 120);
+  const out = process.stdout;
+  let accounts = null;
+  let isRefreshing = false;
+  let timer;
+  const draw = () => {
+    if (!accounts) return;
+    const footer = `r refresh · q quit · re-queries every ${interval}s · ${new Date().toLocaleTimeString()}`;
+    out.write(
+      `\u{1B}[H\u{1B}[2J${renderReport(accounts, { color, refreshing: isRefreshing, footer })}\n`,
+    );
+  };
+  const refresh = async (isForced = false) => {
+    if (isRefreshing) return;
+    isRefreshing = true;
+    draw();
+    try {
+      accounts = await getAccounts({ force: isForced, maxAgeSeconds: interval });
+    } finally {
+      isRefreshing = false;
+    }
+    draw();
+  };
+  const quit = (reason) => {
+    clearInterval(timer);
+    out.write("\u{1B}[?25h\u{1B}[?1049l");
+    if (process.env.AI_USAGE_DEBUG) console.error(`ai-usage watch: quit (${reason})`);
+    process.exit(0);
+  };
+  out.write("\u{1B}[?1049h\u{1B}[?25l");
+  process.on("SIGINT", () => quit("SIGINT"));
+  process.on("SIGTERM", () => quit("SIGTERM"));
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    // Keys can arrive batched in one chunk (pasted, or piped through a pty), so look at each one.
+    process.stdin.on("data", (chunk) => {
+      for (const k of chunk.toString()) {
+        if (k === "q" || k === "\u{3}") return quit(`key ${JSON.stringify(k)}`);
+        if (k === "r") refresh(true);
+      }
+    });
+  }
+  out.on("resize", draw);
+  accounts = await getAccounts({ maxAgeSeconds: interval });
+  draw();
+  // Redraw every 30s so countdowns stay current; re-query only once data is older than the interval.
+  timer = setInterval(() => refresh(false), 30_000);
+}
+
+function config() {
+  console.log(`config: ${CONFIG_PATH}\ncache:  ${CACHE_DIR}\n`);
+  console.log(JSON.stringify(loadConfig(), null, 2));
+}
+
+function init() {
+  const detected = detectConfig();
+  if (values["dry-run"] || (existsSync(CONFIG_PATH) && !values.force)) {
+    if (!values["dry-run"])
+      console.error(
+        `${CONFIG_PATH} already exists; pass --force to replace it. Detected on this machine:\n`,
+      );
+    return console.log(JSON.stringify(detected, null, 2));
+  }
+  writeConfig(detected);
+  console.log(
+    `wrote ${CONFIG_PATH} with ${detected.accounts.length} account(s): ${detected.accounts.map((a) => a.id).join(", ")}`,
+  );
+  console.log(
+    "Edit labels, short names and routes there; see config.example.json for a two-Claude-profile setup.",
+  );
+}
+
+try {
+  if (values.version) console.log(VERSION);
+  else if (values.help || command === "help") console.log(HELP);
+  else
+    switch (command) {
+      case "show": {
+        await show();
+        break;
+      }
+      case "watch": {
+        await watch();
+        break;
+      }
+      case "json": {
+        const snapshot = await getAccounts({ force: values.refresh, maxAgeSeconds });
+        console.log(JSON.stringify(jsonView(snapshot), null, 2));
+        break;
+      }
+      case "line": {
+        console.log(renderLine(await getAccounts({ force: values.refresh, maxAgeSeconds })));
+        break;
+      }
+      case "recommend": {
+        await recommend();
+        break;
+      }
+      case "mcp": {
+        serveMcp();
+        break;
+      }
+      case "config": {
+        config();
+        break;
+      }
+      case "mcp-install":
+      case "mcp-uninstall": {
+        const launcher = expandHome(values.command ?? "~/.local/bin/ai-usage");
+        await registerMcp(loadConfig(), {
+          launcher,
+          dryRun: values["dry-run"],
+          remove: command === "mcp-uninstall",
+          skipClaude: values["skip-claude"],
+        });
+
+        break;
+      }
+      case "init": {
+        init();
+        break;
+      }
+      default: {
+        console.error(`Unknown command "${command}"\n\n${HELP}`);
+        process.exitCode = 2;
+      }
+    }
+} catch (error) {
+  console.error(`ai-usage: ${error.message}`);
+  process.exitCode = 1;
+}

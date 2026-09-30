@@ -1,0 +1,9 @@
+# shellcheck shell=sh
+# Husky points this repository's core.hooksPath at .husky/_, which hides a
+# machine-wide hooks directory set in ~/.gitconfig. Forward to its pre-push so
+# a global guard (for example against force-pushing over others' commits) still runs.
+global_hooks=$(git config --global core.hooksPath 2>/dev/null) || exit 0
+global_hooks=$(eval echo "$global_hooks")
+if [ -x "$global_hooks/pre-push" ]; then
+  exec "$global_hooks/pre-push" "$@"
+fi

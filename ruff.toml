@@ -1,0 +1,17 @@
+# Python lives in the agent-executor skill (standard library only) and its tests.
+target-version = "py311"
+line-length = 120
+
+[lint]
+# pyflakes, pycodestyle, isort, pyupgrade, bugbear and simplify: correctness
+# first, plus the import-order and modernisation rules that autofix cleanly.
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+# The formatter owns line length; long string literals it cannot split are fine.
+ignore = ["E501"]
+
+[lint.per-file-ignores]
+# Nested `with` blocks in tests spell out lease acquisition order on purpose.
+"tests/**" = ["SIM117"]
+
+[format]
+quote-style = "double"

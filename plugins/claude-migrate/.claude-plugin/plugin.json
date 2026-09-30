@@ -1,0 +1,8 @@
+{
+  "name": "claude-migrate",
+  "version": "1.0.0",
+  "description": "Move your whole Claude Code setup to a new Mac: every profile, skills, plugins, memory, transcripts and prompt history in one encrypted archive, restored with path rewriting and a doctor checklist.",
+  "author": {
+    "name": "loftshed"
+  }
+}

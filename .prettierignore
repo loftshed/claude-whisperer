@@ -1,0 +1,11 @@
+node_modules/
+*.log
+
+.yarn/
+yarn.lock
+.ruff_cache/
+
+# Swift and Python have their own formatters (Xcode, ruff).
+
+# Captured real output: keep byte-exact.
+tests/**/fixtures/

@@ -1,0 +1,31 @@
+{
+  "name": "claude-whisperer",
+  "owner": {
+    "name": "loftshed"
+  },
+  "plugins": [
+    {
+      "name": "agent-executor",
+      "source": "./plugins/agent-executor",
+      "description": "Bounded agent execution, consultation, evidence, and audit."
+    },
+    {
+      "name": "ai-usage",
+      "source": "./plugins/ai-usage",
+      "description": "Remaining quota across Claude Code profiles, Codex and Antigravity, and where to spend it: MCP server, skill, CLI/TUI, macOS menu bar app."
+    },
+    {
+      "name": "bailout",
+      "source": "./plugins/bailout",
+      "description": "Hand off a task before the five-hour Claude usage window runs out; ends a /goal loop after the handoff."
+    },
+    {
+      "name": "claude-migrate",
+      "source": "./plugins/claude-migrate",
+      "description": "Move your whole Claude Code setup to a new Mac: every profile, skills, plugins, memory and history in one encrypted archive, restored with a doctor checklist."
+    }
+  ],
+  "metadata": {
+    "description": "Personal plugin marketplace and skill backup."
+  }
+}

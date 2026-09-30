@@ -1,0 +1,12 @@
+{
+  // Prettier formats Markdown; markdownlint only checks structure it leaves alone.
+  "config": {
+    "default": true,
+    "MD013": false, // line length: Prettier decides wrapping
+    "MD033": false, // inline HTML is allowed
+    "MD041": false, // SKILL.md starts with frontmatter, not a heading
+  },
+  "globs": ["**/*.md"],
+  "gitignore": true,
+  "ignores": ["node_modules", ".yarn"],
+}

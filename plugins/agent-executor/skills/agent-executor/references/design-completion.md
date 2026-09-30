@@ -1,0 +1,27 @@
+# Implementation and measurement status
+
+Version 0.12.0 (2026-09-27): `quota` shows OpenCode's route as the OpenRouter account's remaining dollar credit, read live from `/api/v1/credits` with the key OpenCode uses; it is informational and the launch gate still never blocks OpenCode. 155 local tests pass.
+
+Version 0.11.0 (2026-09-26): `steer` redirects a running detached job. The runner that holds the worktree lease interrupts the executor (SIGINT, then SIGTERM, then SIGKILL) and resumes the same session with the conductor's message inside the unchanged report contract. The lease never changes hands, the combined run is judged from the original snapshot, the message is kept in the job directory, and a new event supersedes the old one, which `events wait` follows. Fresh `--engine claude` runs name their session with `--session-id`. Finished jobs, other worktrees, missing runners and executors without a session ID yet are refused. 152 local tests pass.
+
+Version 0.10.1 (2026-09-26): `--engine claude` reads the report from any Claude Code output shape (one object, a verbose JSON array, JSON lines or stream-json; the last `result` wins), so runs no longer end as `empty_output` and gates run; provider quota (exit 16) is judged only from stderr and the CLI's structured error fields with anchored messages, never from model content or tool output; the executor's stdin file is closed for every engine. 144 local tests pass.
+
+Version 0.10.0 (2026-09-25): native `claude` engine; hosted models refused on OpenCode (exit 17); provider quota errors surfaced (exit 16); history judged on this worktree only; detached launches validated before detaching; config-file routes with `routes`/`init`/`doctor`; retention via `prune`; decorated STATUS tolerated; SKILL.md reduced to a core with detail in `runner.md` and `completion.md`; `install.sh` links all harnesses to one checkout; agy briefs go through stdin; tariff estimates stay valid 30 days. 128 local tests pass.
+
+Version 0.9.0, checkpointed on 2026-09-18. This is a private working backup. Routing calibration is deferred at the maintainer's request to conserve usage. Resume model trials only when the maintainer requests calibration again.
+
+Implemented: native and external host binding, durable reservations and completion events, exact review-before-ack, bounded consultation and correction, task invocation allowance and deadline, captured evidence and independent checks, reusable decisions with invalidation, conservative provider usage, and access-filtered provisional profiles.
+
+The runner preserves its existing scope, dirty-worktree, tracked ignored-file, Git-history, report, and non-mutating verification contracts. Unknown provider model/effort, billing, and quota values stay unknown. Native deadlines require the supervising host to interrupt its own native tool.
+
+Validation includes 101 passing local tests in the packaged skill, adapter fixtures, real AGY stream/resume observations, and paired native implementation trials. Original failed verification attempts remain recorded separately from later successful checks. No model ranking is claimed.
+
+A 12-task calibration bank and result ledger cover current owner, fresh worker, and owner plus consultant, with held-out tasks and repeats. The complete three-strategy measurement matrix remains pending; route promotion is not established. Private transcripts and account-specific artifacts are excluded from this repository.
+
+## Resume later
+
+- Finish the design review, including AGY terminal-error precedence for mixed event streams and native receipt documentation. The current test suite does not establish every provider edge case.
+- Choose a model-usage allowance before running calibration. The full plan has 12 tasks across three strategies and two repeated tasks per strategy, or 42 trials per configuration. The initial paired worker trial does not complete this comparison.
+- Use `evals/calibration-tasks.json` as a task-bank template. Set the actual repository and appropriate fixed starting revisions before initializing a new calibration ledger. Keep raw runs and account-specific evidence outside the repository.
+- Preserve provisional routing until reviewed measurements support a change. Refresh live catalogs and dated pricing evidence when those facts are needed.
+- Review the contents and release status before making the repository public. Visibility changes require a separate maintainer instruction.

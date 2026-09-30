@@ -1,0 +1,34 @@
+{
+  "name": "claude-whisperer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "postinstall": "husky",
+    "validate": "node scripts/validate-marketplace.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "markdownlint": "markdownlint-cli2 \"**/*.md\"",
+    "spell": "cspell \"**/*\" --no-progress",
+    "test": "./scripts/test.sh",
+    "check": "./scripts/check.sh"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.0",
+    "cspell": "^10.0.0",
+    "eslint": "^10.0.0",
+    "eslint-plugin-perfectionist": "^5.0.0",
+    "eslint-plugin-unicorn": "^76.0.0",
+    "globals": "^17.0.0",
+    "husky": "^9.0.0",
+    "markdownlint-cli2": "^0.23.0",
+    "prettier": "^3.0.0",
+    "vite": "^8.0.0",
+    "vitest": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "packageManager": "yarn@4.18.1"
+}

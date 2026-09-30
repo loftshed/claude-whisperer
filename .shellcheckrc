@@ -1,0 +1,3 @@
+# Scripts here print `~/...` paths for people to read (SC2088) and pass awk,
+# sed and jq programs in single quotes on purpose (SC2016).
+disable=SC2016,SC2088

@@ -1,0 +1,3 @@
+# shellcheck shell=sh
+# The same lint gate CI runs. Tests are not part of it: run `yarn test`.
+./scripts/check.sh
