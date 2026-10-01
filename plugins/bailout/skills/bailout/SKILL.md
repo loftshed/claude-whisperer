@@ -25,8 +25,14 @@ Nothing here depends on which one.
    - `checkpoint` argument, or a checkpoint threshold notice: write `checkpoint.md`,
      keep it to a few hundred words, then carry on with ordinary work.
    - `final`, no argument, or a bailout threshold notice: write `handoff.md`.
-     Start no new work after it. If `checkpoint.md` exists, build on it rather
-     than starting over, and correct anything in it that has since changed.
+     If `checkpoint.md` exists, build on it rather than starting over, and
+     correct anything in it that has since changed.
+   - After a bailout threshold notice, write the handoff before any other work,
+     then carry on with the task. If the allowance runs out mid-turn, Claude
+     Code pauses the session and continues it after the reset; the handoff
+     records where the work stood in case it does not.
+   - After `final` or no argument, the user asked to hand off: start no new
+     work after it.
 
 3. Report the absolute path, then give the user this line verbatim, with the path
    filled in:
@@ -53,6 +59,8 @@ Then these six sections.
    would lose a distinction. Corrections made mid-task matter more than the opening
    request.
 2. **Where we stopped.** Done, in progress, and the exact interruption point.
+   After a threshold notice the work carries on past it, so name the step that
+   was under way and the one after it.
 3. **What matters from the conversation.** Decisions and why, approaches tried and
    rejected and why, open questions, and preferences the next agent would otherwise
    trip over. Rationale, not a transcript, and not a reasoning trace.
@@ -90,6 +98,10 @@ pulled earlier — 3 points for Opus and Fable, 1 for Sonnet, 0 for Haiku. Edit
 
 Neither threshold guarantees capacity for another response. A single large
 operation, or other activity on the account, can spend the remainder first.
+
+Neither threshold ends the session. The work runs on into the real usage limit,
+where Claude Code pauses it and, with "Continue automatically at usage limit"
+on in `/config`, continues it when the window resets.
 
 `node ${CLAUDE_SKILL_DIR}/scripts/bailout.mjs status ${CLAUDE_SESSION_ID}` reports
 the current reading, the thresholds in force, and the stage. Missing or stale

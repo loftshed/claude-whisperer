@@ -4,8 +4,10 @@ Writes a handoff before the five-hour Claude allowance runs out, so the next
 agent can continue without the task being explained again. The next agent can be
 Codex, Gemini, or another Claude session; nothing here depends on which.
 
-The package detects when to bail out, asks for the handoff, and yields. It does
-not launch, route to, or coordinate with any other agent.
+The package detects when to bail out, asks for the handoff, and then stays out
+of the way, so Claude Code can still pause at the real usage limit and continue
+the session after the reset. It does not launch, route to, or coordinate with
+any other agent.
 
 ## How it works
 
@@ -13,7 +15,7 @@ not launch, route to, or coordinate with any other agent.
 | -------- | ---------------------------------- | ----------------------------------------------- |
 | Sampler  | Appended to the status line script | Every assistant message                         |
 | Gate     | `PostToolUse` hook                 | After each tool call                            |
-| Yield    | `Stop` hook                        | End of turn, only when a bailout is outstanding |
+| Re-ask   | `Stop` hook                        | End of turn, only when a bailout is outstanding |
 | Recovery | `SessionEnd` hook                  | Session ends with the handoff still missing     |
 
 The status line is the only supported local source of the real subscription
@@ -28,15 +30,20 @@ Nothing calls a model to find out about usage. The sampler is a JSON read.
 
 1. **90% consumed** — one short checkpoint is requested, then ordinary work
    continues. Once per quota window. Disable with `"checkpointEnabled": false`.
-2. **95% consumed** — the handoff is requested, ordinary work stops, and the
-   turn ends with the absolute path reported.
+2. **95% consumed** — the handoff is requested ahead of any other work, its
+   absolute path is reported, and then the task carries on.
 3. **Handoff missing at the end of the turn** — the `Stop` hook asks again, at
-   most `maxStopBlocks` times, then ends the session regardless.
-4. **After the handoff** — every `Stop` until the quota window resets returns
-   `{"continue": false}`, which overrides another hook's `decision: "block"`
-   (for example a `/goal` condition), so a goal loop cannot keep spending the
-   quota the bailout saved.
-5. **Session ends anyway** — a clearly labelled recovery snapshot is assembled
+   most `maxStopBlocks` times, then stops asking.
+4. **After the handoff** — the hooks step aside. Work, including a `/goal`
+   loop, runs on into the real usage limit, where Claude Code pauses the session
+   and continues it once the window resets ("Continue automatically at usage
+   limit" in `/config`). The first `Stop` after the handoff shows its path once.
+   The hook never returns `{"continue": false}`: that ended the session short of
+   the limit, so Claude Code never paused it there, and nothing resumed it.
+5. **The reset time passes** — the old window's bailout is cleared at once,
+   without waiting for the first reading from the new window, so it cannot block
+   or re-prompt the resumed session.
+6. **Session ends anyway** — a clearly labelled recovery snapshot is assembled
    from the last checkpoint plus git state. No model request is made, and it
    does not pretend to contain reasoning Claude never wrote.
 
@@ -120,6 +127,8 @@ directory, and none of it spends any real allowance.
 Covered by fixtures: threshold crossings, starting already above 95%, model
 margins, configurable and disabled thresholds, missing data, non-numeric data,
 malformed stdin, a corrupt state file, stale samples, quota window rollover,
+a reset time passing with no new reading, a reading from a window that already
+reset, the `Stop` hook never ending the session,
 a handoff left over from the previous window, repeated events, separate sessions
 and projects, subagents, manual invocation with no telemetry, bounded stop
 blocks, a failed replacement write leaving the previous checkpoint intact,
@@ -138,6 +147,13 @@ Verified against real Claude Code, not only fixtures:
   variables reach them.
 - This machine's status line payload really does carry
   `rate_limits.five_hour.used_percentage`.
+- Ending the session after the handoff blocks the resume. Session transcripts
+  from 2026-09-28 to 2026-10-01 show a real limit hit producing "Usage limit
+  reached · continuing automatically at …" and, under `/goal`, "Goal paused ·
+  usage limit reached · continues automatically when it resets". After the
+  earlier `{"continue": false}`, the same goal showed "Goal paused · a hook ended
+  the turn · send a message to continue". One such halt also fired a minute
+  after the reset, before the status line had a new reading.
 
 ## Limits
 

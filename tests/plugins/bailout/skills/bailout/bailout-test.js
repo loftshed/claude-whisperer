@@ -185,9 +185,15 @@ test("bailout threshold arms and overrides an undelivered checkpoint", ({ ctx })
   assertIncludes(text, "handoff.md", "bailout instruction should name the handoff file");
   assertIncludes(
     text,
-    "no new ordinary work is started",
-    "bailout instruction should say to stop ordinary work",
+    "written or finalized before any other work",
+    "bailout instruction should put the handoff first",
   );
+  assertIncludes(
+    text,
+    "the current task carries on",
+    "bailout instruction should keep the work going into the real limit",
+  );
+  assertNotIncludes(text, "no new ordinary work", "bailout instruction must not stop the work");
 });
 
 test("a session that starts already above the bailout threshold arms immediately", ({ ctx }) => {
@@ -341,24 +347,24 @@ test("a corrupt state file is replaced rather than fatal", ({ ctx }) => {
 // ── quota window identity ──────────────────────────────────────────────────
 
 test("a new quota window rearms, a new session does not", ({ ctx }) => {
-  sample(ctx, { percent: 96, resets: 1000 });
+  sample(ctx, { percent: 96, resets: 2_000_000_000 });
   gate(ctx, hookPayload(ctx));
   writeFileSync(paths(ctx).handoff, "# handoff\n");
   stopHook(ctx, hookPayload(ctx));
   expect(state(ctx).stage === "bailout-done", "the handoff should settle the stage").toBeTruthy();
 
   // Same window, different session id: this is not evidence that usage reset.
-  sample(ctx, { session: "s2", percent: 96, resets: 1000 });
+  sample(ctx, { session: "s2", percent: 96, resets: 2_000_000_000 });
   expect(
     state(ctx, "s2").stage === "bailout-armed",
     "a fresh session at 96% must still bail out",
   ).toBeTruthy();
 
   // Same session, later window with usage actually low again.
-  sample(ctx, { percent: 12, resets: 2000 });
+  sample(ctx, { percent: 12, resets: 2_000_018_000 });
   const after = state(ctx);
   expect(after.stage === "idle", `a new window should rearm, got ${after.stage}`).toBeTruthy();
-  expect(after.window.resetsAt === 2000, "the new window should be recorded").toBeTruthy();
+  expect(after.window.resetsAt === 2_000_018_000, "the new window should be recorded").toBeTruthy();
   expect(
     Object.keys(after.handoffs).length === 0,
     "handoffs from the old window should not carry over",
@@ -366,12 +372,12 @@ test("a new quota window rearms, a new session does not", ({ ctx }) => {
 });
 
 test("a new window that is already high arms the bailout again", ({ ctx }) => {
-  sample(ctx, { percent: 96, resets: 1000 });
+  sample(ctx, { percent: 96, resets: 2_000_000_000 });
   gate(ctx, hookPayload(ctx));
   writeFileSync(paths(ctx).handoff, "# old handoff\n");
   stopHook(ctx, hookPayload(ctx));
 
-  sample(ctx, { percent: 96, resets: 5000 });
+  sample(ctx, { percent: 96, resets: 2_000_018_000 });
   expect(
     state(ctx).stage === "bailout-armed",
     "the new window should arm on its own reading",
@@ -416,7 +422,7 @@ test("sessions and projects keep separate state and separate handoffs", ({ ctx }
 
 // ── stop behaviour ─────────────────────────────────────────────────────────
 
-test("stop blocks while the handoff is missing and yields once it exists", ({ ctx }) => {
+test("stop blocks while the handoff is missing and steps aside once it exists", ({ ctx }) => {
   sample(ctx, { percent: 96 });
   gate(ctx, hookPayload(ctx));
 
@@ -434,31 +440,65 @@ test("stop blocks while the handoff is missing and yields once it exists", ({ ct
 
   writeFileSync(paths(ctx).handoff, "# handoff\n");
   const allowed = JSON.parse(stopHook(ctx, hookPayload(ctx)).stdout);
+  // `continue: false` would stop the session short of the real usage limit, so
+  // Claude Code would never pause it there and continue it after the reset.
   expect(
-    allowed.continue === false,
-    "once the handoff exists stop must end the session, overriding other stop hooks",
+    !("continue" in allowed),
+    "once the handoff exists stop must not end the session",
   ).toBeTruthy();
   expect(!("decision" in allowed), "stop must not block once the handoff exists").toBeTruthy();
-  assertIncludes(allowed.stopReason, "handoff", "the stop reason should point at the handoff");
+  assertIncludes(allowed.systemMessage, paths(ctx).handoff, "the notice should name the handoff");
   expect(state(ctx).stage === "bailout-done", "the stage should settle").toBeTruthy();
 
-  const again = JSON.parse(stopHook(ctx, hookPayload(ctx)).stdout);
   expect(
-    again.continue === false,
-    "a later stop in the same window still ends the session (a /goal loop)",
+    stopHook(ctx, hookPayload(ctx)).stdout.trim() === "",
+    "a later stop in the same window (a /goal loop) is left alone, with no repeat notice",
   ).toBeTruthy();
 });
 
-test("a new quota window lifts the post-bailout halt", ({ ctx }) => {
+// Simulates the clock passing the window's reset time without a new reading.
+function expireWindow(ctx, session = "s1") {
+  const file = path.join(ctx.home, "sessions", `${session}.json`);
+  const current = JSON.parse(readFileSync(file, "utf8"));
+  current.window.resetsAt = Math.floor(Date.now() / 1000) - 60;
+  writeFileSync(file, JSON.stringify(current));
+}
+
+test("a passed reset time ends the window before any new reading arrives", ({ ctx }) => {
   sample(ctx, { percent: 96 });
   gate(ctx, hookPayload(ctx));
-  writeFileSync(paths(ctx).handoff, "# handoff\n");
-  stopHook(ctx, hookPayload(ctx));
-  sample(ctx, { percent: 5, resets: 2_000_018_000 });
+  expireWindow(ctx);
+
+  // Claude Code continues the session after the reset; the old request must not
+  // block that resumed turn or be delivered into it.
   expect(
     stopHook(ctx, hookPayload(ctx)).stdout.trim() === "",
-    "after the window resets stop is silent again",
+    "a resumed turn must not be blocked for the previous window's handoff",
   ).toBeTruthy();
+  expect(
+    state(ctx).stage === "idle",
+    "the passed reset should return the stage to idle",
+  ).toBeTruthy();
+  expect(
+    gate(ctx, hookPayload(ctx)).stdout.trim() === "",
+    "nothing from the previous window should be delivered",
+  ).toBeTruthy();
+});
+
+test("an undelivered bailout does not survive a passed reset time", ({ ctx }) => {
+  sample(ctx, { percent: 96 });
+  expireWindow(ctx);
+  expect(
+    gate(ctx, hookPayload(ctx)).stdout.trim() === "",
+    "a request armed in the previous window must not reach the resumed session",
+  ).toBeTruthy();
+});
+
+test("a reading from a window that has already reset is ignored", ({ ctx }) => {
+  sample(ctx, { percent: 96, resets: Math.floor(Date.now() / 1000) - 60 });
+  const after = state(ctx);
+  expect(after.stage === "idle", "an outdated reading must not arm anything").toBeTruthy();
+  expect(!after.usage, "an outdated reading must not be recorded as current").toBeTruthy();
 });
 
 test("stop blocks are bounded", ({ ctx }) => {
@@ -472,8 +512,13 @@ test("stop blocks are bounded", ({ ctx }) => {
   }
   const third = JSON.parse(stopHook(ctx, hookPayload(ctx)).stdout);
   expect(
-    third.continue === false && !("decision" in third),
-    "the third stop must end the session instead of blocking",
+    !("continue" in third) && !("decision" in third),
+    "the third stop must neither block nor end the session",
+  ).toBeTruthy();
+  assertIncludes(third.systemMessage, "not written", "the user should be told it was not written");
+  expect(
+    stopHook(ctx, hookPayload(ctx)).stdout.trim() === "",
+    "the notice is not repeated on later stops",
   ).toBeTruthy();
 });
 
@@ -902,7 +947,9 @@ test("install reports rather than guesses when the status line cannot take the b
 
 // ── the central sequence ───────────────────────────────────────────────────
 
-test("INTEGRATION: a continuing task crosses the threshold, hands off, and yields", ({ ctx }) => {
+test("INTEGRATION: a continuing task crosses the threshold, hands off, and carries on", ({
+  ctx,
+}) => {
   // A task is under way. Several turns pass below the thresholds; the user sends
   // nothing, and nothing is asked of Claude.
   for (const percent of [55, 70, 84]) {
@@ -943,30 +990,44 @@ test("INTEGRATION: a continuing task crosses the threshold, hands off, and yield
     "checkpoint.md",
     "the existing checkpoint should be offered to build on",
   );
-  assertIncludes(bailoutAsk, "no new ordinary work", "ordinary work should be told to stop");
+  assertIncludes(bailoutAsk, "carries on", "the work should carry on after the handoff");
 
-  // Claude writes the handoff before the turn ends.
+  // Claude writes the handoff first, then carries on with the task.
   writeFileSync(
     paths(ctx).handoff,
     "# Handoff\n\nObjective: ship the importer.\nNext: run the tests.\n",
   );
 
-  // The turn is allowed to end, and nothing further is asked.
+  // The turn is neither blocked nor ended by the hook; the user is told once.
   const ended = JSON.parse(stopHook(ctx, hookPayload(ctx)).stdout);
   expect(
-    ended.continue === false && !("decision" in ended),
-    "the turn should end, not be blocked",
+    !("continue" in ended) && !("decision" in ended),
+    "the hook must neither block the turn nor end the session",
   ).toBeTruthy();
+  assertIncludes(ended.systemMessage, "handoff saved", "the user should see where it went");
   expect(state(ctx).stage === "bailout-done", "the stage should be settled").toBeTruthy();
+
+  // Work runs on towards the real limit. Nothing further is asked, and nothing
+  // ends the session before Claude Code's own usage-limit pause can.
   sample(ctx, { percent: 97 });
   expect(
     gate(ctx, hookPayload(ctx)).stdout.trim() === "",
-    "no further work should be requested after the handoff",
+    "no further request after the handoff",
   ).toBeTruthy();
   expect(
-    !stopHook(ctx, hookPayload(ctx)).stdout.includes('"block"'),
-    "no further stop blocks after the handoff",
+    stopHook(ctx, hookPayload(ctx)).stdout.trim() === "",
+    "later stops are left to Claude Code and any /goal",
   ).toBeTruthy();
+
+  // Claude Code continues the session once the window resets. The finished
+  // bailout belongs to the old window and does not touch the resumed turn.
+  expireWindow(ctx);
+  expect(
+    stopHook(ctx, hookPayload(ctx)).stdout.trim() === "",
+    "the resumed turn should see nothing from the bailout",
+  ).toBeTruthy();
+  sample(ctx, { percent: 3, resets: 2_000_018_000 });
+  expect(state(ctx).stage === "idle", "the new window should start idle").toBeTruthy();
 
   // Session end needs no recovery snapshot, because a real handoff exists.
   sessionEnd(ctx, { session_id: "s1", cwd: ctx.project });

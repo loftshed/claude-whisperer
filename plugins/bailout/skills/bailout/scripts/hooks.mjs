@@ -6,7 +6,9 @@
 //   gate         PostToolUse. Delivers a pending decision as additionalContext,
 //                which reaches Claude mid-task without a new user prompt.
 //   stop         Stop. Asks again, a bounded number of times, when a bailout was
-//                requested and the handoff is still missing.
+//                requested and the handoff is still missing. Never ends the
+//                session: Claude Code's own usage-limit pause and automatic
+//                continue have to see the real limit to resume it.
 //   session-end  SessionEnd. Writes a labelled recovery snapshot if the session
 //                ended with a bailout outstanding. Makes no model request.
 //
@@ -36,6 +38,28 @@ const SKILL_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const GUIDE = path.join(SKILL_DIR, "SKILL.md");
 
 const BAILOUT_STAGES = new Set(["bailout-armed", "bailout-delivered"]);
+
+// A window is over once its reset time has passed, whether or not the status
+// line has delivered a reading from the next one. Claude Code drops the
+// five-hour reading for a while after a reset, so waiting for that reading would
+// carry a bailout armed in the old window into the session it resumes.
+function hasWindowEnded(resetsAt, now) {
+  return typeof resetsAt === "number" && now >= resetsAt;
+}
+
+function startWindow(state, resetsAt) {
+  state.window = { resetsAt };
+  state.stage = "idle";
+  state.pending = null;
+  state.stopBlocks = 0;
+  state.armed = {};
+  state.handoffs = {};
+  delete state.announced;
+}
+
+function rollOver(state, now) {
+  if (hasWindowEnded(state.window?.resetsAt, now)) startWindow(state, null);
+}
 
 function fileNewerThan(filePath, epochSeconds) {
   try {
@@ -143,7 +167,7 @@ function instructionText(state, config, kind, now) {
     "",
     "Remaining capacity is not guaranteed: one large operation, or other activity on the account, can consume it before another response completes.",
     "",
-    "The bailout convention on this machine at this point is that no new ordinary work is started, the handoff file below is written or finalized, and the turn ends reporting its absolute path.",
+    "The bailout convention on this machine at this point is that the handoff file below is written or finalized before any other work, its absolute path is reported in one line, and then the current task carries on. If the allowance runs out mid-turn, Claude Code pauses the session and continues it by itself once the window resets; the handoff records where the work stood and what was next, for when it does not.",
     "",
     `Handoff file: ${filePath}`,
     `Writing guide and required sections: ${GUIDE}`,
@@ -174,6 +198,7 @@ async function modeStatusline(config) {
   if (!state) return;
 
   const now = nowSeconds();
+  rollOver(state, now);
   if (input.transcript_path) state.transcriptPath = input.transcript_path;
   if (input.model?.id) state.modelId = input.model.id;
   if (input.model?.display_name) state.modelDisplay = input.model.display_name;
@@ -185,18 +210,12 @@ async function modeStatusline(config) {
   }
 
   const five = readFiveHour(input);
-  if (five) {
-    // A changed resets_at is the only evidence that the quota window rolled
-    // over. A new session is not evidence, so stage never resets on session id.
-    const previousResetsAt = state.window ? state.window.resetsAt : undefined;
-    if (previousResetsAt !== five.resetsAt) {
-      state.window = { resetsAt: five.resetsAt };
-      state.stage = "idle";
-      state.pending = null;
-      state.stopBlocks = 0;
-      state.armed = {};
-      state.handoffs = {};
-    }
+  // A reading whose window has already reset describes the previous window.
+  if (five && !hasWindowEnded(five.resetsAt, now)) {
+    // A changed resets_at, or a reset time that has passed, is the only evidence
+    // that the quota window rolled over. A new session is not evidence, so stage
+    // never resets on session id.
+    if (state.window?.resetsAt !== five.resetsAt) startWindow(state, five.resetsAt);
     state.usage = {
       usedPercentage: five.usedPercentage,
       resetsAt: five.resetsAt,
@@ -207,7 +226,7 @@ async function modeStatusline(config) {
     reconcile(state);
     evaluate(state, config, thresholds, five.usedPercentage, now);
   } else {
-    // Missing rate_limits is unknown, never zero: leave the stage alone.
+    // Missing or outdated rate_limits is unknown, never zero: leave the stage alone.
     state.usageUnavailableAt = now;
   }
   writeState(state);
@@ -220,13 +239,14 @@ async function modeGate(config) {
   if (input.agent_id) return;
   const state = loadSession(input);
   if (!state) return;
+  const now = nowSeconds();
+  rollOver(state, now);
   reconcile(state);
   const pending = state.pending;
   if (!pending) {
     writeState(state);
     return;
   }
-  const now = nowSeconds();
   const text = instructionText(state, config, pending.kind, now);
   state.stage = `${pending.kind}-delivered`;
   state.pending = null;
@@ -239,25 +259,41 @@ async function modeGate(config) {
   );
 }
 
-function halt(stopReason) {
-  process.stdout.write(`${JSON.stringify({ continue: false, stopReason })}\n`);
+// A notice for the user, shown once per window and outcome. It never stops the
+// turn. Returns the hook output to print after the state is written.
+function noticeOnce(state, key, systemMessage) {
+  if (state.announced === key) return null;
+  state.announced = key;
+  return { systemMessage };
+}
+
+function emit(output) {
+  if (output) process.stdout.write(`${JSON.stringify(output)}\n`);
 }
 
 async function modeStop(config) {
   const input = await readHookInput();
   const state = loadSession(input);
   if (!state) return;
+  const now = nowSeconds();
+  rollOver(state, now);
   reconcile(state);
 
-  // After a bailout the session must end, even when another Stop hook (such as
-  // a /goal condition) blocks to keep working: that loop would spend the quota
-  // the bailout exists to save. `continue: false` overrides another hook's block.
-  // The stage resets when the five-hour window rolls over, so this ends there.
+  // Once the handoff exists the hook steps aside, and no longer overrides a
+  // /goal or any other Stop hook that keeps the work going. The session runs
+  // into the real usage limit, where Claude Code pauses it and continues it by
+  // itself when the window resets. Ending the session here instead, with
+  // `continue: false`, would stop it short of that limit, and nothing would
+  // resume it.
   if (state.stage === "bailout-done") {
-    writeState(state);
-    halt(
-      `Usage bailout: handoff written to ${state.handoffs.bailout}. Resume from it after the five-hour window resets.`,
+    const handoff = state.handoffs.bailout;
+    const notice = noticeOnce(
+      state,
+      handoff,
+      `Usage bailout: handoff saved to ${handoff}. Work continues; if the allowance runs out, Claude Code resumes the session after the window resets.`,
     );
+    writeState(state);
+    emit(notice);
     return;
   }
   if (!BAILOUT_STAGES.has(state.stage)) {
@@ -265,15 +301,18 @@ async function modeStop(config) {
     return;
   }
   // stop_hook_active means Claude Code is already continuing because of a stop
-  // hook. Combined with the block budget this keeps the loop finite.
+  // hook. Combined with the block budget this keeps the loop finite. Past the
+  // budget the hook stops asking but still does not end the session.
   if (state.stopBlocks >= config.maxStopBlocks) {
-    writeState(state);
-    halt(
+    const notice = noticeOnce(
+      state,
+      "unanswered",
       "Usage bailout: the handoff was requested but not written; the session-end hook will save a recovery snapshot.",
     );
+    writeState(state);
+    emit(notice);
     return;
   }
-  const now = nowSeconds();
   state.stopBlocks += 1;
   const pendingKind = state.pending?.kind;
   state.pending = null;
