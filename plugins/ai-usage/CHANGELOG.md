@@ -1,9 +1,6 @@
 # Changelog
 
-All notable changes to this project. Versions follow [semver](https://semver.org); the `ai-usage json`
-schema (`ai-usage.snapshot.v1`) changes its suffix on any breaking change to its shape.
-
-## Unreleased
+## 0.10.0
 
 - ChatGPT's exhausted weekly allowance switches to remaining credits in full and compact menu bar pills,
   collapsed account headings and the CLI status line, keeping the time until the included week is back.
@@ -15,6 +12,9 @@ schema (`ai-usage.snapshot.v1`) changes its suffix on any breaking change to its
   `blocked`: usable for any task, metered against the balance, after every pool with free quota. The
   terminal ranking, the dropdown, `recommend` and the MCP tools say "on credits" with the balance, and
   agent-executor's launch gate no longer refuses it.
+
+All notable changes to this project. Versions follow [semver](https://semver.org); the `ai-usage json`
+schema (`ai-usage.snapshot.v1`) changes its suffix on any breaking change to its shape.
 
 ## 0.9.0 (2026-09-29)
 

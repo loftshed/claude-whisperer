@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.14.0
 
 - The launch gate, `quota` table, blocked-route alternatives and `coordinator.py recommend` treat an
   ai-usage pool with status `credits` (Codex once its weekly allowance is used up, with a credit balance)
