@@ -178,11 +178,14 @@ def recommend(packet: dict[str, Any], registry: dict[str, Any]) -> dict[str, Any
     if quota_known:
         # Pools with room first (a run started in a nearly empty pool tends to stall); then pools near their
         # weekly rollover with capacity left (lost unless spent); then the host's own models (native first);
-        # then unused capacity. This orders otherwise-suitable candidates; it says nothing about quality.
+        # then unused capacity. A pool on credits (included quota used up, requests metered against a
+        # balance that persists) comes after every pool with free room but before nearly empty ones, which
+        # cannot finish a task. This orders otherwise-suitable candidates; it says nothing about quality.
         def quota_order(candidate: dict[str, Any]) -> tuple:
             quota = candidate["quota"] or {}
             return (
                 quota.get("status") == "low",
+                quota.get("status") == "credits",
                 not quota.get("expiring"),
                 not candidate["native"],
                 -(quota.get("surplusPts") or 0),
@@ -191,7 +194,7 @@ def recommend(packet: dict[str, Any], registry: dict[str, Any]) -> dict[str, Any
         candidates.sort(key=quota_order)
     ranking = (
         "Ordered by quota: pools with room first, then expiring (use it or lose it), then native, then unused "
-        "capacity (surplusPts); not quality; "
+        "capacity (surplusPts); pools on credits after free quota, nearly empty pools last; not quality; "
         if quota_known
         else "No empirical model ranking; "
     ) + "use task/context value gate before handoff."

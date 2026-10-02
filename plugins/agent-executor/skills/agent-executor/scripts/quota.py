@@ -3,6 +3,9 @@
 ai-usage (claude-whisperer/plugins/ai-usage) reports each account's rate-limit windows and ranks its
 pools. This module maps an engine and model onto the pool that pays for it, so the conductor can see
 whether a route can take a run now and the runner can refuse to launch into an exhausted one.
+
+A pool whose included allowance is used up but that has a credit balance (Codex/ChatGPT) has status
+"credits": it takes runs of any size, metered against the balance, so it is never refused.
 """
 
 from __future__ import annotations
@@ -105,15 +108,16 @@ def pool_lanes(engine: str, model: str, view: dict[str, Any]) -> list[dict[str, 
 
 
 def assess(lane: dict[str, Any]) -> str:
-    if lane.get("status") == "blocked":
-        return "blocked"
+    status = lane.get("status")
+    if status in ("blocked", "credits"):
+        return status
     if (lane.get("availableNowPct") or 0) < LOW_USABLE_PCT:
         return "low"
     return "available"
 
 
 def check(engine: str, model: str, view: dict[str, Any] | None) -> dict[str, Any]:
-    """Whether a run on engine/model can start now: available, low, blocked, unknown or not_applicable."""
+    """Whether a run on engine/model can start now: available, low, credits, blocked, unknown or not_applicable."""
     if route_for(engine, model) is None:
         return {"status": "not_applicable", "detail": f"{engine} bills per request; no subscription window to check"}
     if view is None:
@@ -139,6 +143,7 @@ def summary(lane: dict[str, Any]) -> dict[str, Any]:
         "accountId",
         "poolId",
         "billing",
+        "credits",
         "availableNowPct",
         "weeklyRemainingPct",
         "surplusPts",
@@ -229,14 +234,21 @@ def route_table(view: dict[str, Any] | None, credit: dict[str, Any] | None = Non
     return rows
 
 
+def credits_text(row: dict[str, Any]) -> str:
+    """Describe a route running on a credit balance: "on credits, 62,168.59 cr left"."""
+    credits = row.get("credits") or {}
+    return f"on credits, {credits.get('text', 'balance unknown')} left"
+
+
 def blocked_message(engine: str, model: str, result: dict[str, Any], view: dict[str, Any] | None) -> str:
     until = result.get("blockedUntil")
     when = f" until {until}" if until else ""
     alternatives = [
-        f"--engine {row['engine']} ({row['models']}): {row['label']}, {round(row['availableNowPct'])}% usable now"
+        f"--engine {row['engine']} ({row['models']}): {row['label']}, "
+        + (credits_text(row) if row["status"] == "credits" else f"{round(row['availableNowPct'])}% usable now")
         for row in route_table(view)
         if row["engine"] in ("codex", "agy")
-        and row["status"] in ("available", "low")
+        and row["status"] in ("available", "low", "credits")
         and row.get("label") != result.get("label")
     ]
     text = f"{result.get('label', engine)} quota is exhausted{when}; a {engine} run on {model} would stall."
@@ -256,7 +268,8 @@ def access_records(
 
     One record per profile model and account, for routes this host can actually use: the runner's
     engines plus the host's own models. Personal accounts are marked personal_subscription so
-    recommend() keeps excluding them unless the packet authorizes personal quota.
+    recommend() keeps excluding them unless the packet authorizes personal quota. A pool on credits is
+    available with billing_mode "credits": every request is metered against a prepaid balance.
     """
     observed_at = dt.datetime.now(dt.UTC).isoformat()
     records = []
@@ -289,15 +302,22 @@ def access_records(
                 continue
             for lane in lanes:
                 billing = lane.get("billing")
+                status = assess(lane)
+                if billing == "personal":
+                    billing_mode = "personal_subscription"
+                elif status == "credits":
+                    billing_mode = "credits"
+                else:
+                    billing_mode = "subscription"
                 records.append(
                     {
                         "model": model,
                         "engine": engine,
-                        "available": assess(lane) != "blocked",
+                        "available": status != "blocked",
                         "observed_at": observed_at,
                         "source": f"ai-usage:{lane['accountId']}",
-                        "billing_mode": "personal_subscription" if billing == "personal" else "subscription",
-                        "quota": {"status": assess(lane), **summary(lane)},
+                        "billing_mode": billing_mode,
+                        "quota": {"status": status, **summary(lane)},
                     }
                 )
     return records

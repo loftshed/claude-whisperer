@@ -25,6 +25,8 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # Runner tests must never query real subscription accounts through ai-usage; test_quota.py sets
 # its own fake per test.
 os.environ["AI_USAGE_BIN"] = str(Path(__file__).parent / "no-ai-usage")
+# Routes and families come from the bundled defaults only, never the developer's own config.
+os.environ["AGENT_EXECUTOR_CONFIG"] = str(Path(tempfile.mkdtemp()) / "absent-config.json")
 SPEC = importlib.util.spec_from_file_location("agent_executor_runner", SCRIPT)
 assert SPEC and SPEC.loader
 RUNNER = importlib.util.module_from_spec(SPEC)
@@ -905,7 +907,7 @@ elif len(sys.argv) > 1 and sys.argv[1] == "models":
     print(
         os.environ.get(
             "FAKE_OPENCODE_MODELS",
-            "openrouter/z-ai/glm-5.3-flash\nopenrouter/deepseek/deepseek-v4-flash",
+            "openrouter/~z-ai/glm-flash-latest\nopenrouter/z-ai/glm-5.3-flash\nopenrouter/deepseek/deepseek-v4-flash",
         )
     )
 else:
@@ -1242,7 +1244,7 @@ else:
     ) -> None:
         exit_code, result, _out_dir, _summary, capture = self.run_main(engine="opencode")
         self.assertEqual(exit_code, 0)
-        self.assertEqual(result["model"], "openrouter/z-ai/glm-5.3-flash")
+        self.assertEqual(result["model"], "openrouter/~z-ai/glm-flash-latest")
         self.assertEqual(result["variant"], "high")
         self.assertEqual(result["session_id"], "ses_opencode_1")
         self.assertEqual(capture["permission"], json.dumps("allow"))
@@ -1271,13 +1273,13 @@ else:
         with mock.patch.dict(os.environ, {"FAKE_OPENCODE_VERSION": "opencode v2.0.20"}):
             exit_code, result, _out_dir, _summary, _capture = self.run_main(engine="opencode")
         self.assertEqual(exit_code, 0)
-        self.assertEqual(result["model"], "openrouter/z-ai/glm-5.3-flash")
+        self.assertEqual(result["model"], "openrouter/~z-ai/glm-flash-latest")
         self.assertEqual(result["variant"], "high")
         self.assertIn("--auto", result["command"])
         self.assertNotIn("--pure", result["command"])
         self.assertNotIn("--variant", result["command"])
         self.assertNotIn("--dir", result["command"])
-        self.assertIn("openrouter/z-ai/glm-5.3-flash#high", result["command"])
+        self.assertIn("openrouter/~z-ai/glm-flash-latest#high", result["command"])
         self.assertIn("--file", result["command"])
 
     def test_opencode_caches_version_and_switches_when_upgraded_to_v2(self) -> None:
@@ -1301,7 +1303,7 @@ else:
             exit_code, result2, _out2, _sum2, _cap2 = self.run_main(engine="opencode")
             self.assertEqual(exit_code, 0)
             self.assertNotIn("--pure", result2["command"])
-            self.assertIn("openrouter/z-ai/glm-5.3-flash#high", result2["command"])
+            self.assertIn("openrouter/~z-ai/glm-flash-latest#high", result2["command"])
 
     def test_exact_sessions_are_forwarded(self) -> None:
         exit_code, result, _out_dir, _summary, _capture = self.run_main(session="codex-thread-existing")
@@ -1768,13 +1770,13 @@ class RouteTests(unittest.TestCase):
     def test_defaults_and_roles(self) -> None:
         plain = self.resolve()
         self.assertEqual((plain.engine, plain.model, plain.effort), ("codex", None, "max"))
-        self.assertEqual(RUNNER.preferred_model("codex"), "gpt-5.6-luna")
+        self.assertEqual(RUNNER.preferred_model("codex"), "gpt:luna")
         consult = self.resolve("--route", "consultation")
-        self.assertEqual((consult.engine, consult.model, consult.effort), ("codex", "gpt-5.6-sol", "high"))
+        self.assertEqual((consult.engine, consult.model, consult.effort), ("codex", "gpt:sol", "high"))
         glm = self.resolve("--route", "opencode")
-        self.assertEqual((glm.engine, glm.model, glm.variant), ("opencode", "openrouter/z-ai/glm-5.3-flash", "high"))
+        self.assertEqual((glm.engine, glm.model, glm.variant), ("opencode", "glm:flash", "high"))
         claude = self.resolve("--route", "claude")
-        self.assertEqual((claude.engine, claude.model, claude.effort), ("claude", "opus", "high"))
+        self.assertEqual((claude.engine, claude.model, claude.effort), ("claude", "claude:best", "high"))
 
     def test_explicit_flags_win_and_config_overrides(self) -> None:
         self.assertEqual(self.resolve("--route", "consultation", "--effort", "low").effort, "low")

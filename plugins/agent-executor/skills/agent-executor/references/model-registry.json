@@ -66,6 +66,51 @@
       },
       "sources": ["https://developers.openai.com/api/docs/models/gpt-6-astra"]
     },
+    "gpt-6.1-sol": {
+      "provider": "openai",
+      "rates_per_million": {
+        "fresh_input": 2,
+        "cache_read": 0.1,
+        "cache_write": 2.5,
+        "output": 10
+      },
+      "long_context": {
+        "above_input_tokens": 272000,
+        "input_multiplier": 2,
+        "output_multiplier": 1.5
+      },
+      "sources": ["https://developers.openai.com/api/docs/models/gpt-6.1-sol"]
+    },
+    "gpt-6-sol": {
+      "provider": "openai",
+      "rates_per_million": {
+        "fresh_input": 2,
+        "cache_read": 0.2,
+        "cache_write": 2.5,
+        "output": 10
+      },
+      "long_context": {
+        "above_input_tokens": 272000,
+        "input_multiplier": 2,
+        "output_multiplier": 1.5
+      },
+      "sources": ["https://developers.openai.com/api/docs/models/gpt-6-sol"]
+    },
+    "gpt-6-luna": {
+      "provider": "openai",
+      "rates_per_million": {
+        "fresh_input": 0.1,
+        "cache_read": 0.01,
+        "cache_write": 0.125,
+        "output": 0.5
+      },
+      "long_context": {
+        "above_input_tokens": 272000,
+        "input_multiplier": 2,
+        "output_multiplier": 1.5
+      },
+      "sources": ["https://developers.openai.com/api/docs/models/gpt-6-luna"]
+    },
     "gemini-3.8-flash": {
       "provider": "google",
       "rates_per_million": {

@@ -35,10 +35,12 @@ except ImportError:  # pragma: no cover - Windows falls back to atomic replaceme
 DEFAULT_ENGINE = "codex"
 EXECUTION_ENGINES = ("codex", "agy", "opencode", "claude")
 CATALOG_ENGINES = EXECUTION_ENGINES
+# Last-resort defaults when no route covers an engine. Family selectors (scripts/families.py) resolve to
+# the newest live ID, so none of these needs an edit when a model ships.
 PREFERRED_MODELS = {
-    "codex": "gpt-5.6-luna",
-    "agy": "gemini-3.8-flash-medium",
-    "opencode": "openrouter/z-ai/glm-5.3-flash",
+    "codex": "gpt:luna",
+    "agy": "gemini:fast",
+    "opencode": "glm:flash",
     "claude": "opus",
 }
 # Claude Code has no model-list command. Its aliases resolve to the current model of each tier; exact
@@ -175,7 +177,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        help="Exact live model ID; an omitted value uses a validated policy preference",
+        help=(
+            "Exact live model ID, or a family selector (`gpt:sol`, `deepseek`) that resolves to the newest "
+            "live ID; see `families`. An omitted value uses the route's model"
+        ),
     )
     parser.add_argument(
         "--refresh-models",
@@ -2752,6 +2757,91 @@ def enforce_native_route(engine: str, model: str) -> None:
         )
 
 
+def families_module() -> Any:
+    return bundled_module("families")
+
+
+def load_model_families() -> dict[str, dict[str, Any]]:
+    try:
+        return families_module().load_families(routes_module().load_config())
+    except (OSError, ValueError) as error:
+        raise RunnerError(f"cannot load model families: {error}", 4) from error
+
+
+def resolve_family_selector(engine: str, selector: str, available_models: list[str]) -> str | None:
+    """`deepseek`, `gpt:luna`, `gemini:fast` -> the newest matching live ID; None when not a selector."""
+    module = families_module()
+    families = load_model_families()
+    parsed = module.parse_selector(selector, families)
+    if not parsed:
+        return None
+    name, tier = parsed
+    if families[name]["engine"] != engine:
+        raise RunnerError(
+            f"{selector!r} is a {families[name]['engine']} family; run it with --engine {families[name]['engine']}", 4
+        )
+    try:
+        model = module.resolve(name, tier, families, available_models)
+    except module.SelectorError as error:
+        raise RunnerError(str(error), 14) from error
+    note_selector_advance(selector, model)
+    return model
+
+
+def note_selector_advance(selector: str, model: str) -> None:
+    """Tell the conductor when a selector now resolves to a different model than it did last time."""
+    path = default_agent_cache_dir() / "resolved-selectors-v1.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with path.with_suffix(f"{path.suffix}.lock").open("a+", encoding="utf-8") as lock_handle:
+            if fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            try:
+                known = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                known = {}
+            if not isinstance(known, dict):
+                known = {}
+            previous = known.get(selector)
+            if previous == model:
+                return
+            if isinstance(previous, str):
+                print(
+                    f"AGENT_NOTE=model_advanced selector={selector} from={previous} to={model}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            known[selector] = model
+            write_json_atomic(path, known)
+    except OSError:
+        pass
+
+
+def resume_pinned_model(args: argparse.Namespace) -> str | None:
+    """A resumed session stays on the model it ran: a selector, or no --model, takes the recorded ID."""
+    if not getattr(args, "resume_result", None):
+        return args.model
+    try:
+        previous = json.loads(args.resume_result.expanduser().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return args.model  # validate_resume reports the unreadable baseline
+    recorded = previous.get("model") if isinstance(previous, dict) else None
+    if not isinstance(recorded, str) or previous.get("engine") != args.engine:
+        return args.model
+    if args.model is None or families_module().parse_selector(args.model, load_model_families()):
+        return recorded
+    return args.model
+
+
+# How each select_live_model() outcome was checked against the live catalog, for the result record.
+MODEL_PREFLIGHT = {
+    "exact_user_request": "live_exact_match",
+    "validated_preference": "live_exact_match",
+    "family_latest": "live_family_resolved",
+    "unverified_claude_id": "unverified_claude_id",
+}
+
+
 def select_live_model(
     engine: str,
     requested_model: str | None,
@@ -2766,6 +2856,9 @@ def select_live_model(
     if model in available_models:
         reason = "exact_user_request" if requested_model else "validated_preference"
         return model, reason
+    resolved = resolve_family_selector(engine, model, available_models)
+    if resolved:
+        return resolved, "family_latest"
     if engine == "claude" and CLAUDE_MODEL_ID.match(model):
         return model, "unverified_claude_id"
 
@@ -2799,6 +2892,8 @@ def executor_preflight(
             raise
         catalog = discover_engine_catalog(engine, refresh=True)
         model, selection_reason = select_live_model(engine, requested_model, catalog)
+    # A selector (or a config family) can resolve to a native family's ID, so check what will run too.
+    enforce_native_route(engine, model)
     executable = catalog.get("executable")
     if not isinstance(executable, str):
         raise RunnerError(f"{engine} is not on PATH", 13)
@@ -3684,6 +3779,11 @@ def resolve_route(args: argparse.Namespace) -> argparse.Namespace:
         route = routes[args.route]
         if args.engine and args.engine != route["engine"]:
             route = None  # an explicit engine overrides the route entirely
+    if args.model and not args.engine and not args.route:
+        families = load_model_families()
+        parsed = families_module().parse_selector(args.model, families)
+        if parsed:
+            args.engine = families[parsed[0]]["engine"]
     args.engine = args.engine or (route or {}).get("engine") or DEFAULT_ENGINE
     route = route or module.engine_default(args.engine, routes)
     if route and route.get("engine") == args.engine:
@@ -3696,6 +3796,32 @@ def resolve_route(args: argparse.Namespace) -> argparse.Namespace:
             args.variant = route["variant"]
     args.resolved_route = args.route
     return args
+
+
+def families_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog=f"{Path(__file__).name} families",
+        description="Show what each model family selector resolves to in the live catalogs.",
+    )
+    parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument("--refresh", action="store_true", help="Refresh the model catalogs first")
+    args = parser.parse_args(argv)
+    families = load_model_families()
+    catalogs: dict[str, list[str]] = {}
+    for engine in sorted({family["engine"] for family in families.values()}):
+        catalog = discover_engine_catalog(engine, refresh=args.refresh)
+        if catalog.get("status") == "live":
+            catalogs[engine] = [m["id"] for m in catalog.get("models", []) if not m.get("hidden", False)]
+    rows = families_module().report(families, catalogs)
+    if args.format == "json":
+        print(json.dumps(rows, indent=2))
+        return 0
+    for row in rows:
+        print(f"{row['family']} ({row['engine']}, default tier {row['default_tier']})")
+        empty = "(no match)" if row["catalog"] == "live" else f"(no live {row['engine']} catalog)"
+        for tier, model in row["resolved"].items():
+            print(f"  {row['family']}:{tier:<10} {model or empty}")
+    return 0
 
 
 def routes_main(argv: list[str] | None = None) -> int:
@@ -3812,7 +3938,8 @@ def quota_gate(engine: str, model: str, *, ignore: bool) -> None:
     """Refuse to launch into an exhausted subscription pool and warn when little is usable now.
 
     Quota is read live from ai-usage and never stored. Missing ai-usage means unknown quota, which
-    does not block a run.
+    does not block a run. A pool whose included allowance is used up but that has a credit balance
+    (Codex) is not exhausted: the run goes ahead, metered against the balance, and says so.
     """
     if ignore:
         return
@@ -3821,6 +3948,13 @@ def quota_gate(engine: str, model: str, *, ignore: bool) -> None:
     result = quota.check(engine, model, view)
     if result["status"] == "blocked":
         raise RunnerError(quota.blocked_message(engine, model, result, view), quota.EXIT_QUOTA_EXHAUSTED)
+    if result["status"] == "credits":
+        emit_lifecycle(
+            "quota_credits",
+            pool=result.get("label"),
+            balance=(result.get("credits") or {}).get("text"),
+            included_quota_back=result.get("blockedUntil"),
+        )
     if result["status"] == "low":
         emit_lifecycle(
             "quota_low",
@@ -3859,9 +3993,12 @@ def quota_main(argv: list[str] | None = None) -> int:
         if row["engine"] == "opencode" or row["status"] in ("not_applicable", "unknown"):
             print(f"{head} {row['status']}: {row.get('detail', '')}")
             continue
+        billing = " [personal]" if row.get("billing") == "personal" else ""
+        if row["status"] == "credits":
+            print(f"{head} {row['status']:<9} {quota.credits_text(row)}  {row['label']}{billing}: {row['advice']}")
+            continue
         points = row.get("surplusPts")
         pace = f"{points:+d} pts" if isinstance(points, int) and row["status"] != "blocked" else ""
-        billing = " [personal]" if row.get("billing") == "personal" else ""
         print(
             f"{head} {row['status']:<9} {round(row['availableNowPct']):>3}% usable {pace:>8}  "
             f"{row['label']}{billing}: {row['advice']}"
@@ -4142,6 +4279,8 @@ def main() -> int:
         return prune_main(argv[1:])
     if argv and argv[0] == "routes":
         return routes_main(argv[1:])
+    if argv and argv[0] == "families":
+        return families_main(argv[1:])
     if argv and argv[0] == "init":
         return init_main(argv[1:])
     if argv and argv[0] == "doctor":
@@ -4236,7 +4375,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
             model_catalog,
         ) = executor_preflight(
             args.engine,
-            args.model,
+            resume_pinned_model(args),
             refresh=args.refresh_models,
         )
         quota_gate(args.engine, model, ignore=args.ignore_quota or args.dry_run)
@@ -4347,7 +4486,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         "billing_mode": args.billing_mode,
         "resumed_from": str(args.resume_result.expanduser().resolve()) if args.resume_result else None,
         "variant": variant,
-        "model_preflight": "live_exact_match",
+        "model_preflight": MODEL_PREFLIGHT[model_selection],
         "model_selection": model_selection,
         "model_catalog": {
             "source": model_catalog.get("source"),

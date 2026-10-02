@@ -65,13 +65,20 @@ An explicit user request beats every default. Otherwise use a role from `routes`
 python3 <skill-directory>/scripts/run_agent.py routes
 ```
 
-| Role                           | Default                                                 |
-| ------------------------------ | ------------------------------------------------------- |
-| `implementation` (the default) | `codex gpt-5.6-luna --effort max`                       |
-| `consultation` / audit         | `codex gpt-5.6-sol --effort high`                       |
-| `gemini`                       | `agy gemini-3.8-flash-medium`                           |
-| `claude`                       | `claude opus --effort high`                             |
-| `opencode`                     | `opencode openrouter/z-ai/glm-5.3-flash --variant high` |
+| Role                           | Default                             |
+| ------------------------------ | ----------------------------------- |
+| `implementation` (the default) | `codex gpt:luna --effort max`       |
+| `consultation` / audit         | `codex gpt:sol --effort high`       |
+| `gemini`                       | `agy gemini:fast`                   |
+| `claude`                       | `claude claude:best --effort high`  |
+| `opencode`                     | `opencode glm:flash --variant high` |
+
+Models are family selectors (`family` or `family:tier`, optional `latest:` prefix) that resolve to the
+newest live model, so a release needs no edit here. GPT and Gemini pick the highest version number in the
+live catalog; Claude Code's aliases and OpenRouter's `~vendor/...-latest` aliases are provider-maintained.
+`--model deepseek` alone infers the engine. `run_agent.py families` shows what every selector resolves to;
+`references/families.json` holds the rules, and a `families` key in your config adds or overrides one. An
+exact ID pins a model, and the runner prints `AGENT_NOTE=model_advanced` on stderr when a selector moves.
 
 Pass `--route <role>`; explicit `--engine/--model/--effort` still win. The user's
 `~/.config/agent-executor/config.json` overrides these (`init` writes a starter). Never invent a model
@@ -88,8 +95,13 @@ It reads live [ai-usage](https://github.com/loftshed/claude-whisperer/tree/main/
 The route table decides which models fit the task; quota only chooses among fitting routes and never
 justifies a weaker model. Prefer pools marked expiring (capacity lost at the weekly rollover), then the
 most unused capacity. The runner refuses a blocked pool (exit 15; `--ignore-quota` only on the user's
-say-so). Never switch billing context (work vs personal account) on quota grounds without the user.
-Without ai-usage, quota is unknown and runs proceed.
+say-so). A pool on `credits` (Codex once its weekly allowance is used up, with a credit balance) is not
+blocked: the run goes ahead, metered against the balance, and prints `AGENT_LIFECYCLE=quota_credits`
+with the balance. When the user asked for that route, launch it and note the credits in one line of
+the report ("on credits, 62,168 cr left"), nothing more; only choose it yourself when no fitting route
+has free quota, since it ranks after pools with free quota. Never switch billing context (work vs
+personal account) on quota grounds without the user. Without ai-usage, quota is unknown and runs
+proceed.
 The `opencode` row is the OpenRouter account's remaining dollar credit (key from `OPENROUTER_API_KEY` or
 OpenCode's `auth.json`; the sandbox needs `openrouter.ai` allowed). It is informational: the launch gate
 never blocks OpenCode.
@@ -187,7 +199,7 @@ correct it with `--session <id> --resume-result <result.json>`. Details: [refere
 | 3                 | `empty_output`                                  | No output; check `provider_error` and logs                                                                                                                    |
 | 4                 | —                                               | Bad arguments, spec, route or effort; fix the call                                                                                                            |
 | 11 / 12 / 13      | — / `timed_out`                                 | Catalog failure / timeout / CLI not installed                                                                                                                 |
-| 15                | —                                               | Quota pool exhausted at launch; pick another fitting route or wait for refill                                                                                 |
+| 15                | —                                               | Quota pool exhausted at launch and no credit balance; pick another fitting route or wait for refill                                                           |
 | 16                | `provider_quota_exhausted`                      | The provider's own error says quota, credits or rate limit (e.g. 429); retry later or elsewhere                                                               |
 | 17                | —                                               | Hosted model sent to OpenCode; use the native engine named in the error                                                                                       |
 | 20                | `no_changes`                                    | `--expect-changes` but nothing changed                                                                                                                        |

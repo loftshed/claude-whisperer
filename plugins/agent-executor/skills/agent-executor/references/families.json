@@ -1,0 +1,49 @@
+{
+  "schema": "agent-executor.families.v2",
+  "note": "A selector (`gpt:sol`, `deepseek`) names a family and a tier. A tier value that is an exact catalog ID (Claude Code aliases, OpenRouter's maintained `~vendor/...-latest` aliases) is used as is. In a family with a prefix, any other value is a keyword: among live IDs that start with the prefix and contain the keyword as whole words (separated by `-` or `/`), the highest version (`6.1`, `v4`) wins. A family without a prefix takes exact IDs only. Run `run_agent.py families` to see what each selector resolves to.",
+  "families": {
+    "gpt": {
+      "engine": "codex",
+      "prefix": "gpt-",
+      "default_tier": "sol",
+      "tiers": { "luna": "luna", "terra": "terra", "sol": "sol", "astra": "astra" }
+    },
+    "gemini": {
+      "engine": "agy",
+      "prefix": "gemini-",
+      "default_tier": "fast",
+      "tiers": {
+        "fast": "flash-medium",
+        "flash-low": "flash-low",
+        "flash-high": "flash-high",
+        "pro": "pro-high"
+      }
+    },
+    "claude": {
+      "engine": "claude",
+      "default_tier": "best",
+      "tiers": { "fast": "haiku", "balanced": "sonnet", "best": "opus", "frontier": "fable" }
+    },
+    "deepseek": {
+      "engine": "opencode",
+      "default_tier": "flash",
+      "tiers": {
+        "flash": "openrouter/~deepseek/deepseek-flash-latest",
+        "pro": "openrouter/~deepseek/deepseek-pro-latest"
+      }
+    },
+    "glm": {
+      "engine": "opencode",
+      "default_tier": "flash",
+      "tiers": {
+        "flash": "openrouter/~z-ai/glm-flash-latest",
+        "full": "openrouter/~z-ai/glm-latest"
+      }
+    },
+    "kimi": {
+      "engine": "opencode",
+      "default_tier": "default",
+      "tiers": { "default": "openrouter/~moonshotai/kimi-latest" }
+    }
+  }
+}

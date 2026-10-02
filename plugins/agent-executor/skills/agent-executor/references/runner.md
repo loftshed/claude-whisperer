@@ -29,6 +29,13 @@ listing command, so its catalog is the aliases `opus`, `sonnet`, `haiku`, `fable
 ID is accepted unverified. None of these prompt a model. Always filter:
 `models --engine agy --match gemini-3.8`; an unfiltered listing costs thousands of tokens.
 
+`--model` also takes a family selector (`gpt:sol`, `gemini:fast`, `deepseek`) from
+[families.json](families.json), resolved against the live catalog to the newest matching ID; a selector
+alone infers its engine. The result records the resolved ID with `model_preflight:
+live_family_resolved`, `families` prints every resolution, and `AGENT_NOTE=model_advanced` on stderr
+marks a selector that now resolves to a newer model. A coordinator dispatch records the resolved ID,
+and `--resume-result` keeps a selector on the model the session ran.
+
 ## Effort and variants
 
 Pass `--effort` for reproducible runs. Codex effort is validated against the model's catalog and bound

@@ -135,6 +135,17 @@
         "Uses the coordinator recovery contract without assuming a detached event exists.",
         "Uses native Codex delegation for the later requested Luna task."
       ]
+    },
+    {
+      "id": 21,
+      "prompt": "You are in Claude. Have DeepSeek take a read-only look at scripts/families.py and report risky edge cases. Use whatever the newest DeepSeek flash model is.",
+      "expected_output": "Passes the family selector (`--model deepseek` or `deepseek:flash`) instead of looking up or hard-coding a versioned ID, lets the runner infer OpenCode, and reports the resolved model the result records.",
+      "files": [],
+      "expectations": [
+        "Passes a DeepSeek family selector rather than a hand-picked versioned model ID.",
+        "Does not route DeepSeek through Codex, Antigravity or Claude Code.",
+        "Reports the resolved model ID from the result."
+      ]
     }
   ]
 }

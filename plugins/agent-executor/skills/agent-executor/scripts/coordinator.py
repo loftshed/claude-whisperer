@@ -66,6 +66,10 @@ def timestamp(value: str) -> dt.datetime:
 def native(host: str, engine: str, model_id: str) -> bool:
     if host == engine and host in {"codex", "agy", "claude", "opencode"}:
         return True
+    families = RUNNER.load_model_families()
+    selector = RUNNER.families_module().parse_selector(model_id, families)
+    if selector:
+        return host == families[selector[0]]["engine"]
     leaf = model_id.rsplit("/", 1)[-1].lower()
     return any(
         (
@@ -74,6 +78,30 @@ def native(host: str, engine: str, model_id: str) -> bool:
             host == "claude" and leaf.startswith("claude"),
         )
     )
+
+
+def exact_model(engine: str, model_id: str) -> str:
+    """A family selector (`gpt:sol`) becomes the live ID it resolves to now, so the run records what ran."""
+    if not RUNNER.families_module().parse_selector(model_id, RUNNER.load_model_families()):
+        return model_id
+    return RUNNER.select_live_model(engine, model_id, RUNNER.discover_engine_catalog(engine))[0]
+
+
+def resolve_profiles(registry: dict[str, Any]) -> dict[str, Any]:
+    """Fill each profile's model_ids with what its selectors resolve to now; an unresolvable one adds none."""
+    families = RUNNER.load_model_families()
+    for profile in registry["profiles"]:
+        ids = list(profile.get("model_ids", []))
+        for selector in profile.get("selectors", []):
+            parsed = RUNNER.families_module().parse_selector(selector, families)
+            if not parsed:
+                raise CoordinationError(f"profile {profile['id']!r} names unknown selector {selector!r}")
+            try:
+                ids.append(exact_model(families[parsed[0]]["engine"], selector))
+            except RUNNER.RunnerError:
+                continue
+        profile["model_ids"] = list(dict.fromkeys(ids))
+    return registry
 
 
 def choose_route(packet: dict[str, Any]) -> dict[str, str]:
@@ -498,6 +526,7 @@ def dispatch(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
         spec["context_packet"] = context
     if not engine or not model_id:
         raise CoordinationError("dispatch requires an exact --engine and --model")
+    model_id = exact_model(engine, model_id)
     if engine == "codex" and effort is None and args.transport != "native":
         raise CoordinationError("recorded Codex dispatch requires explicit --effort for reproducible correction")
     is_native = native(state["host"], engine, model_id)
@@ -851,7 +880,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "route":
             output = choose_route(read(args.packet))
         elif args.action == "recommend":
-            registry = read(Path(__file__).parent.parent / "references/profiles.json")
+            registry = resolve_profiles(read(Path(__file__).parent.parent / "references/profiles.json"))
             packet = read(args.packet)
             if packet.get("access") == "live":
                 packet["access"] = QUOTA.access_records(QUOTA.snapshot(), registry, packet.get("host"))

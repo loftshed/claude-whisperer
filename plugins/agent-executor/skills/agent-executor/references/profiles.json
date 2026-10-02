@@ -2,39 +2,39 @@
   "schema": "agent-executor.profiles.v1",
   "verified_at": "2026-09-18",
   "status": "workload_hypotheses_not_quality_rankings",
-  "instructions": "Use native host first. Access must be observed in that host, not inferred from public API availability. Effort candidates must be validated by the selected harness. Never switch Claude billing profiles implicitly. OpenCode preferences remain in the existing runner.",
+  "instructions": "Use native host first. Access must be observed in that host, not inferred from public API availability. Effort candidates must be validated by the selected harness. Never switch Claude billing profiles implicitly. OpenCode preferences remain in the existing runner. `selectors` (see families.json) resolve to the newest live ID when the registry is read; `model_ids` are exact.",
   "profiles": [
     {
       "id": "luna",
-      "model_ids": ["gpt-5.6-luna"],
+      "selectors": ["gpt:luna"],
       "roles": ["mechanical", "implementation"],
       "effort_candidate": "medium",
       "prompt_adjustment": "Give a bounded transformation, examples, and observable criteria. Expose ambiguity that changes the result."
     },
     {
       "id": "terra",
-      "model_ids": ["gpt-5.6-terra"],
+      "selectors": ["gpt:terra"],
       "roles": ["implementation"],
       "effort_candidate": "medium",
       "prompt_adjustment": "Give the goal, repository conventions, and criteria; leave routine implementation choices to the worker."
     },
     {
       "id": "sol",
-      "model_ids": ["gpt-5.6-sol"],
+      "selectors": ["gpt:sol"],
       "roles": ["implementation", "consultation", "pointdexter", "review"],
       "effort_candidate": "medium",
       "prompt_adjustment": "State the outcome, review scope, and evidence needed to finish. Keep focused review within that scope."
     },
     {
       "id": "astra",
-      "model_ids": ["gpt-6-astra"],
+      "selectors": ["gpt:astra"],
       "roles": ["hard_task", "conductor", "consultation"],
       "effort_candidate": "medium",
       "prompt_adjustment": "Make completion and authorized autonomy explicit. Let the agent resolve routine choices with proportional verification."
     },
     {
       "id": "flash",
-      "model_ids": ["gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high"],
+      "selectors": ["gemini:flash-low", "gemini:fast", "gemini:flash-high"],
       "roles": ["pointdexter", "mechanical", "implementation"],
       "effort_candidate": "medium",
       "prompt_adjustment": "Put relevant context before the specific question. Be direct and preserve opaque native tool state in its own harness."

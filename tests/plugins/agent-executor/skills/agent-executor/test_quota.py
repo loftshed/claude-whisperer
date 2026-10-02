@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -23,12 +25,14 @@ def lane(
     usable: float = 60,
     surplus: int | None = 10,
     blocked_until: str | None = None,
+    credits: dict | None = None,
 ) -> dict:
     return {
         "label": label,
         "accountId": account,
         "poolId": pool,
         "status": status,
+        "credits": credits,
         "availableNowPct": usable,
         "weeklyRemainingPct": usable,
         "surplusPts": surplus,
@@ -36,6 +40,18 @@ def lane(
         "advice": "on pace",
         "stale": False,
     }
+
+
+CODEX_ON_CREDITS = lane(
+    "codex",
+    "codex",
+    "Codex · ChatGPT",
+    status="credits",
+    usable=0,
+    surplus=None,
+    blocked_until="2026-10-03T14:50:49.000Z",
+    credits={"text": "62,168.59 cr", "unlimited": False},
+)
 
 
 def view() -> dict:
@@ -113,6 +129,29 @@ class CheckTests(unittest.TestCase):
         self.assertIn("--engine agy (claude-* / gpt-oss-*): Antigravity · Claude & GPT, 27% usable now", message)
         self.assertNotIn("--engine codex", message)
 
+    def test_a_pool_on_credits_is_usable_and_named_as_an_alternative(self) -> None:
+        current = view()
+        current["lanes"][4] = CODEX_ON_CREDITS
+        result = QUOTA.check("codex", "gpt-5.6-luna", current)
+        self.assertEqual(
+            (result["status"], result["credits"]), ("credits", {"text": "62,168.59 cr", "unlimited": False})
+        )
+        current["lanes"][3] = lane(
+            "antigravity",
+            "gemini",
+            "Antigravity · Gemini",
+            status="blocked",
+            usable=0,
+            blocked_until="2026-10-02T20:44:52.000Z",
+        )
+        gemini = QUOTA.check("agy", "gemini-3.8-flash-medium", current)
+        message = QUOTA.blocked_message("agy", "gemini-3.8-flash-medium", gemini, current)
+        self.assertIn("--engine codex (gpt-*): Codex · ChatGPT, on credits, 62,168.59 cr left", message)
+        registry = {"profiles": [{"id": "luna", "model_ids": ["gpt-5.6-luna"], "roles": ["implementation"]}]}
+        [record] = QUOTA.access_records(current, registry)
+        self.assertEqual((record["available"], record["billing_mode"]), (True, "credits"))
+        self.assertEqual(record["quota"]["status"], "credits")
+
     def test_an_account_ai_usage_could_not_read_is_unknown_not_low(self) -> None:
         failed = view()
         failed["lanes"][4] = {
@@ -161,12 +200,27 @@ class RecommendTests(unittest.TestCase):
         ]
     }
 
-    def recommend(self, **packet: object) -> list[tuple[str, str]]:
-        records = QUOTA.access_records(view(), self.registry, "claude")
+    def recommend(self, current: dict | None = None, **packet: object) -> list[tuple[str, str]]:
+        records = QUOTA.access_records(current or view(), self.registry, "claude")
         result = POLICY.recommend(
             {"role": "implementation", "host": "claude", "access": records, **packet}, self.registry
         )
         return [(candidate["model"], candidate["access_source"]) for candidate in result["candidates"]]
+
+    def test_a_pool_on_credits_ranks_after_free_room_and_before_nearly_empty_pools(self) -> None:
+        current = view()
+        current["lanes"][4] = CODEX_ON_CREDITS
+        # Gemini has 6% usable (low): Codex on credits can finish a task, so it comes first.
+        self.assertEqual(
+            self.recommend(current),
+            [("gpt-5.6-luna", "ai-usage:codex"), ("gemini-3.8-flash-medium", "ai-usage:antigravity")],
+        )
+        current["lanes"][3] = lane("antigravity", "gemini", "Antigravity · Gemini", usable=60, surplus=2)
+        # Free quota with room goes first: it is lost at the rollover, credits are not.
+        self.assertEqual(
+            self.recommend(current),
+            [("gemini-3.8-flash-medium", "ai-usage:antigravity"), ("gpt-5.6-luna", "ai-usage:codex")],
+        )
 
     def test_live_access_drops_blocked_pools_and_personal_quota_by_default(self) -> None:
         # Codex has room; Gemini is low (6% usable), so it ranks after despite more unused capacity.
@@ -250,6 +304,27 @@ class RunnerGateTests(unittest.TestCase):
                 self.assertEqual(caught.exception.exit_code, 15)
                 RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=True)
                 RUNNER.quota_gate("agy", "claude-opus-4-6-thinking", ignore=False)
+
+    def test_gate_lets_a_pool_on_credits_through_and_says_so(self) -> None:
+        current = view()
+        current["lanes"][4] = CODEX_ON_CREDITS
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, {"AI_USAGE_BIN": self.fake_ai_usage(directory, current)}):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=False)
+                self.assertEqual(
+                    out.getvalue().strip(),
+                    'AGENT_LIFECYCLE=quota_credits pool="Codex \\u00b7 ChatGPT" balance="62,168.59 cr" '
+                    'included_quota_back="2026-10-03T14:50:49.000Z"',
+                )
+                # No OpenRouter key anywhere, so the table's OpenCode row never reaches the network.
+                with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "", "XDG_DATA_HOME": directory}):
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        self.assertEqual(RUNNER.quota_main([]), 0)
+                codex_row = next(line for line in out.getvalue().splitlines() if line.startswith("codex"))
+                self.assertIn("credits   on credits, 62,168.59 cr left  Codex · ChatGPT: on pace", codex_row)
 
     def test_gate_lets_runs_through_when_quota_is_unknown(self) -> None:
         with mock.patch.dict(os.environ, {"AI_USAGE_BIN": "/nonexistent/ai-usage"}):
