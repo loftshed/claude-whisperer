@@ -21,6 +21,9 @@ Results are cached for about 3 minutes. Pass `refresh: true` only after heavy us
 ## Read it
 
 - `status: "blocked"`: a window in that pool is exhausted; `blockedUntil` says when it refills.
+- `status: "credits"`: the included allowance is used up but the account has a credit balance (Codex),
+  so the pool still takes work of any size, metered against `credits.text`. Credits persist, so free quota
+  ranks first; `blockedUntil` is when the included quota is back.
 - `availableNowPct`: the tightest window right now, usually the 5-hour window. Below ~20%, a long task
   may stall mid-way.
 - `expiring` (with `expiresAt`, `burnPctPerHour`): the pool is near its weekly rollover with capacity left.
@@ -39,7 +42,9 @@ Results are cached for about 3 minutes. Pass `refresh: true` only after heavy us
    tasks, aiming for about `burnPctPerHour`; otherwise prefer the highest positive `surplusPts`. Quota never
    overrides capability: do not send work to a weaker model just because it has quota to spare.
 3. If the natural route is blocked, say so with its refill time, then offer the next allowed route or
-   waiting, whichever the task tolerates.
+   waiting, whichever the task tolerates. A route on credits is not blocked. When the user asked for it,
+   use it without asking again and mention the credits in passing, as in "Using Codex (on credits,
+   62,168 cr left)"; the same when no free pool fits. Never pick it over free quota on your own.
 4. For long or parallel work, check `availableNowPct` as well as the weekly surplus.
 5. Report the choice in one line, for example: "Using Codex (+12 pts, 64% usable now); personal Claude
    is under-used but not authorized for this task."
@@ -48,5 +53,6 @@ Results are cached for about 3 minutes. Pass `refresh: true` only after heavy us
 
 agent-executor reads this data itself: `run_agent.py quota` shows quota per route (`codex`, `agy`
 Gemini, `agy` Claude/GPT-OSS), the runner refuses to launch into an exhausted pool (exit 15), and
-`coordinator.py recommend` with `"access": "live"` ranks candidates by it. The ranking breaks ties
-between validated routes; it does not replace agent-executor's route table or live model catalog check.
+`coordinator.py recommend` with `"access": "live"` ranks candidates by it. A pool on credits passes the
+gate (the run prints `AGENT_LIFECYCLE=quota_credits` with the balance). The ranking breaks ties between
+validated routes; it does not replace agent-executor's route table or live model catalog check.

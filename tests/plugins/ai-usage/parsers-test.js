@@ -12,7 +12,12 @@ import {
 import { parseAntigravityUsage } from "../../../plugins/ai-usage/lib/providers/antigravity.mjs";
 import { parseClaudeUsage } from "../../../plugins/ai-usage/lib/providers/claude.mjs";
 import { parseCodexRateLimits } from "../../../plugins/ai-usage/lib/providers/codex.mjs";
-import { jsonView, pillText, renderLine } from "../../../plugins/ai-usage/lib/render.mjs";
+import {
+  jsonView,
+  pillText,
+  renderLine,
+  renderReport,
+} from "../../../plugins/ai-usage/lib/render.mjs";
 import { parseResetText } from "../../../plugins/ai-usage/lib/time.mjs";
 
 const fixture = (name) => readFileSync(new URL(`fixtures/${name}`, import.meta.url), "utf8");
@@ -352,4 +357,128 @@ test("jsonView exposes ISO reset times and minutes until reset", () => {
   const week = view.accounts[0].windows.find((w) => w.id === "week");
   expect(week.resetsAt).toBe("2026-09-26T00:59:00.000Z");
   expect(week.resetsInMinutes).toBe(501);
+});
+
+function creditAccount({
+  usedPercent = 100,
+  credits = { hasCredits: true, unlimited: false, balance: "62261.9129350000" },
+} = {}) {
+  return {
+    id: "codex",
+    label: "ChatGPT",
+    short: "CX",
+    provider: "codex",
+    ok: true,
+    fetchedAt: NOW,
+    ...parseCodexRateLimits({
+      rateLimitsByLimitId: {
+        codex: {
+          primary: { usedPercent, windowDurationMins: 10_080, resetsAt: 1_790_779_510 },
+          credits,
+        },
+      },
+    }),
+  };
+}
+
+test("ChatGPT switches from weekly quota to remaining credits after exhaustion", () => {
+  const account = creditAccount();
+  expect(renderLine([account], NOW)).toBe("CX 62,261.91 cr 4d");
+  const view = jsonView([account], NOW).accounts[0];
+  expect(view.credits).toStrictEqual({
+    hasCredits: true,
+    unlimited: false,
+    balance: 62_261.912935,
+    text: "62,261.91 cr",
+    level: "ok",
+  });
+  expect(view.pills[0].credits).toStrictEqual({
+    hasCredits: true,
+    unlimited: false,
+    balance: 62_261.912935,
+    text: "62,261.91 cr",
+    level: "ok",
+  });
+  expect(view.headline).toStrictEqual({ text: "62,261.91 cr", level: "ok", unit: "credits" });
+  expect(renderReport([account], { now: NOW })).toContain(
+    "credit balance         62,261.91 cr left",
+  );
+  expect(renderLine([{ ...account, ok: false }], NOW)).toBe("CX 62,261.91 cr 4d!");
+});
+
+test("ChatGPT keeps percentages while quota remains and resumes them after the weekly reset", () => {
+  expect(renderLine([creditAccount({ usedPercent: 48 })], NOW)).toBe("CX 52 4d");
+  // The same threshold as the ranking: under half a percent left is used up, so the pill shows credits.
+  expect(jsonView([creditAccount({ usedPercent: 99.4 })], NOW).accounts[0].headline.text).toBe("0");
+  expect(jsonView([creditAccount({ usedPercent: 99.8 })], NOW).accounts[0].headline.unit).toBe(
+    "credits",
+  );
+  expect(renderLine([creditAccount()], 1_790_779_510_001)).toBe("CX 100");
+  // Back on the included week: the balance leaves the pill but stays in the detailed report.
+  const back = jsonView([creditAccount()], 1_790_779_510_001).accounts[0];
+  expect(back.pills[0].credits).toBeNull();
+  expect(back.credits.text).toBe("62,261.91 cr");
+  expect(renderReport([creditAccount({ usedPercent: 48 })], { now: NOW })).toContain(
+    "credit balance         62,261.91 cr left",
+  );
+});
+
+test("ChatGPT on credits is ranked as usable, after free quota and before blocked pools", () => {
+  const onCredits = { ...creditAccount(), label: "Codex · ChatGPT", route: "codex" };
+  const [lane] = jsonView([onCredits], NOW).lanes;
+  expect(lane.status).toBe("credits");
+  expect(lane.credits).toMatchObject({ text: "62,261.91 cr", unlimited: false });
+  expect(lane.blockedUntil).toBe("2026-09-30T14:45:10.000Z");
+  expect(lane.advice).toMatch(
+    /^on credits: 62,261\.91 cr left, metered per request; included quota back .* \(in 4d/,
+  );
+  // Free quota with room ranks first; a pool with no credits is blocked and ranks last.
+  const roomy = { ...creditAccount({ usedPercent: 40 }), id: "roomy", label: "roomy" };
+  const broke = { ...creditAccount({ credits: null }), id: "broke", label: "broke" };
+  const lanes = jsonView([broke, onCredits, roomy], NOW).lanes;
+  expect(lanes.map((l) => [l.accountId, l.status])).toStrictEqual([
+    ["roomy", "available"],
+    ["codex", "credits"],
+    ["broke", "blocked"],
+  ]);
+  const report = renderReport([onCredits, broke], { now: NOW });
+  expect(report).toMatch(/\n {2}1 {2}Codex · ChatGPT .*on credits: 62,261\.91 cr left/);
+  expect(report).toMatch(/\n {2}✗ {2}broke .*out until/);
+});
+
+test.each([
+  [{ hasCredits: false, unlimited: false, balance: "0" }, "CX 0 cr 4d", "out"],
+  [{ hasCredits: true, unlimited: false, balance: "0" }, "CX 0 cr 4d", "out"],
+  [{ hasCredits: true, unlimited: false, balance: "0.009" }, "CX <0.01 cr 4d", "ok"],
+  [{ hasCredits: false, unlimited: true, balance: null }, "CX ∞ cr 4d", "ok"],
+  [null, "CX ☠4d", "out"],
+  [{ hasCredits: true, unlimited: false, balance: null }, "CX ☠4d", "out"],
+  [{ hasCredits: true, unlimited: false, balance: "" }, "CX ☠4d", "out"],
+  [{ hasCredits: true, unlimited: false, balance: "invalid" }, "CX ☠4d", "out"],
+  [{ hasCredits: true, unlimited: false, balance: "-1" }, "CX ☠4d", "out"],
+])("ChatGPT renders credit reading %j as %s", (credits, line, level) => {
+  const account = creditAccount({ credits });
+  expect(renderLine([account], NOW)).toBe(line);
+  expect(jsonView([account], NOW).accounts[0].headline.level).toBe(level);
+});
+
+test("the legacy Codex response supplies credits without attributing them to unrelated pools", () => {
+  const parsed = parseCodexRateLimits({
+    rateLimits: {
+      primary: { usedPercent: 100, windowDurationMins: 10_080, resetsAt: 1_790_779_510 },
+      credits: { hasCredits: true, unlimited: false, balance: "500" },
+    },
+  });
+  const account = { ...creditAccount(), ...parsed };
+  expect(renderLine([account], NOW)).toBe("CX 500 cr 4d");
+  expect(renderLine([{ ...account, provider: "claude" }], NOW)).toBe("CX ☠4d");
+  const other = parseCodexRateLimits({
+    rateLimitsByLimitId: {
+      other: {
+        primary: { usedPercent: 100, windowDurationMins: 10_080, resetsAt: 1_790_779_510 },
+        credits: { hasCredits: true, unlimited: false, balance: "500" },
+      },
+    },
+  });
+  expect(renderLine([{ ...account, ...other }], NOW)).toBe("CX ☠4d");
 });

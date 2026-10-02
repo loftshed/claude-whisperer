@@ -8,6 +8,7 @@ const INSTRUCTIONS = `Reports remaining subscription quota on this machine's AI 
 Percentages are relative to each account's own allowance and are not comparable in absolute tokens across providers.
 surplusPts = weekly % remaining minus what even use until reset would leave; positive means under-used capacity that is lost at reset unless spent.
 Pools marked expiring are near their weekly rollover with capacity left; that remainder is lost at the rollover, so prefer them (and larger tasks) until it is used. Pools under 10% usable now can only take small tasks.
+A pool with status "credits" (Codex/ChatGPT once its weekly allowance is used up) still takes work of any size: each request is metered against the account's credit balance, which persists, so free quota ranks ahead of it. Only status "blocked" means a pool cannot run anything.
 Switching accounts can switch billing context (e.g. work vs personal); follow the user's rules about which accounts an agent may use.`;
 
 const TOOLS = [
@@ -27,7 +28,7 @@ const TOOLS = [
   {
     name: "recommend",
     description:
-      "Ranks the AI accounts/model pools to use next, best first, using remaining quota, time to reset, and whether the account is ahead of or behind even pace. Filter by model family (claude, gpt, gemini). Each entry includes a route hint: the CLI that uses that pool.",
+      "Ranks the AI accounts/model pools to use next, best first, using remaining quota, time to reset, and whether the account is ahead of or behind even pace. A pool whose included quota is used up but that has a credit balance (Codex) is usable and ranks after pools with free room. Filter by model family (claude, gpt, gemini). Each entry includes a route hint: the CLI that uses that pool.",
     inputSchema: {
       type: "object",
       properties: {
@@ -55,7 +56,8 @@ function summarizeUsage(view) {
       })
       .join(", ");
     const problem = a.error ? ` [refresh failed: ${a.error}]` : "";
-    return `- ${a.label}: ${windows || "no data"}${problem}`;
+    const balance = a.credits ? `, ${a.credits.text} credits` : "";
+    return `- ${a.label}: ${windows || "no data"}${balance}${problem}`;
   });
   return lines.join("\n");
 }
@@ -82,6 +84,7 @@ function compactView(view) {
       ok: a.ok,
       error: a.error,
       ageMinutes: a.ageMinutes,
+      ...(a.credits && { credits: { text: a.credits.text, unlimited: a.credits.unlimited } }),
       windows: a.windows.map((w) => ({
         label: w.label,
         remainingPct: Math.round(w.remainingPct),
@@ -104,6 +107,7 @@ function compactLanes(lanes, billing) {
       billing: billing[l.accountId] ?? null,
       families: l.families,
       status: l.status,
+      ...(l.credits && { credits: { text: l.credits.text, unlimited: l.credits.unlimited } }),
       availableNowPct: Math.round(l.availableNowPct),
       surplusPts: l.surplusPts,
       blockedUntil: l.blockedUntil,
@@ -122,6 +126,8 @@ export function summarizeLanes(lanes) {
   return lanes
     .filter((l) => !l.redundant)
     .map((l) => {
+      if (l.status === "credits")
+        return `${++rank}. ${l.label}${l.route ? ` [${l.route}]` : ""}: ${l.advice}`;
       if (l.status !== "available")
         return `✗ ${l.label}${l.route ? ` [${l.route}]` : ""}: ${l.advice}`;
       const pts =
@@ -144,7 +150,7 @@ async function callTool(name, rawArgs) {
     const family = args.family && args.family !== "any" ? args.family : null;
     const lanes = family ? view.lanes.filter((l) => l.families.includes(family)) : view.lanes;
     if (lanes.length === 0) return `No configured account serves the ${family} family.`;
-    const best = lanes.find((l) => l.status === "available");
+    const best = lanes.find((l) => l.status === "available" || l.status === "credits");
     const head = best
       ? `Best right now: ${best.label}${best.route ? ` (use: ${best.route})` : ""}. ${best.advice}.`
       : "Every matching pool is exhausted right now.";

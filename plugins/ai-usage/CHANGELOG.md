@@ -3,6 +3,19 @@
 All notable changes to this project. Versions follow [semver](https://semver.org); the `ai-usage json`
 schema (`ai-usage.snapshot.v1`) changes its suffix on any breaking change to its shape.
 
+## Unreleased
+
+- ChatGPT's exhausted weekly allowance switches to remaining credits in full and compact menu bar pills,
+  collapsed account headings and the CLI status line, keeping the time until the included week is back.
+  Percentages resume at the weekly reset and the balance leaves those readings; the expanded dropdown,
+  terminal view and MCP usage report list it whenever it is known. Zero, unlimited and missing balances
+  are handled.
+- Credit balances use a small coin in the menu bar and dropdown; accessibility labels read "credits".
+- A Codex pool whose week is used up but that has credits is ranked as `status: "credits"` instead of
+  `blocked`: usable for any task, metered against the balance, after every pool with free quota. The
+  terminal ranking, the dropdown, `recommend` and the MCP tools say "on credits" with the balance, and
+  agent-executor's launch gate no longer refuses it.
+
 ## 0.9.0 (2026-09-29)
 
 - Double-click the menu bar item to shrink it to one small pill with only each account's weekly % left

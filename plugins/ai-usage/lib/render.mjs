@@ -1,6 +1,7 @@
 import {
   blockedWindows,
   buildLanes,
+  creditBalance,
   durationLabel,
   effectiveWindows,
   headline,
@@ -105,6 +106,11 @@ export function renderReport(
         `   ${pad(w.label, 22)} ${c(LEVEL_COLOR[lv], bar(blocker ? 0 : w.remainingPct, 14))} ${c(LEVEL_COLOR[lv], pct)} ${dead ? " ".repeat(4) : "left"}   ${reset}`,
       );
     }
+    const credits = creditBalance(account);
+    if (credits)
+      out.push(
+        `   ${pad("credit balance", 22)} ${c(LEVEL_COLOR[credits.level], credits.text)} left`,
+      );
     const notes = account.notes ?? [];
     for (const note of notes) out.push(`   ${c("dim", note)}`);
     out.push("");
@@ -118,7 +124,8 @@ export function renderReport(
   for (const lane of lanes) {
     if (lane.redundant) continue;
     const isAvailable = lane.status === "available";
-    const marker = isAvailable ? padStart(String(++rank), 2) : c("red", " ✗");
+    const isUsable = isAvailable || lane.status === "credits";
+    const marker = isUsable ? padStart(String(++rank), 2) : c("red", " ✗");
     const pts = isAvailable && lane.pace ? surplusText(lane.pace.surplus) : "";
     const ptsColor = pts ? surplusColor(lane.pace.surplus) : "dim";
     const route = lane.route ? c("cyan", lane.route) : "";
@@ -148,7 +155,8 @@ export function timeLeft(resetsAt, now = Date.now()) {
 
 /**
  * One provider's pill as text: "16·78 3d" (5-hour % left · weekly % left, then time to the weekly rollover),
- * "49 4d" when there is no 5-hour limit, "☠5h" when the week is used up (then time until it is back).
+ * "49 4d" when there is no 5-hour limit, "☠5h" when the week is used up (then time until it is back),
+ * "62,261.91 cr 4d" when the week is used up but the account runs on credits.
  * Antigravity's pools are tagged: "G76·3 4h C100·27 1d⏳".
  */
 export function pillText(account, now = Date.now()) {
@@ -157,6 +165,8 @@ export function pillText(account, now = Date.now()) {
   const pct = (g) => String(Math.floor(g.pct));
   const pools = list.map((p) => {
     const tag = p.tag ?? "";
+    // On credits the included week is used up: the balance, then how long until that week is back.
+    if (p.credits) return `${tag}${p.credits.text} ${timeLeft(p.weekly?.resetsAt, now)}`.trim();
     if (p.weekly?.exhausted) return `${tag}${SKULL}${timeLeft(p.weekly.resetsAt, now)}`;
     const weekly = p.weekly
       ? `${pct(p.weekly)} ${timeLeft(p.weekly.resetsAt, now)}`.trim() +
@@ -201,6 +211,7 @@ export function jsonView(accounts, now = Date.now()) {
       provider: a.provider,
       plan: a.plan ?? null,
       billing: a.billing ?? null,
+      credits: creditBalance(a),
       ok: a.ok !== false,
       error: a.ok === false ? a.error : null,
       fetchedAt: iso(a.fetchedAt),
@@ -233,6 +244,7 @@ export function jsonView(accounts, now = Date.now()) {
       families: l.families,
       models: l.models ?? null,
       status: l.status,
+      credits: l.credits ?? null,
       availableNowPct: l.availableNowPct ?? 0,
       weeklyRemainingPct: l.weeklyRemainingPct ?? 0,
       surplusPts: l.pace ? Math.round(l.pace.surplus) : null,

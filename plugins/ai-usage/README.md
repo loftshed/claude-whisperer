@@ -8,6 +8,8 @@ It reads the rate-limit windows of each account (Claude Code, Codex/ChatGPT, Ant
 - **macOS menu bar app**: one pill per provider: `[CW ☠3h]  [CP 98·75 2d]  [CX 45 4d]  [AG G 76·3 2h │ C 100·27 1d⏳]`. Each pool shows its 5-hour % left (if it has a 5-hour limit), then its weekly % left followed by the time until the weekly rollover (`2d`, or `2h` once under a day). A pool whose week is used up shows ☠ and the time until it is back; a pool near its rollover with capacity left shows its time in orange with ⏳. Antigravity has two pools, Gemini (G) and Claude & GPT-OSS (C). Numbers are coloured by how much is left; the dropdown has details, reset times and a ranking, and each account and the ranking collapse to one line with their ▾/▸ toggle (remembered across launches). **Double-click** the item to shrink it to one small pill of weekly % left per account (`CW 44 CP 90 CX 35 AG 53·100`) when the menu bar is crowded, and again for the full pills (a single click opens the dropdown a moment later; right-click opens it at once).
 - **MCP server**: `get_usage` and `recommend` tools, so agents can check quota before choosing where to run work.
 
+When ChatGPT's weekly allowance is exhausted, its full pill shows the remaining credit balance with a coin, still followed by the time until the included week is back, such as `CX 62,261.91 🪙 2d`; the compact pill shows the balance alone. The dropdown uses the coin too; the terminal view and MCP usage report label credits as `cr`. A zero balance means no credits remain; `∞` means unlimited credits. If the balance is unavailable, the pill keeps the exhausted-week symbol. Percentages resume at the weekly reset and the balance leaves the pill; the expanded dropdown, terminal view and MCP usage report list it whenever it is known. In the ranking, a Codex pool with credits is **on credits** rather than blocked: it can still take work, metered against the balance, and ranks after every pool with free quota.
+
 ```text
  Claude · personal  subscription
    5-hour                 ██████████████ 100% left   reset since last check
@@ -42,8 +44,9 @@ Percentages are relative to each account's own allowance; 1% of one plan is not 
 - Pools are ranked in tiers:
   1. **Expiring**: in the last 20% of a day-or-longer window (about 34 h of a week) with at least 5% left. That remainder is lost at the rollover, so these go first, most urgent first (highest %/h needed to use it all), with advice like "use it or lose it: 27% of the weekly limit resets Sat 8:25 PM (in 28h); ~1%/h uses it all". The menu bar marks them ⏳.
   2. **Pools with room**, by `min(surplus, % usable right now)`, so a full week behind an exhausted 5-hour window does not rank first.
-  3. **Nearly empty**: under 10% usable right now ("small tasks only"), whatever their surplus. A cheap pool that stalls mid-task costs more than it saves.
-  4. **Blocked** (a window exhausted), soonest back first; then accounts with no data.
+  3. **On credits** (`status: "credits"`): the included allowance is used up but the account has a credit balance (Codex), so every request is metered against credits that persist. Any task size fits; free quota goes first because it is lost at reset.
+  4. **Nearly empty**: under 10% usable right now ("small tasks only"), whatever their surplus. A cheap pool that stalls mid-task costs more than it saves.
+  5. **Blocked** (a window exhausted, no credits), soonest back first; then accounts with no data.
 - Every provider reports exact reset times (Codex and Antigravity as timestamps, Claude as local times), and a window past its reset counts as full again without waiting for a refetch.
 
 Pools are the independently limited groups inside an account: Antigravity's Gemini pool and its Claude/GPT pool, or Claude's all-models limit and a per-model weekly cap such as Fable. A per-model cap is hidden from the ranking unless it binds harder than its parent.

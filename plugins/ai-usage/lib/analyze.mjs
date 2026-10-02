@@ -40,6 +40,23 @@ function pace(w, now) {
 
 // Below this much usable right now a pool can barely take a task, whatever its weekly surplus.
 const LOW_ROOM_PCT = 10;
+// A pool on credits can take any task but costs money per request: after every pool with free room (lost
+// at reset unless spent), before pools too empty to finish a task.
+const CREDITS_SCORE = -250;
+
+const hasUsableCredits = (credits) =>
+  Boolean(
+    credits &&
+    (credits.unlimited ||
+      (credits.hasCredits && Number.isFinite(credits.balance) && credits.balance > 0)),
+  );
+
+/** Codex meters requests against the account's credit balance once its included allowance is used up. */
+function usableCredits(account, pool) {
+  if (account.provider !== "codex" || pool.id !== "codex") return null;
+  const gauge = creditGauge(account.credits);
+  return gauge && hasUsableCredits(gauge) ? gauge : null;
+}
 // A day-or-longer limit is expiring in the last 20% of its window (about 34 h of a week) with at least 5%
 // left: that remainder is lost at the rollover unless it is spent, so it goes first.
 const EXPIRING_FRACTION = 0.2;
@@ -61,6 +78,12 @@ function laneAdvice(lane, now) {
     return lane.blockedUntil
       ? `out until ${formatClock(lane.blockedUntil, now)} (in ${formatDuration(lane.blockedUntil - now)})`
       : "out (reset time unknown)";
+  }
+  if (lane.status === "credits") {
+    const back = lane.blockedUntil
+      ? `; included quota back ${formatClock(lane.blockedUntil, now)} (in ${formatDuration(lane.blockedUntil - now)})`
+      : "";
+    return `on credits: ${lane.credits.text} left, metered per request${back}`;
   }
   const parts = [];
   const e = lane.expiringWindow;
@@ -93,7 +116,9 @@ function laneAdvice(lane, now) {
  * Every routable pool across all accounts, best to spend first:
  *   1. expiring pools with room, most urgent (highest %/h needed to use it all) first;
  *   2. other pools with room, by min(surplus vs even pace, % usable now);
- *   3. pools with under 10% usable now; 4. blocked pools, soonest back first; 5. pools with no data.
+ *   3. pools running on a credit balance (included quota used up, every request metered against credits
+ *      that persist, so free quota goes first); 4. pools with under 10% usable now;
+ *   5. blocked pools, soonest back first; 6. pools with no data.
  */
 export function buildLanes(accounts, now = Date.now()) {
   const lanes = [];
@@ -135,7 +160,10 @@ export function buildLanes(accounts, now = Date.now()) {
         long.length > 0 ? Math.min(...long.map((w) => w.remainingPct)) : availableNowPct;
       const shortWindow = ws.find((w) => (w.windowMins ?? Infinity) < 1440) ?? null;
       const stale = account.ok === false || (account.fetchedAt && now - account.fetchedAt > HOUR);
-      const status = exhausted.length > 0 ? "blocked" : "available";
+      const credits = exhausted.length > 0 ? usableCredits(account, pool) : null;
+      let status = "available";
+      if (credits) status = "credits";
+      else if (exhausted.length > 0) status = "blocked";
       const surplus = binding?.surplus ?? 0;
       const expiringWindow =
         status === "available"
@@ -149,6 +177,7 @@ export function buildLanes(accounts, now = Date.now()) {
       const isLowRoom = status === "available" && availableNowPct < LOW_ROOM_PCT;
       let score;
       if (status === "blocked") score = -1000 - (blockedUntil ? (blockedUntil - now) / HOUR : 999);
+      else if (status === "credits") score = CREDITS_SCORE;
       else if (isLowRoom) score = -500 + Math.min(surplus, availableNowPct);
       else if (expiringWindow) score = 1000 + burnPctPerHour;
       else score = Math.min(surplus, availableNowPct);
@@ -160,6 +189,7 @@ export function buildLanes(accounts, now = Date.now()) {
         families: pool.families ?? [],
         route: account.routes?.[pool.id] ?? account.route ?? null,
         status,
+        credits,
         availableNowPct,
         weeklyRemainingPct,
         blockedUntil,
@@ -254,8 +284,33 @@ export function pills(account, now = Date.now()) {
       poolLabel: pool.label,
       short: gauge(short, now),
       weekly: gauge(long, now),
+      credits:
+        long &&
+        long.remainingPct <= EXHAUSTED_PCT &&
+        pool.id === "codex" &&
+        account.provider === "codex"
+          ? creditGauge(account.credits)
+          : null,
     };
   });
+}
+
+/**
+ * The account's credit balance with display text and level, whenever it is known. Detail views show it
+ * at all times; the menu bar and compact readings only switch to it while the included week is used up.
+ */
+export function creditBalance(account) {
+  return creditGauge(account.credits);
+}
+
+function creditGauge(credits) {
+  if (!credits || (!credits.unlimited && credits.balance === null)) return null;
+  if (!credits.unlimited && !Number.isFinite(credits.balance)) return null;
+  let text = credits.unlimited
+    ? "∞ cr"
+    : `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 2, roundingMode: "trunc" }).format(credits.balance)} cr`;
+  if (!credits.unlimited && credits.balance > 0 && credits.balance < 0.01) text = "<0.01 cr";
+  return { ...credits, text, level: hasUsableCredits(credits) ? "ok" : "out" };
 }
 
 /**
@@ -391,6 +446,8 @@ export function sections(accounts, now = Date.now()) {
 /** Compact per-account figure for status bars: how much can be used right now, per independent pool. */
 export function headline(account, now = Date.now()) {
   if (!account.windows?.length) return { text: "?", level: "error" };
+  const credits = pills(account, now).find((p) => p.credits)?.credits;
+  if (credits) return { text: credits.text, level: credits.level, unit: "credits" };
   const windows = new Map(effectiveWindows(account, now).map((w) => [w.id, w]));
   const independent = independentPools(account);
   if (independent.length === 0) return { text: "?", level: "error" };

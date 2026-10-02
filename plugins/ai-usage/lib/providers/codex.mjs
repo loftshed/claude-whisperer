@@ -21,6 +21,7 @@ export function parseCodexRateLimits(result) {
   const pools = [];
   const notes = [];
   let plan;
+  let credits = null;
   for (const [limitId, limit] of Object.entries(byId)) {
     plan ??= limit.planType;
     const windowIds = [];
@@ -50,15 +51,20 @@ export function parseCodexRateLimits(result) {
       });
     if (limit.rateLimitReachedType) notes.push(`limit reached: ${limit.rateLimitReachedType}`);
     if (limit.spendControlReached) notes.push("spend control reached");
-    const credits = limit.credits;
-    if (limitId === "codex" && credits && (credits.hasCredits || credits.unlimited)) {
-      notes.push(credits.unlimited ? "credits: unlimited" : `credits balance: ${credits.balance}`);
-    }
+    if (limitId !== "codex" || !limit.credits) continue;
+    const raw = limit.credits;
+    const balance =
+      typeof raw.balance === "string" && raw.balance.trim() !== "" ? Number(raw.balance) : NaN;
+    credits = {
+      hasCredits: raw.hasCredits === true,
+      unlimited: raw.unlimited === true,
+      balance: Number.isFinite(balance) && balance >= 0 ? balance : null,
+    };
   }
   if (result.ordinaryUsageAllowed === false) notes.push("ordinary usage not allowed right now");
   if (windows.length === 0)
     throw new Error("codex reported no rate-limit windows (not signed in with ChatGPT?)");
-  return { plan, windows, pools, notes };
+  return { plan, windows, pools, notes, credits };
 }
 
 // Talks JSON-RPC to `codex app-server` over stdio; Codex authenticates with its own stored login.

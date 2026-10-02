@@ -205,8 +205,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static let expiringMark = "\u{23F3}"
 
     private struct Gauge { let pct: Double; let level: String; let resetsAt: Date?; let exhausted: Bool; let expiring: Bool }
+    private struct CreditReading {
+        let text: String
+        let level: String
+        var coinText: String { text.replacingOccurrences(of: " cr", with: " 🪙") }
+        var spokenText: String { text.replacingOccurrences(of: " cr", with: " credits") }
+    }
     /// One independently limited pool: its short (5-hour) window and its weekly window.
-    private struct PoolReading { let tag: String?; let short: Gauge?; let weekly: Gauge? }
+    private struct PoolReading { let tag: String?; let short: Gauge?; let weekly: Gauge?; let credits: CreditReading? }
     private struct ProviderPill { let label: String; let pools: [PoolReading]; let stale: Bool }
     private typealias BarModel = (pills: [ProviderPill], unavailable: [String], refreshFailed: Bool)
 
@@ -226,12 +232,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                          resetsAt: (g["resetsAt"] as? String).flatMap { AppDelegate.iso.date(from: $0) },
                          exhausted: (g["exhausted"] as? Bool) == true, expiring: (g["expiring"] as? Bool) == true)
         }
+        func credits(_ raw: Any?) -> CreditReading? {
+            guard let c = raw as? [String: Any], let text = c["text"] as? String else { return nil }
+            return CreditReading(text: text, level: c["level"] as? String ?? "out")
+        }
         var pills: [ProviderPill] = []
         var unavailable: [String] = []
         for account in accounts {
             let label = account["short"] as? String ?? "?"
             let pools = (account["pills"] as? [[String: Any]] ?? []).map {
-                PoolReading(tag: $0["tag"] as? String, short: gauge($0["short"]), weekly: gauge($0["weekly"]))
+                PoolReading(tag: $0["tag"] as? String, short: gauge($0["short"]), weekly: gauge($0["weekly"]), credits: credits($0["credits"]))
             }
             if pools.isEmpty { unavailable.append(label); continue }
             pills.append(ProviderPill(label: label, pools: pools, stale: (account["ok"] as? Bool) == false))
@@ -265,6 +275,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if i > 0 { out.append(Run(text: "\u{2502}", font: barLabelFont, color: labelTint(0.35), gap: 3)) }
             if let tag = pool.tag { out.append(Run(text: tag, font: barTagFont, color: muted, gap: i > 0 ? 3 : 4, raise: -2)) }
             let lead: CGFloat = pool.tag == nil ? 4 : 1
+            if let credits = pool.credits {
+                out.append(Run(text: credits.coinText, font: barNumberFont, color: levelText(color(for: credits.level)), gap: lead))
+                // The included week is used up: say how long until it is back, as the ☠ reading does.
+                out.append(Run(text: timeLeft(pool.weekly?.resetsAt), font: barTimeFont, color: muted, gap: 2, raise: -1.5))
+                continue
+            }
             if let weekly = pool.weekly, weekly.exhausted {
                 out.append(Run(text: AppDelegate.skull, font: barSkullFont, color: levelText(color(for: "out")), gap: lead))
                 out.append(Run(text: timeLeft(weekly.resetsAt), font: barTimeFont, color: muted, gap: 1, raise: -1.5))
@@ -292,9 +308,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for (i, pill) in pills.enumerated() {
             out.append(Run(text: pill.label, font: barTagFont, color: muted, gap: i > 0 ? 5 : 0, raise: -2))
             for (j, pool) in pill.pools.enumerated() {
-                guard let weekly = pool.weekly else { continue }
                 if j > 0 { out.append(Run(text: "\u{00B7}", font: barNumberFont, color: muted, gap: 1)) }
                 let lead: CGFloat = j > 0 ? 1 : 2
+                if let credits = pool.credits {
+                    out.append(Run(text: credits.coinText, font: barNumberFont, color: levelText(color(for: credits.level)), gap: lead))
+                    continue
+                }
+                guard let weekly = pool.weekly else { continue }
                 if weekly.exhausted {
                     out.append(Run(text: AppDelegate.skull, font: barSkullFont, color: levelText(color(for: "out")), gap: lead))
                 } else {
@@ -375,6 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var parts = model.pills.map { pill -> String in
             let pools = pill.pools.map { pool -> String in
                 let tag = pool.tag ?? ""
+                if let credits = pool.credits { return "\(tag)\(credits.spokenText) \(timeLeft(pool.weekly?.resetsAt))" }
                 if let weekly = pool.weekly, weekly.exhausted { return "\(tag)\(AppDelegate.skull)\(timeLeft(weekly.resetsAt))" }
                 var values: [String] = []
                 if let short = pool.short { values.append(String(Int(short.pct.rounded(.down)))) }
@@ -408,12 +429,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.attributedTitle = NSAttributedString(string: "")
         button.image = barImage(model, compact: compactBar)
         button.imagePosition = .imageOnly
-        button.setAccessibilityLabel("AI usage, % left: " + barSummary(model))
+        button.setAccessibilityLabel("AI usage remaining: " + barSummary(model))
         if compactBar {
-            button.toolTip = "Weekly % left per account (shrunk). Double-click for the full pills; click for the menu."
+            button.toolTip = "Weekly % left per account, or remaining ChatGPT credits after the week is used up (shrunk). Double-click for the full pills; click for the menu."
             return
         }
-        button.toolTip = "One pill per provider: 5-hour % left · weekly % left, then time to the weekly rollover (3d, 5h).\n☠ = used up for the week, then time until it is back · ⏳ = rollover soon with capacity left: spend it.\nAntigravity pools: G = Gemini, C = Claude & GPT-OSS. ! = last refresh failed.\nDouble-click to shrink to weekly % only when the menu bar is crowded."
+        button.toolTip = "One pill per provider: 5-hour % left · weekly % left, then time to the weekly rollover (3d, 5h).\nChatGPT switches to remaining credits (🪙) when its week is used up, still followed by the time until the week is back. ∞ 🪙 = unlimited credits.\n☠ = used up for the week, then time until it is back · ⏳ = rollover soon with capacity left: spend it.\nAntigravity pools: G = Gemini, C = Claude & GPT-OSS. ! = last refresh failed.\nDouble-click to shrink to weekly % only when the menu bar is crowded."
     }
 
     /// `AIUsageBar --render-title <png> [--light] [--compact]`: draw the menu bar pills to a PNG for checking.
@@ -523,6 +544,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func windowSummary(_ account: [String: Any]) -> NSAttributedString {
         let s = NSMutableAttributedString()
         if account["error"] is String { s.append(text("⚠ ", mono, .systemRed)) }
+        if let credits = (account["pills"] as? [[String: Any]])?.compactMap({ $0["credits"] as? [String: Any] }).first,
+           let balance = credits["text"] as? String {
+            let reading = CreditReading(text: balance, level: credits["level"] as? String ?? "out")
+            s.append(text(reading.coinText + " left", mono, color(for: reading.level)))
+            let weekly = (account["windows"] as? [[String: Any]] ?? []).first { ($0["kind"] as? String) == "weekly" }
+            if let resetsAt = (weekly?["resetsAt"] as? String).flatMap({ AppDelegate.iso.date(from: $0) }) {
+                s.append(text(" · wk back in \(timeLeft(resetsAt))", mono, .secondaryLabelColor))
+            }
+            return s
+        }
         for (i, window) in (account["windows"] as? [[String: Any]] ?? []).enumerated() {
             if i > 0 { s.append(text(" · ", mono, .tertiaryLabelColor)) }
             let name = (window["label"] as? String ?? "")
@@ -544,7 +575,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             status = "Updated \(clock(date))"
         }
         menu.addItem(infoItem(text("AI usage · \(status)", monoBold, .secondaryLabelColor)))
-        menu.addItem(infoItem(text("Menu bar: 5-hour % · weekly % + time to rollover · ☠ used up for the week · ⏳ spend before rollover · G Gemini, C Claude & GPT-OSS · double-click the bar to shrink it", mono, .tertiaryLabelColor)))
+        menu.addItem(infoItem(text("Menu bar: 5-hour % · weekly % + time to rollover · 🪙 remaining ChatGPT credits after weekly quota · ☠ used up for the week · ⏳ spend before rollover · G Gemini, C Claude & GPT-OSS · double-click the bar to shrink it", mono, .tertiaryLabelColor)))
         if let lastError {
             menu.addItem(infoItem(text("⚠ \(lastError.prefix(120))", mono, .systemRed)))
         }
@@ -579,6 +610,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 line.append(text(reset, mono, .secondaryLabelColor))
                 rows.append(infoItem(line))
             }
+            // The balance is detail: shown whenever it is known, while the pills only switch to it once the week is used up.
+            if let credits = account["credits"] as? [String: Any], let balance = credits["text"] as? String {
+                let reading = CreditReading(text: balance, level: credits["level"] as? String ?? "out")
+                rows.append(infoItem(text("  Credit balance        " + reading.coinText + " left", mono, color(for: reading.level))))
+            }
             addSection("account:\(account["id"] as? String ?? label)", heading, summary: windowSummary(account), children: rows)
         }
 
@@ -589,15 +625,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             var best = NSMutableAttributedString()
             var rank = 0
             for lane in visible {
-                let available = (lane["status"] as? String) == "available"
+                let status = lane["status"] as? String
+                let available = status == "available"
+                // A pool on credits (Codex after its week) is usable, metered against the balance: ranked, no pace.
+                let usable = available || status == "credits"
                 let line = NSMutableAttributedString()
-                if available {
+                if usable {
                     rank += 1
                     line.append(text(" \(rank)  "))
                 } else {
                     line.append(text(" ✗  ", mono, .systemRed))
                 }
-                line.append(text(pad(lane["label"] as? String ?? "", 34), mono, available ? .labelColor : .secondaryLabelColor))
+                line.append(text(pad(lane["label"] as? String ?? "", 34), mono, usable ? .labelColor : .secondaryLabelColor))
                 if available, let pts = lane["surplusPts"] as? Int {
                     let ptsColor: NSColor = pts >= 15 ? .systemGreen : pts <= -10 ? .systemOrange : .secondaryLabelColor
                     line.append(text(String(format: "%+5d pts  ", pts), mono, ptsColor))
@@ -606,9 +645,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let route = lane["route"] as? String {
                     line.append(text("  → \(route)", mono, .systemBlue))
                 }
-                if available, rank == 1 {
+                if usable, rank == 1 {
                     best = NSMutableAttributedString(attributedString: text("1  " + (lane["label"] as? String ?? ""), mono, .secondaryLabelColor))
-                    if let pts = lane["surplusPts"] as? Int { best.append(text(String(format: "  %+d pts", pts), mono, .secondaryLabelColor)) }
+                    if available, let pts = lane["surplusPts"] as? Int { best.append(text(String(format: "  %+d pts", pts), mono, .secondaryLabelColor)) }
                 }
                 rows.append(infoItem(line))
             }
