@@ -4,7 +4,7 @@ Private personal plugin marketplace and versioned skill backup.
 
 | Plugin                                                | Version | What it does                                                                                                                                                                                                 |
 | ----------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `agent-executor`                                      | 0.15.0  | Bounded agent execution, consultation, evidence, and audit across Codex, Antigravity, Claude Code and OpenCode.                                                                                              |
+| `agent-executor`                                      | 0.16.0  | Bounded agent execution, consultation, evidence, and audit across Codex, Antigravity, Claude Code and OpenCode.                                                                                              |
 | [`ai-usage`](plugins/ai-usage/README.md)              | 0.10.0  | Remaining quota across Claude Code profiles, Codex and Antigravity, and where to spend it: MCP server, skill, CLI/TUI, macOS menu bar app.                                                                   |
 | [`bailout`](plugins/bailout/skills/bailout/README.md) | 1.1.1   | Writes a handoff before the five-hour Claude usage window runs out, then lets the work run on so Claude Code can resume it after the reset. Install its hooks from a checkout: `plugins/bailout/install.sh`. |
 
