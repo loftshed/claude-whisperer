@@ -5,8 +5,8 @@ Keep waiting outside the language-model loop. Repeated status commands, sleeps, 
 
 1. **Native host supervision.** Run the executor in foreground mode, without `--detach`, through the
    caller's background-command or task primitive. The host owns the process and delivers its normal
-   completion signal. Also supervise the printed `AGENT_CHANNEL` with one
-   `messages wait CHANNEL --recipient conductor` so a worker question cannot wait unseen until timeout.
+   completion signal. Also supervise the printed `AGENT_MAILBOX` conductor session with one
+   `run_agent.py mailbox wait --session <AGENT_MAILBOX>` so a worker question cannot wait unseen until timeout.
    Answer/acknowledge messages, then wait again. On an Antigravity host, let its command runner move the foreground command to
    an asynchronous task; do not nest `--detach` underneath it merely to wait.
 2. **Portable blocking signal.** When native lifecycle delivery is absent or cross-caller handoff
@@ -18,7 +18,7 @@ Keep waiting outside the language-model loop. Repeated status commands, sleeps, 
 
    The process does cheap filesystem checks and returns on a worker message or the atomic terminal event.
    It never invokes a model. Reply to questions or acknowledge updates, then wait again for the same
-   event. The [communication guide](communication.md) gives the exact commands and terminal-message rules.
+   event. The [mailbox guide](mailbox.md#runs-conductor-and-worker) gives the exact commands and run-message rules.
    Set the wait timeout beyond the executor timeout. If the host
    yields while it is still blocked, continue that same process with long host waits (about 60 s).
    Do not start a concurrent `events wait`, inspect files, or ask a model for status while that waiter runs.

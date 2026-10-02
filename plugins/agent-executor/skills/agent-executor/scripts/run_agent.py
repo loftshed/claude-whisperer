@@ -288,6 +288,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help=argparse.SUPPRESS,
     )
+    parser.add_argument("--mailbox-run-id", help=argparse.SUPPRESS)
     parser.add_argument(
         "--expect-changes",
         action="store_true",
@@ -1757,6 +1758,7 @@ def publish_completion_event(
 ) -> dict[str, Any]:
     repository_value = result.get("repository")
     repository = str(Path(str(repository_value)).expanduser().resolve()) if repository_value else None
+    mailbox = result.get("mailbox") or {}
     event = {
         "schema": COMPLETION_EVENT_SCHEMA,
         "event_id": event_path.stem,
@@ -1772,6 +1774,8 @@ def publish_completion_event(
         "variant": result.get("variant"),
         "repository": repository,
         "result_path": str(result_path.expanduser().resolve()),
+        "run_id": mailbox.get("run"),
+        "mailbox": mailbox.get("conductor"),
         "error": result.get("error"),
         "scope_violations": result.get("scope_violations", []),
         "history_violations": result.get("history_violations", []),
@@ -1895,36 +1899,38 @@ def wait_for_completion_events(
     if not math.isfinite(poll_seconds) or poll_seconds <= 0:
         raise RunnerError("--poll-seconds must be a finite number greater than 0", 4)
 
-    pending = dict.fromkeys(event_paths)
-    communication = bundled_module("communication") if messages else None
+    pending: dict[Path, str | None] = dict.fromkeys(event_paths)
+    mailbox = bundled_module("peer_mailbox") if messages else None
     deadline = time.monotonic() + timeout_seconds
     repository_text = str(repository.resolve()) if repository else None
     while pending:
         for path in list(pending):
+            event = read_completion_event(path)
             if messages:
-                channel = communication.for_event(path)
-                if channel is not None:
-                    channel_state = communication.read(channel)
-                    if repository_text and channel_state["repository"] != repository_text:
-                        raise RunnerError("communication channel does not belong to this repository", 4)
-                    incoming = communication.inbox(channel, "conductor")
+                run_id = (event or {}).get("run_id") or pending[path] or path.stem
+                info = mailbox.run_info(mailbox.root(), run_id)
+                if info is not None:
+                    run_peer = mailbox.run_peers(mailbox.root(), run_id)["conductor"]
+                    if repository_text and run_peer["repository"] != repository_text:
+                        raise RunnerError("mailbox run does not belong to this repository", 4)
+                    incoming = mailbox.run_inbox(mailbox.root(), run_id, "conductor")
                     if incoming:
                         yield {
                             "schema": "agent-executor.message-signal.v1",
                             "event_id": path.stem,
-                            "channel_path": str(channel),
+                            "mailbox": info["conductor"],
                             "messages": incoming,
-                            "run_status": communication.terminal(channel_state),
+                            "run_status": mailbox.run_status(mailbox.root(), run_id),
                         }
                         return
-            event = read_completion_event(path)
             if event is None:
                 continue
             superseded_by = event.get("superseded_by")
             if isinstance(superseded_by, str) and re.fullmatch(r"[0-9a-f]{32}", superseded_by):
                 # A steered job continues under a new event; keep waiting for the job, not the segment.
+                run_id = event.get("run_id") or pending[path] or path.stem
                 del pending[path]
-                pending.setdefault(normalize_completion_event_path(path.parent / f"{superseded_by}.json"))
+                pending.setdefault(normalize_completion_event_path(path.parent / f"{superseded_by}.json"), run_id)
                 continue
             if repository_text:
                 event_repository = event.get("repository")
@@ -3218,6 +3224,8 @@ def detached_runner_command(
         str(event_path),
         "--notify",
         notification_mode,
+        "--mailbox-run-id",
+        args.mailbox_run_id or event_path.stem,
     ]
     if task_spec_path is not None:
         command.extend(["--task-spec", str(task_spec_path)])
@@ -3280,7 +3288,9 @@ def launch_detached(args: argparse.Namespace) -> int:
         raise RunnerError(f"--cwd must be the Git repository root: {repo}", 4)
 
     brief, task_spec = resolve_execution_brief(args, repo=repo)
-    _, add_dirs, _allowed_paths, tracked_paths, enforced_paths, _, _ = validated_run_options(args, task_spec=task_spec)
+    _, add_dirs, _allowed_paths, tracked_paths, enforced_paths, timeout_seconds, _ = validated_run_options(
+        args, task_spec=task_spec
+    )
     # Check before detaching so the caller hears about an exhausted pool now, not in a completion event.
     # Fail before reporting "started": model and effort against the live catalog, the native-route rule,
     # quota, and whether another executor already holds this worktree.
@@ -3313,6 +3323,20 @@ def launch_detached(args: argparse.Namespace) -> int:
     stderr_path = job_dir / "runner.stderr"
     run_dir = job_dir / "run"
     result_path = run_dir / "result.json"
+    mailbox_module = bundled_module("peer_mailbox")
+    mailbox_run_id = args.mailbox_run_id or event_path.stem
+    mailbox_deadline = (
+        args.deadline or (dt.datetime.now(dt.UTC) + dt.timedelta(seconds=timeout_seconds + 60)).isoformat()
+    )
+    mailbox_info = mailbox_module.open_run(
+        mailbox_module.root(),
+        mailbox_run_id,
+        worker_harness=args.engine,
+        repository=repo,
+        result_path=result_path,
+        deadline=mailbox_deadline,
+        worker_pid=None,
+    )
     if task_spec is not None:
         copied_task_spec_path = job_dir / "task-spec.json"
         write_json(copied_task_spec_path, task_spec)
@@ -3380,7 +3404,7 @@ def launch_detached(args: argparse.Namespace) -> int:
     print(f"AGENT_RESULT={result_path}")
     print(f"AGENT_EVENT={event_path}")
     print(f"AGENT_EVENT_ID={event_path.stem}")
-    print(f"AGENT_CHANNEL={run_dir / 'channel.json'}")
+    print(f"AGENT_MAILBOX={mailbox_info['conductor']}")
     return 0
 
 
@@ -3664,6 +3688,10 @@ def publish_uncaught_completion_failure(error: Exception, exit_code: int) -> Non
                 skipped_reason=("runner_failed" if args.verify_command else None),
             ),
         }
+        run_id = args.mailbox_run_id or event_path.stem
+        mailbox_info = bundled_module("peer_mailbox").run_info(bundled_module("peer_mailbox").root(), run_id)
+        if mailbox_info:
+            result["mailbox"] = mailbox_info
         write_json_atomic(result_path, result)
         completion_hook: Path | None
         try:
@@ -4266,7 +4294,8 @@ def steer_main(argv: list[str] | None = None) -> int:
 def main() -> int:
     argv = sys.argv[1:]
     if argv and argv[0] == "messages":
-        return bundled_module("communication").main(argv[1:])
+        print("run_agent.py messages was removed; use run_agent.py mailbox.", file=sys.stderr)
+        return 4
     if argv and argv[0] == "mailbox":
         return bundled_module("peer_mailbox").main(argv[1:])
     if argv and argv[0] == "steer":
@@ -4346,15 +4375,21 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
     ensure_hook_outside_workspaces(completion_hook, [repo, *add_dirs])
     out_dir = prepare_out_dir(args.out_dir, repo)
     result_path = out_dir / "result.json"
-    communication = bundled_module("communication")
-    channel_path = out_dir / "channel.json"
-    channel_deadline = (
+    mailbox_module = bundled_module("peer_mailbox")
+    mailbox_run_id = args.mailbox_run_id or (completion_event_path.stem if completion_event_path else out_dir.name)
+    mailbox_deadline = (
         args.deadline or (dt.datetime.now(dt.UTC) + dt.timedelta(seconds=timeout_seconds + 60)).isoformat()
     )
-    communication.initialize(channel_path, repository=repo, result_path=result_path, deadline=channel_deadline)
-    if completion_event_path is not None:
-        communication.register(channel_path, completion_event_path)
-    print(f"AGENT_CHANNEL={channel_path}", flush=True)
+    mailbox_info = mailbox_module.open_run(
+        mailbox_module.root(),
+        mailbox_run_id,
+        worker_harness=args.engine,
+        repository=repo,
+        result_path=result_path,
+        deadline=mailbox_deadline,
+        worker_pid=None,
+    )
+    print(f"AGENT_MAILBOX={mailbox_info['conductor']}", flush=True)
     original_brief_path = out_dir / "brief.txt"
     submitted_brief_path = out_dir / "submitted-brief.txt"
     stdout_path = out_dir / "stdout.txt"
@@ -4362,7 +4397,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
     log_path = out_dir / "executor.log"
     final_output_path = out_dir / "final-output.txt"
     write_private_text(original_brief_path, brief + "\n")
-    submitted_brief = f"{brief}\n\n{REPORT_CONTRACT}\n{communication.instructions(channel_path)}"
+    submitted_brief = f"{brief}\n\n{REPORT_CONTRACT}\n{mailbox_module.run_instructions(mailbox_run_id)}"
     write_private_text(submitted_brief_path, submitted_brief)
     write_private_text(log_path, "")
     write_private_text(final_output_path, "")
@@ -4430,6 +4465,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
                 status="skipped" if args.verify_command else "not_requested",
                 skipped_reason=("preflight_failed" if args.verify_command else None),
             ),
+            "mailbox": mailbox_info,
         }
         return finish_run(
             result=result,
@@ -4518,7 +4554,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         "verification_commands": args.verify_command,
         "verification_timeout": args.verify_timeout,
         "deadline": args.deadline,
-        "channel_path": str(channel_path),
+        "mailbox": mailbox_info,
     }
 
     if args.dry_run:
@@ -4560,7 +4596,8 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         )
 
     environment = executor_environment(args.engine, repo, args.claude_config_dir)
-    environment["AGENT_CHANNEL"] = str(channel_path)
+    environment["AGENT_MAILBOX_SESSION"] = mailbox_info["worker"]
+    environment["AGENT_MAILBOX_PEER"] = mailbox_info["conductor"]
     remaining = deadline_remaining(args.deadline)
     if remaining is not None and remaining <= 0:
         raise RunnerError("task deadline expired before executor dispatch", 28)
@@ -4587,8 +4624,9 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
     while True:
         attempt_number += 1
         remaining = deadline_remaining(args.deadline)
-        communication.set_deadline(
-            channel_path,
+        mailbox_module.set_run_deadline(
+            mailbox_module.root(),
+            mailbox_run_id,
             (
                 dt.datetime.now(dt.UTC)
                 + dt.timedelta(
@@ -4801,7 +4839,6 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
             out_dir = Path(pending["run_dir"])
             result_path = out_dir / "result.json"
             completion_event_path = normalize_completion_event_path(Path(pending["event_path"]))
-            communication.register(channel_path, completion_event_path)
             _ACTIVE_SEGMENT.update(event_path=completion_event_path, result_path=result_path)
             submitted_brief_path = out_dir / "submitted-brief.txt"
             stdout_path = out_dir / "stdout.txt"
@@ -4817,7 +4854,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
                     verify_commands=args.verify_command,
                     expect_changes=args.expect_changes,
                 )
-                + communication.instructions(channel_path),
+                + mailbox_module.run_instructions(mailbox_run_id),
             )
             write_private_text(log_path, "")
             write_private_text(final_output_path, "")

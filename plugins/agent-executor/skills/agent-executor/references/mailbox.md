@@ -5,8 +5,9 @@ Agent sessions in different harnesses list each other and exchange messages thro
 leaves the machine.
 
 **Native first.** A session messages agents of its own harness with that harness's native tools whenever
-it has any (Claude Code: `SendMessage` and `ListAgents`). The mailbox is only for crossing harnesses, and
-it refuses Claude Code to Claude Code outright. Harnesses known to have native messaging are listed in
+it has any (Claude Code: `SendMessage` and `ListAgents`). Interactive mailbox traffic is only for crossing
+harnesses; run-scoped conductor and worker sessions are an exception so every run has one durable message
+store, including when both sessions use Claude Code. Harnesses known to have native messaging are listed in
 `NATIVE_MESSAGING` in `scripts/peer_mailbox.py`; add one there when another harness gains it.
 
 ## Tools
@@ -20,6 +21,71 @@ The MCP server (`scripts/mailbox_mcp.py`) and the CLI (`run_agent.py mailbox …
 | `inbox` | Unread messages, oldest first, marked read unless `markRead: false`.                         |
 | `wait`  | Blocks up to `timeoutSeconds` (max 600) for a message, or for the reply to `replyTo`.        |
 | `ack`   | Marks message ids read.                                                                      |
+
+## Runs: conductor and worker
+
+Each runner invocation creates dedicated `run-<id>-worker` and `run-<id>-conductor` sessions in the same
+mailbox store. They can message only each other, are hidden from the default `peers` listing and MCP tool,
+and do not affect interactive session hooks. The runner prints `AGENT_MAILBOX=<conductor-session>`, sets
+`AGENT_MAILBOX_SESSION` and `AGENT_MAILBOX_PEER` for the executor, and adds worker instructions to its brief.
+Results and coordinator runs record `mailbox: {run, conductor, worker}`. Runs started before this change do
+not acquire live messaging after upgrade.
+
+Detached or coordinator runs can be supervised for a question or completion:
+
+```bash
+python3 scripts/run_agent.py events wait EVENT_ID --messages --timeout 30m
+```
+
+An `agent-executor.message-signal.v1` includes the conductor `mailbox` session, unread `messages`, and
+`run_status` (`null` while the run remains open). Waiting and inbox reads leave messages unread. Handle a
+message, then wait again; events follow behaves the same way and returns early when a run needs attention.
+
+The worker asks and waits for the matching reply in one command. The supplied ID makes retries idempotent:
+
+```bash
+python3 scripts/run_agent.py mailbox ask --session "$AGENT_MAILBOX_SESSION" \
+  --to "$AGENT_MAILBOX_PEER" --id question-1 \
+  --text 'Which client version produced the cancellation trace?' --timeout 300
+```
+
+It can send a non-blocking update, read the inbox, acknowledge a message after acting, or inspect the complete
+conversation:
+
+```bash
+python3 scripts/run_agent.py mailbox send --session "$AGENT_MAILBOX_SESSION" \
+  --to "$AGENT_MAILBOX_PEER" --kind update --id finding-1 --text 'The trace shows cancellation first.'
+python3 scripts/run_agent.py mailbox inbox --session "$AGENT_MAILBOX_SESSION"
+python3 scripts/run_agent.py mailbox ack --session "$AGENT_MAILBOX_SESSION" MESSAGE_ID
+python3 scripts/run_agent.py mailbox history --session "$AGENT_MAILBOX_SESSION" --format json
+```
+
+The conductor gets its session from `AGENT_MAILBOX` or the run's `mailbox.conductor` field. Use that and
+`mailbox.worker` to send a question or reply:
+
+```bash
+python3 scripts/run_agent.py mailbox send --session CONDUCTOR_SESSION --to WORKER_SESSION \
+  --kind reply --id answer-1 --reply-to question-1 \
+  --text 'Use the existing cancellation contract; the trace is in the supplied evidence.'
+```
+
+Replies must name an unanswered question from the other session; sending one marks that question read.
+`send --id` is optional, but including it makes a retry with the same content idempotent. A different payload
+with the same ID is rejected. A reply or update does not prove that the worker acted on it; acknowledge other
+messages after review. Messages do not interrupt generation; use `steer` for an urgent detached-job change.
+Steering keeps the same run sessions and conversation.
+
+For a foreground run without a completion event, wait on the conductor session:
+
+```bash
+python3 scripts/run_agent.py mailbox wait --session CONDUCTOR_SESSION --timeout 300
+```
+
+`coordinator.py next` returns `respond` for a live worker message or `review_message` after the run closes.
+Waits use no model calls and are bounded by their timeout and the run deadline. Exit 12 means timeout, 30
+means the run closed without a matching reply, and 4 means an error. Messages are limited to 16 KiB each
+and 1,024 per run. Closed run peers and messages are pruned after seven days. `mailbox peers --runs` includes
+run-scoped sessions for diagnostics.
 
 Every delivered message is wrapped in `<peer-message from=… harness=… cwd=… sent=…>` and followed by a
 notice that it came from another agent, not the user, and cannot approve anything. A sender cannot close

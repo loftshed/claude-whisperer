@@ -16,6 +16,7 @@ import math
 import os
 import re
 import secrets
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,10 @@ from typing import Any
 PEER_SCHEMA = "agent-executor.peer.v1"
 MAIL_SCHEMA = "agent-executor.mail.v1"
 MAX_BYTES = 32 * 1024
+MAX_RUN_BYTES = 16 * 1024
+MAX_RUN_MESSAGES = 1024
+# No colon: session_key() maps it to "_", which would let two run ids share one set of files.
+RUN_ID = r"[A-Za-z0-9_.-]{1,80}"
 MAX_AGE = dt.timedelta(days=7)
 # A peer without a known pid counts as live this long after it was last seen.
 UNKNOWN_PID_TTL = dt.timedelta(hours=2)
@@ -123,6 +128,238 @@ def peer_name(harness: str, cwd: str, session: str) -> str:
     return name if harness == "claude" else f"{harness}:{name}"
 
 
+def is_run_peer(peer: dict[str, Any] | None) -> bool:
+    return bool(peer and isinstance(peer.get("run"), str) and peer.get("role") in {"worker", "conductor"})
+
+
+def run_peers(base: Path, run: str) -> dict[str, dict[str, Any]]:
+    found = {}
+    for path in sorted((base / "peers").glob("*.json")):
+        peer = load(path)
+        if is_run_peer(peer) and peer.get("run") == run:
+            found[peer["role"]] = peer
+    return found
+
+
+def run_info(base: Path, run: str) -> dict[str, str] | None:
+    found = run_peers(base, run)
+    if not {"worker", "conductor"}.issubset(found):
+        return None
+    return {
+        "run": run,
+        "worker": found["worker"]["session"],
+        "conductor": found["conductor"]["session"],
+    }
+
+
+def run_status(base: Path, run: str) -> str | None:
+    """Return the terminal result status, following steers, or deadline_expired."""
+    found = run_peers(base, run)
+    peer = found.get("worker") or found.get("conductor")
+    if not peer:
+        raise MailboxError(f"no mailbox run {run!r}")
+    path = Path(peer["resultPath"])
+    seen: set[Path] = set()
+    while path.is_file() and path not in seen:
+        seen.add(path)
+        try:
+            result = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            break
+        continuation = (result.get("steered_to") or {}).get("result_path")
+        if continuation:
+            path = Path(continuation)
+            continue
+        if result.get("finished_at"):
+            return result.get("status", "finished")
+        break
+    deadline = dt.datetime.fromisoformat(peer["deadline"].replace("Z", "+00:00"))
+    if now() >= deadline:
+        return "deadline_expired"
+    return None
+
+
+def run_closed_at(base: Path, run: str) -> dt.datetime | None:
+    found = run_peers(base, run)
+    peer = found.get("worker") or found.get("conductor")
+    if not peer:
+        return None
+    path = Path(peer["resultPath"])
+    seen: set[Path] = set()
+    while path.is_file() and path not in seen:
+        seen.add(path)
+        try:
+            result = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            break
+        continuation = (result.get("steered_to") or {}).get("result_path")
+        if continuation:
+            path = Path(continuation)
+            continue
+        finished = result.get("finished_at")
+        if finished:
+            try:
+                return dt.datetime.fromisoformat(str(finished).replace("Z", "+00:00"))
+            except ValueError:
+                return dt.datetime.fromtimestamp(path.stat().st_mtime, dt.UTC)
+        break
+    deadline = dt.datetime.fromisoformat(peer["deadline"].replace("Z", "+00:00"))
+    return deadline if now() >= deadline else None
+
+
+def open_run(
+    base: Path,
+    run_id: str,
+    *,
+    worker_harness: str,
+    repository: str | Path,
+    result_path: str | Path,
+    deadline: str,
+    worker_pid: int | None,
+) -> dict[str, str]:
+    """Open dedicated worker/conductor peers for one bounded run."""
+    if not re.fullmatch(RUN_ID, run_id):
+        raise MailboxError("run id must be 1-80 letters, digits, periods, underscores, or hyphens")
+    if worker_harness == "agy":
+        worker_harness = "gemini"
+    if worker_harness not in HARNESSES:
+        raise MailboxError(f"unknown worker harness {worker_harness!r}")
+    try:
+        parsed_deadline = dt.datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise MailboxError("run deadline must be an ISO-8601 timestamp") from error
+    if parsed_deadline.tzinfo is None:
+        raise MailboxError("run deadline must include a timezone")
+    repo = str(Path(repository).expanduser().resolve())
+    result = str(Path(result_path).expanduser().resolve())
+    sessions = {role: f"run-{run_id}-{role}" for role in ("conductor", "worker")}
+    lock_path = base / "locks" / f"run-{run_id}.lock"
+    with locked(lock_path):
+        found = run_peers(base, run_id)
+        if any(peer.get("repository") != repo or peer.get("resultPath") != result for peer in found.values()):
+            raise MailboxError(f"mailbox run {run_id!r} already belongs to another result")
+        info = run_info(base, run_id)
+        if info is not None:
+            _update_run_deadline_locked(base, run_id, deadline)
+            return info
+        # Nothing yet, or an earlier open stopped after one peer: write the pair (again).
+
+        conductor_harness = detect_harness()
+        values = {
+            "conductor": (conductor_harness, None),
+            "worker": (worker_harness, worker_pid),
+        }
+        for role, session in sessions.items():
+            harness, pid = values[role]
+            peer = register(base, session=session, harness=harness, cwd=repo, pid=pid, state="waiting")
+            peer.update(
+                role=role,
+                run=run_id,
+                counterpart=sessions["worker" if role == "conductor" else "conductor"],
+                repository=repo,
+                resultPath=result,
+                deadline=deadline,
+            )
+            path = peer_path(base, session)
+            with locked(path):
+                write(path, peer)
+    return {"run": run_id, **sessions}
+
+
+def _update_run_deadline_locked(base: Path, run: str, deadline: str) -> None:
+    try:
+        parsed = dt.datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise MailboxError("run deadline must be an ISO-8601 timestamp") from error
+    if parsed.tzinfo is None:
+        raise MailboxError("run deadline must include a timezone")
+    found = run_peers(base, run)
+    if len(found) != 2:
+        raise MailboxError(f"no complete mailbox run {run!r}")
+    for peer in (found["worker"], found["conductor"]):
+        path = peer_path(base, peer["session"])
+        with locked(path):
+            current = load(path)
+            if not is_run_peer(current) or current.get("run") != run:
+                raise MailboxError(f"mailbox run {run!r} changed while updating its deadline")
+            current["deadline"] = deadline
+            write(path, current)
+
+
+def set_run_deadline(base: Path, run: str, deadline: str) -> None:
+    if not re.fullmatch(RUN_ID, run):
+        raise MailboxError("invalid run id")
+    with locked(base / "locks" / f"run-{run}.lock"):
+        _update_run_deadline_locked(base, run, deadline)
+
+
+def run_inbox(base: Path, run: str, role: str) -> list[dict[str, Any]]:
+    peer = run_peers(base, run).get(role)
+    if not peer:
+        raise MailboxError(f"mailbox run {run!r} has no {role} session")
+    return messages(base, peer["session"])[:20]
+
+
+def run_history(base: Path, run: str) -> dict[str, Any]:
+    found = run_peers(base, run)
+    if len(found) != 2:
+        raise MailboxError(f"no complete mailbox run {run!r}")
+    history = []
+    for peer in found.values():
+        history.extend(messages(base, peer["session"], unread_only=False))
+    return {
+        "run": run,
+        "mailbox": found["conductor"]["session"],
+        "messages": sorted(history, key=lambda item: item["id"]),
+    }
+
+
+def run_question(base: Path, session: str, identifier: str) -> dict[str, Any] | None:
+    for message in messages(base, session, unread_only=False):
+        if identifier in (message.get("id"), message.get("clientId")) and message.get("kind") == "question":
+            return message
+    return None
+
+
+def find_run_question(base: Path, run: str, identifier: str) -> dict[str, Any] | None:
+    return next(
+        (
+            message
+            for message in run_messages(base, run)
+            if identifier in (message.get("id"), message.get("clientId")) and message.get("kind") == "question"
+        ),
+        None,
+    )
+
+
+def run_messages(base: Path, run: str) -> list[dict[str, Any]]:
+    found = run_peers(base, run)
+    if len(found) != 2:
+        raise MailboxError(f"no complete mailbox run {run!r}")
+    history = []
+    for peer in found.values():
+        history.extend(messages(base, peer["session"], unread_only=False))
+    return history
+
+
+def run_ack(base: Path, session: str, identifiers: list[str]) -> list[str]:
+    found = []
+    for identifier in identifiers:
+        match = next(
+            (
+                message
+                for message in messages(base, session, unread_only=False)
+                if identifier in (message.get("id"), message.get("clientId"))
+            ),
+            None,
+        )
+        if not match:
+            raise MailboxError(f"no message {identifier} in this inbox")
+        mark_read(base, session, [match["id"]])
+        found.append(identifier)
+    return found
+
+
 def pid_alive(pid: int | None) -> bool | None:
     if not pid:
         return None
@@ -206,12 +443,16 @@ def unregister(base: Path, session: str) -> None:
     peer_path(base, session).unlink(missing_ok=True)
 
 
-def peers(base: Path, *, prune_dead: bool = True) -> list[dict[str, Any]]:
+def peers(base: Path, *, prune_dead: bool = True, include_runs: bool = False) -> list[dict[str, Any]]:
     found = []
     moment = now()
     for path in sorted((base / "peers").glob("*.json")):
         peer = load(path)
         if not peer or peer.get("schema") != PEER_SCHEMA:
+            continue
+        if is_run_peer(peer):
+            if include_runs:
+                found.append(peer)
             continue
         if is_live(peer, moment):
             found.append(peer)
@@ -239,7 +480,114 @@ def message_id() -> str:
     return f"{time.time_ns():x}-{secrets.token_hex(3)}"
 
 
-def send(base: Path, *, sender: dict[str, Any], to: str, text: str, reply_to: str | None = None) -> dict[str, Any]:
+def run_send(
+    base: Path,
+    *,
+    sender: dict[str, Any],
+    to: str,
+    text: str,
+    kind: str | None,
+    client_id: str | None,
+    reply_to: str | None,
+) -> dict[str, Any]:
+    if kind not in {"question", "reply", "update"}:
+        raise MailboxError("run messages require kind question, reply, or update")
+    if client_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", client_id):
+        raise MailboxError("message ID must be 1-80 letters, digits, underscores, or hyphens")
+    if not text.strip() or len(text.encode()) > MAX_RUN_BYTES:
+        raise MailboxError("run message must be nonempty and at most 16 KiB")
+    if (kind == "reply") != bool(reply_to):
+        raise MailboxError("a reply requires --reply-to; other kinds cannot reply")
+    if reply_to and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", reply_to):
+        raise MailboxError("invalid reply-to message ID")
+    run = sender["run"]
+    pair = run_peers(base, run)
+    if pair.get(sender["role"], {}).get("session") != sender["session"] or len(pair) != 2:
+        raise MailboxError("run session is not registered")
+    target = pair["worker" if sender["role"] == "conductor" else "conductor"]
+    if to not in {target["session"], target["name"]}:
+        raise MailboxError("run sessions may message only their counterpart")
+    if target["counterpart"] != sender["session"]:
+        raise MailboxError("run sessions may message only their counterpart")
+
+    payload = {
+        "schema": MAIL_SCHEMA,
+        "from": {key: sender.get(key) for key in ("session", "name", "harness", "cwd")},
+        "to": {"session": target["session"], "name": target["name"]},
+        "text": text,
+        "replyTo": reply_to,
+        "kind": kind,
+        "run": run,
+    }
+    if client_id is not None:
+        payload["clientId"] = client_id
+    with locked(base / "locks" / f"run-{run}.lock"):
+        all_messages = run_messages(base, run)
+        existing = None
+        if client_id is not None:
+            existing = next(
+                (
+                    message
+                    for message in messages(base, target["session"], unread_only=False)
+                    if message.get("from", {}).get("session") == sender["session"]
+                    and message.get("clientId") == client_id
+                ),
+                None,
+            )
+        if existing:
+            if any(existing.get(key) != value for key, value in payload.items() if key != "schema"):
+                raise MailboxError("message ID already used with different content")
+            question = run_question(base, sender["session"], reply_to or "") if kind == "reply" else None
+            if question and not question.get("readAt"):
+                mark_read(base, sender["session"], [question["id"]])
+            return existing
+        ended = run_status(base, run)
+        if ended:
+            raise MailboxError("run is closed: " + ended)
+        if len(all_messages) >= MAX_RUN_MESSAGES:
+            raise MailboxError("run message limit reached; report the unresolved work")
+        if kind == "reply":
+            question = run_question(base, sender["session"], reply_to or "")
+            if (
+                not question
+                or question.get("from", {}).get("session") != sender["counterpart"]
+                or question.get("to", {}).get("session") != sender["session"]
+            ):
+                raise MailboxError("reply must address a question sent to this sender")
+            question_ids = {question["id"]}
+            if question.get("clientId") is not None:
+                question_ids.add(question["clientId"])
+            if any(message.get("replyTo") in question_ids for message in all_messages):
+                raise MailboxError("question already has a reply")
+        payload.update(id=message_id(), sentAt=stamp(), readAt=None)
+        path = inbox_dir(base, target["session"]) / f"{payload['id']}.json"
+        write(path, payload)
+        os.chmod(path, 0o600)
+        if kind == "reply":
+            mark_read(base, sender["session"], [question["id"]])
+    return payload
+
+
+def send(
+    base: Path,
+    *,
+    sender: dict[str, Any],
+    to: str,
+    text: str,
+    reply_to: str | None = None,
+    kind: str | None = None,
+    client_id: str | None = None,
+) -> dict[str, Any]:
+    if is_run_peer(sender):
+        return run_send(
+            base,
+            sender=sender,
+            to=to,
+            text=text,
+            kind=kind,
+            client_id=client_id,
+            reply_to=reply_to,
+        )
     if not text.strip():
         raise MailboxError("message text is empty")
     if len(text.encode()) > MAX_BYTES:
@@ -315,15 +663,35 @@ def wait(
     if not math.isfinite(timeout) or timeout <= 0:
         raise MailboxError("timeout must be a finite number of seconds greater than zero")
     until = time.monotonic() + timeout
+    peer = load(peer_path(base, session))
+    run_peer = peer if is_run_peer(peer) else None
+    question_ids = {reply_to} if reply_to else set()
+    if run_peer and reply_to:
+        question = find_run_question(base, run_peer["run"], reply_to)
+        if not question or question.get("from", {}).get("session") != session:
+            raise MailboxError("wait requires a question sent by this recipient")
+        question_ids = {question["id"], question.get("clientId")} - {None}
     while True:
-        unread = messages(base, session)
+        # A run reply stays replayable after it was read, as the old channel's were.
+        unread = messages(base, session, unread_only=not (run_peer and reply_to))
         if reply_to:
-            unread = [message for message in unread if message.get("replyTo") == reply_to]
+            unread = [
+                message
+                for message in unread
+                if message.get("replyTo") in question_ids and (not run_peer or message.get("kind") == "reply")
+            ]
         if unread:
             unread = unread[:20]
-            if mark:
+            if mark and not run_peer:
                 mark_read(base, session, [message["id"] for message in unread])
-            return {"status": "messages", "messages": unread}
+            result = {"status": "messages", "messages": unread}
+            if run_peer:
+                result.update(mailbox=session, run_status=run_status(base, run_peer["run"]))
+            return result
+        if run_peer:
+            ended = run_status(base, run_peer["run"])
+            if ended:
+                return {"status": "closed", "reason": ended, "mailbox": session}
         remaining = until - time.monotonic()
         if remaining <= 0:
             return {"status": "timed_out", "messages": []}
@@ -332,14 +700,38 @@ def wait(
 
 def prune(base: Path) -> dict[str, int]:
     removed = {"peers": 0, "messages": 0}
+    moment = now()
+    run_sessions: set[str] = set()
+    for path in (base / "peers").glob("*.json"):
+        peer = load(path)
+        if not is_run_peer(peer):
+            continue
+        run = peer["run"]
+        run_sessions.add(peer["session"])
+        closed_at = run_closed_at(base, run)
+        if closed_at and moment - closed_at > MAX_AGE:
+            for session in (item["session"] for item in run_peers(base, run).values()):
+                peer_path(base, session).unlink(missing_ok=True)
+                inbox = inbox_dir(base, session)
+                if inbox.exists():
+                    for message_path in inbox.glob("*.json"):
+                        message_path.unlink(missing_ok=True)
+                        removed["messages"] += 1
+                    with contextlib.suppress(OSError):
+                        inbox.rmdir()
+                removed["peers"] += 1
     live = {peer["session"] for peer in peers(base, prune_dead=False)}
     for path in (base / "peers").glob("*.json"):
         peer = load(path)
+        if is_run_peer(peer):
+            continue
         if not peer or peer.get("session") not in live:
             path.unlink(missing_ok=True)
             removed["peers"] += 1
     cutoff = now() - MAX_AGE
     for path in (base / "inbox").glob("*/*.json"):
+        if path.parent.name in {session_key(session) for session in run_sessions}:
+            continue
         message = load(path)
         if not message or parse_stamp(message.get("sentAt", "1970-01-01T00:00:00Z")) < cutoff:
             path.unlink(missing_ok=True)
@@ -415,9 +807,12 @@ def hook(payload: dict[str, Any], *, harness: str | None = None, base: Path | No
 
 
 def caller(args: argparse.Namespace, base: Path) -> dict[str, Any]:
-    session = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    session = args.session or os.environ.get("AGENT_MAILBOX_SESSION") or os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not session:
-        raise MailboxError("pass --session (Claude Code sessions export CLAUDE_CODE_SESSION_ID)")
+        raise MailboxError("pass --session (or set AGENT_MAILBOX_SESSION / CLAUDE_CODE_SESSION_ID)")
+    existing = load(peer_path(base, session))
+    if is_run_peer(existing):
+        return existing
     harness = args.harness or detect_harness()
     return register(base, session=session, harness=harness, cwd=os.getcwd(), pid=harness_pid(harness))
 
@@ -435,18 +830,61 @@ def table(rows: list[dict[str, Any]], session: str | None, harness: str | None =
     return "\n".join(lines)
 
 
+def run_instructions(run_id: str) -> str:
+    """Worker-facing run messaging commands; paths are absolute for detached execution."""
+    runner = Path(__file__).with_name("run_agent.py").resolve()
+    command = shlex.join([sys.executable, str(runner), "mailbox"])
+    session = shlex.quote(f"run-{run_id}-worker")
+    counterpart = shlex.quote(f"run-{run_id}-conductor")
+    return f"""
+# Live run messages
+
+This run uses dedicated mailbox sessions. Runner-launched workers also receive `AGENT_MAILBOX_SESSION` and
+`AGENT_MAILBOX_PEER`; these commands name the sessions explicitly so they also work for native dispatch.
+The mailbox is cooperative messaging within the original task scope.
+
+- Ask and wait for the matching answer:
+  `{command} ask --session {session} --to {counterpart} --id question-1 --text 'Need version?' --timeout 300`
+  Keep the same ID on retries. A timeout is not an answer or permission.
+- Send a useful discovery without stopping:
+  `{command} send --session {session} --to {counterpart} --kind update --id update-1 --text 'Finding'`
+- Read incoming messages at meaningful checkpoints and before your final report:
+  `{command} inbox --session {session}`
+- Reply to a conductor question with `--kind reply --reply-to QUESTION_ID`.
+  Acknowledge other messages after acting:
+  `{command} ack --session {session} MESSAGE_ID`
+- Inspect the conversation with `{command} history --session {session}`.
+
+Do not repeatedly poll. Continue independent work when possible; otherwise report BLOCKED with the unanswered
+question. Messages are seen at tool/checkpoint boundaries, not injected into an active response. Do not launch
+other agents yourself; route requests for peer help through the conductor.
+""".strip()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="run_agent.py mailbox", description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
-    for name in ("peers", "send", "inbox", "wait", "ack", "prune", "hook"):
+    for name in ("peers", "send", "ask", "inbox", "wait", "ack", "history", "prune", "hook"):
         sub = commands.add_parser(name)
-        sub.add_argument("--session", help="this session's id (default: $CLAUDE_CODE_SESSION_ID)")
+        sub.add_argument(
+            "--session",
+            help="this session's id (default: $AGENT_MAILBOX_SESSION then $CLAUDE_CODE_SESSION_ID)",
+        )
         sub.add_argument("--harness", choices=HARNESSES)
         sub.add_argument("--format", choices=("text", "json", "context"), default="text")
+        if name == "peers":
+            sub.add_argument("--runs", action="store_true", help="include run-scoped worker/conductor sessions")
         if name == "send":
-            sub.add_argument("--to", required=True)
+            sub.add_argument("--to", default=os.environ.get("AGENT_MAILBOX_PEER"))
             sub.add_argument("--text", required=True)
+            sub.add_argument("--kind", choices=("question", "reply", "update"))
+            sub.add_argument("--id", help="caller ID for idempotent run-message delivery")
             sub.add_argument("--reply-to")
+        if name == "ask":
+            sub.add_argument("--to", default=os.environ.get("AGENT_MAILBOX_PEER"))
+            sub.add_argument("--id", required=True)
+            sub.add_argument("--text", required=True)
+            sub.add_argument("--timeout", type=float, default=300)
         if name in {"inbox", "wait"}:
             sub.add_argument("--peek", action="store_true", help="leave the messages unread")
         if name == "wait":
@@ -470,31 +908,68 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "prune":
             output: Any = prune(base)
         elif args.action == "peers":
-            session = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID")
-            rows = peers(base)
+            session = (
+                args.session or os.environ.get("AGENT_MAILBOX_SESSION") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+            )
+            rows = peers(base, include_runs=args.runs)
             if args.format != "json":
                 print(table(rows, session, args.harness or detect_harness()))
                 return 0
             output = rows
         else:
             me = caller(args, base)
-            if args.action == "send":
-                output = send(base, sender=me, to=args.to, text=args.text, reply_to=args.reply_to)
+            if args.action in {"send", "ask"}:
+                to = args.to or (me.get("counterpart") if is_run_peer(me) else None)
+                if not to:
+                    raise MailboxError("pass --to (or set AGENT_MAILBOX_PEER)")
+                if args.action == "ask" and not is_run_peer(me):
+                    raise MailboxError("ask is only supported for run sessions")
+                if args.action == "ask" and (not math.isfinite(args.timeout) or args.timeout <= 0):
+                    raise MailboxError("timeout must be a finite number of seconds greater than zero")
+                output = send(
+                    base,
+                    sender=me,
+                    to=to,
+                    text=args.text,
+                    reply_to=getattr(args, "reply_to", None),
+                    kind="question" if args.action == "ask" else args.kind,
+                    client_id=args.id,
+                )
+                if args.action == "ask":
+                    output = wait(base, me["session"], timeout=args.timeout, reply_to=args.id)
             elif args.action == "inbox":
-                output = {"messages": take(base, me["session"], mark=not args.peek)}
+                output = {
+                    "messages": run_inbox(base, me["run"], me["role"])
+                    if is_run_peer(me)
+                    else take(base, me["session"], mark=not args.peek)
+                }
             elif args.action == "wait":
                 register(base, session=me["session"], harness=me["harness"], cwd=me["cwd"], state="waiting")
                 try:
                     output = wait(base, me["session"], timeout=args.timeout, reply_to=args.reply_to, mark=not args.peek)
                 finally:
-                    register(base, session=me["session"], harness=me["harness"], cwd=me["cwd"], state="busy")
+                    if not is_run_peer(me):
+                        register(base, session=me["session"], harness=me["harness"], cwd=me["cwd"], state="busy")
             else:
-                output = {"acknowledged": mark_read(base, me["session"], args.ids)}
+                if args.action == "ack":
+                    output = {
+                        "acknowledged": run_ack(base, me["session"], args.ids)
+                        if is_run_peer(me)
+                        else mark_read(base, me["session"], args.ids)
+                    }
+                elif args.action == "history":
+                    if not is_run_peer(me):
+                        raise MailboxError("history is only supported for run sessions")
+                    output = run_history(base, me["run"])
+                else:
+                    raise MailboxError(f"unsupported mailbox action: {args.action}")
             if args.format == "context" and "messages" in output:
                 print(render_all(output["messages"]))
                 return 12 if output.get("status") == "timed_out" else 0
         print(json.dumps(output, ensure_ascii=True, indent=None if args.format == "json" else 2))
-        return 12 if isinstance(output, dict) and output.get("status") == "timed_out" else 0
+        if isinstance(output, dict) and output.get("status") == "timed_out":
+            return 12
+        return 30 if isinstance(output, dict) and output.get("status") == "closed" else 0
     except (MailboxError, OSError) as error:
         print(f"mailbox: {error}", file=sys.stderr)
         return 4

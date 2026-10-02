@@ -36,7 +36,7 @@ EVIDENCE = module("evidence")
 POLICY = module("conductor_policy")
 NATIVE = module("native_bridge")
 QUOTA = module("quota")
-COMMUNICATION = module("communication")
+MAILBOX = module("peer_mailbox")
 SCHEMA = "agent-executor.task.v1"
 READ_ONLY_KINDS = {"consultation", "challenge", "investigation"}
 
@@ -543,8 +543,13 @@ def dispatch(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
     RUNNER.write_json_atomic(spec_path, spec)
     (run_dir / "brief.md").write_text(RUNNER.brief_renderer_module().render_brief(spec), encoding="utf-8")
     result_path = run_dir / "artifacts" / "result.json"
-    channel_path = result_path.parent / "channel.json"
     event_path = RUNNER.prepare_completion_event_path()
+    mailbox_run_id = event_path.stem
+    mailbox_info = {
+        "run": mailbox_run_id,
+        "conductor": f"run-{mailbox_run_id}-conductor",
+        "worker": f"run-{mailbox_run_id}-worker",
+    }
     command = [
         sys.executable,
         str(Path(__file__).with_name("run_agent.py")),
@@ -566,6 +571,8 @@ def dispatch(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
         "0",
         "--completion-event",
         str(event_path),
+        "--mailbox-run-id",
+        mailbox_run_id,
     ]
     if effort:
         command += ["--effort", effort]
@@ -587,7 +594,7 @@ def dispatch(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
         "model": model_id,
         "result_path": str(result_path),
         "command": command,
-        "channel_path": str(channel_path),
+        "mailbox": mailbox_info,
         "reserved_at": RUNNER.utc_now(),
         "evidence": evidence_record,
         "transport": args.transport,
@@ -610,13 +617,20 @@ def dispatch(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
     POLICY.reserve(state, args.request_id)
     state["runs"].append(run)
     save(directory, state)  # Durable intent precedes the external side effect.
+    opened_mailbox = MAILBOX.open_run(
+        MAILBOX.root(),
+        mailbox_run_id,
+        worker_harness=engine,
+        repository=Path(state["repository"]),
+        result_path=result_path,
+        deadline=state["deadline"],
+        worker_pid=None,
+    )
+    if opened_mailbox != mailbox_info:
+        raise CoordinationError("mailbox run does not match the recorded dispatch")
+    with (run_dir / "brief.md").open("a", encoding="utf-8") as brief:
+        brief.write("\n\n" + MAILBOX.run_instructions(mailbox_run_id) + "\n")
     if args.transport == "native":
-        COMMUNICATION.initialize(
-            channel_path, repository=Path(state["repository"]), result_path=result_path, deadline=state["deadline"]
-        )
-        COMMUNICATION.register(channel_path, event_path)
-        with (run_dir / "brief.md").open("a", encoding="utf-8") as brief:
-            brief.write(COMMUNICATION.instructions(channel_path))
         NATIVE.start(directory, run, RUNNER)
         save(directory, state)
         return run
@@ -704,16 +718,18 @@ def host_action(args: argparse.Namespace, directory: Path, state: dict[str, Any]
         remaining = RUNNER.deadline_remaining(state["deadline"])
         if remaining > 0:
             for run in state["runs"]:
-                channel = Path(run["channel_path"]) if run.get("channel_path") else None
-                incoming = COMMUNICATION.inbox(channel, "conductor") if channel and channel.exists() else []
+                mailbox = run.get("mailbox")
+                if not mailbox or not MAILBOX.run_info(MAILBOX.root(), mailbox.get("run", "")):
+                    continue
+                incoming = MAILBOX.run_inbox(MAILBOX.root(), mailbox["run"], "conductor")
                 if incoming:
-                    ended = COMMUNICATION.terminal(COMMUNICATION.read(channel))
+                    ended = MAILBOX.run_status(MAILBOX.root(), mailbox["run"])
                     return {
                         "action": "review_message" if ended else "respond",
                         "owner": "conductor",
                         "run_id": run["run_id"],
                         "run_status": ended,
-                        "channel_path": str(channel),
+                        "mailbox": mailbox["conductor"],
                         "messages": incoming,
                     }
         return POLICY.next_action(state, observation, remaining)
@@ -889,7 +905,7 @@ def main(argv: list[str] | None = None) -> int:
             output = initialize(args)
         else:
             directory = args.task_dir.expanduser().resolve()
-            # Atomic snapshots and the independent message channel remain readable
+            # Atomic snapshots and the independent message mailbox remain readable
             # while a foreground dispatch owns the task's mutation lease.
             if args.action in {"show", "next"}:
                 state = load(directory)

@@ -7,6 +7,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -17,6 +19,7 @@ RUNNER = fixtures.RUNNER
 SUPPORT = RUNNER.bundled_module("execution_support")
 USAGE = RUNNER.bundled_module("usage")
 COORDINATOR = RUNNER.bundled_module("coordinator")
+MAILBOX = RUNNER.bundled_module("peer_mailbox")
 
 
 def sample_usage(input_tokens=1000, cached=400, writes=100, output=200):
@@ -555,6 +558,110 @@ class CoordinatorTests(unittest.TestCase):
         )
         self.assertEqual((code, checked["runner_status"]), (0, "verification_mutation"))
 
+    def test_investigation_can_start_without_a_hypothesis_and_is_audited_read_only(self):
+        with mock.patch.dict(os.environ, {"FAKE_NO_CHANGE": "1"}):
+            code, run = self.start("explore", "investigation")
+        self.assertEqual((code, run["runner_status"]), (0, "completed"))
+        result = json.loads(Path(run["result_path"]).read_text())
+        self.assertEqual((result["allowed_paths"], result["expected_changes"]), ([], False))
+        code, writing = self.start("bad-explore", "investigation")
+        self.assertEqual((code, writing["runner_status"]), (0, "scope_violation"))
+
+    def test_claude_cli_dispatch_is_supported_when_host_is_not_claude(self):
+        state = COORDINATOR.load(self.directory)
+        state["host"] = "codex"
+        COORDINATOR.save(self.directory, state)
+        with mock.patch.dict(os.environ, {"FAKE_NO_CHANGE": "1"}):
+            code, run = self.call(
+                "dispatch",
+                "--kind",
+                "investigation",
+                "--request-id",
+                "claude-research",
+                "--engine",
+                "claude",
+                "--model",
+                "sonnet",
+            )
+        self.assertEqual((code, run["runner_status"]), (0, "completed"))
+
+    def test_readonly_observation_commands_remain_available_under_dispatch_lock(self):
+        with SUPPORT.workspace_lease(self.directory, RUNNER.default_agent_cache_dir() / "coordinator-locks"):
+            code, shown = self.call("show")
+            self.assertEqual((code, shown["status"]), (0, "active"))
+            self.assertEqual(self.call("next")[1]["action"], "continue")
+
+    def test_two_investigators_run_concurrently_and_prevent_a_writer(self):
+        directory = self.fixture.external_path
+        release = directory / "release"
+        runs = []
+        try:
+            for index in range(2):
+                started = directory / f"started-{index}"
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "FAKE_NO_CHANGE": "1",
+                        "FAKE_BLOCK": "1",
+                        "FAKE_RELEASE": str(release),
+                        "FAKE_STARTED": str(started),
+                    },
+                ):
+                    code, run = self.start(f"reader-{index}", "investigation", "--background")
+                self.assertEqual((code, run["status"]), (0, "active"))
+                runs.append(run)
+                until = time.monotonic() + 5
+                while not started.exists() and time.monotonic() < until:
+                    time.sleep(0.02)
+                self.assertTrue(started.exists())
+                self.assertEqual(started.read_text(), "started")
+            code, error = self.start("writer", "implementation")
+            self.assertEqual(code, 2)
+            self.assertIn("only active read-only runs can overlap", error)
+        finally:
+            release.touch()
+            for run in runs:
+                result = list(
+                    RUNNER.wait_for_completion_events(
+                        [Path(run["event_path"])], repository=None, timeout_seconds=10, poll_seconds=0.02
+                    )
+                )[0]
+                self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.call("recover")[1]["budget"]["used"], 2)
+
+    def test_consultant_keeps_original_context_and_prior_results(self):
+        state = COORDINATOR.load(self.directory)
+        state["task_spec"]["context_packet"] = {"decisions": ["Keep the public API"], "evidence": ["Original trace"]}
+        COORDINATOR.save(self.directory, state)
+        with mock.patch.dict(os.environ, {"FAKE_NO_CHANGE": "1"}):
+            _, investigation = self.start("explore", "investigation")
+            code, run = self.start("consult", "consultation", "--packet", str(self.packet))
+        self.assertEqual((code, run["runner_status"]), (0, "completed"))
+        spec = json.loads((Path(run["result_path"]).parent.parent / "task-spec.json").read_text())
+        self.assertEqual(spec["context_packet"]["decisions"][0], "Keep the public API")
+        self.assertEqual(
+            spec["context_packet"]["evidence"],
+            [
+                "Original trace",
+                "Callback ran after cancellation",
+                "Prior investigation result: " + investigation["result_path"],
+            ],
+        )
+
+    def test_reader_leases_allow_multiple_readers_and_exclude_writers(self):
+        with tempfile.TemporaryDirectory() as cache:
+            with SUPPORT.workspace_lease(self.directory, Path(cache), read_only=True):
+                with SUPPORT.workspace_lease(self.directory, Path(cache), read_only=True):
+                    with self.assertRaisesRegex(SUPPORT.ContractError, "another executor"):
+                        with SUPPORT.workspace_lease(self.directory, Path(cache)):
+                            self.fail("a writer was granted beside readers")
+            with SUPPORT.workspace_lease(self.directory, Path(cache)):
+                with self.assertRaisesRegex(SUPPORT.ContractError, "another executor"):
+                    with SUPPORT.workspace_lease(self.directory, Path(cache), read_only=True):
+                        self.fail("a reader was granted beside a writer")
+            with SUPPORT.workspace_lease(self.directory, Path(cache), read_only=True):
+                pass
+
     def test_native_host_handoff_holds_lease_and_audits_before_review(self):
         code, run = self.call(
             "dispatch",
@@ -574,6 +681,41 @@ class CoordinatorTests(unittest.TestCase):
             "test -f allowed/output.txt",
         )
         self.assertEqual(code, 0, run)
+        mailbox = run["mailbox"]
+        worker = MAILBOX.load(MAILBOX.peer_path(MAILBOX.root(), mailbox["worker"]))
+        conductor = MAILBOX.load(MAILBOX.peer_path(MAILBOX.root(), mailbox["conductor"]))
+        question = MAILBOX.send(
+            MAILBOX.root(),
+            sender=worker,
+            to=mailbox["conductor"],
+            text="Should I trace the callback?",
+            kind="question",
+            client_id="q1",
+        )
+        response = self.call("next")[1]
+        self.assertEqual((response["action"], response["mailbox"]), ("respond", mailbox["conductor"]))
+        self.assertEqual(response["messages"][0]["id"], question["id"])
+        answer = MAILBOX.send(
+            MAILBOX.root(),
+            sender=conductor,
+            to=mailbox["worker"],
+            text="Yes, inspect its cancellation path.",
+            kind="reply",
+            client_id="a1",
+            reply_to="q1",
+        )
+        self.assertEqual(
+            MAILBOX.wait(MAILBOX.root(), mailbox["worker"], timeout=0.1, reply_to="q1")["messages"][0]["text"],
+            answer["text"],
+        )
+        MAILBOX.send(
+            MAILBOX.root(),
+            sender=worker,
+            to=mailbox["conductor"],
+            text="Audit report is ready.",
+            kind="update",
+            client_id="ready-update",
+        )
         packet = self.fixture.external_path / "native.json"
         try:
             with self.assertRaisesRegex(SUPPORT.ContractError, "another executor"):
@@ -602,6 +744,18 @@ class CoordinatorTests(unittest.TestCase):
             self.assertEqual(code, 0, finished)
             self.assertEqual((code, finished["runner_status"]), (0, "completed"), finished)
             result = COORDINATOR.read(Path(finished["result_path"]))
+            self.assertEqual(result["mailbox"], mailbox)
+            review_message = self.call("next")[1]
+            self.assertEqual((review_message["action"], review_message["run_status"]), ("review_message", "completed"))
+            with self.assertRaisesRegex(MAILBOX.MailboxError, "run is closed"):
+                MAILBOX.send(
+                    MAILBOX.root(),
+                    sender=conductor,
+                    to=mailbox["worker"],
+                    text="Late message",
+                    kind="update",
+                    client_id="late",
+                )
             self.assertEqual(result["verification"]["status"], "passed")
             self.assertIsNone(result["resolved_model"])
             self.assertIsNone(result["effort"]["observed"])
@@ -614,6 +768,84 @@ class CoordinatorTests(unittest.TestCase):
         finally:
             if COORDINATOR.NATIVE.process_state(run) == "active":
                 os.kill(run["pid"], 15)
+
+    def test_live_worker_question_wakes_event_wait_and_coordinator_next(self):
+        executable = self.fixture.external_path / "codex"
+        source = executable.read_text()
+        source = source.replace(
+            "    prompt = sys.stdin.read()",
+            """    prompt = sys.stdin.read()
+    answer = subprocess.run([sys.executable, os.environ['FAKE_MAILBOX_RUNNER'], 'mailbox', 'ask',
+                             '--id', 'which-version', '--text', 'Which client version?', '--timeout', '10'],
+                            capture_output=True, text=True, check=True)
+    pathlib.Path(os.environ['FAKE_ANSWER']).write_text(answer.stdout)
+""",
+        )
+        executable.write_text(source)
+        answer_path = self.fixture.external_path / "answer.json"
+        with mock.patch.dict(
+            os.environ,
+            {"FAKE_NO_CHANGE": "1", "FAKE_MAILBOX_RUNNER": str(fixtures.SCRIPT), "FAKE_ANSWER": str(answer_path)},
+        ):
+            code, run = self.start("live", "investigation", "--background")
+        self.assertEqual((code, run["status"]), (0, "active"))
+        watched = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(fixtures.SCRIPT),
+                "events",
+                "wait",
+                run["event_path"],
+                "--messages",
+                "--timeout",
+                "10s",
+                "--poll-seconds",
+                ".02",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )
+        self.assertEqual(watched.returncode, 0, watched.stderr)
+        signal = json.loads(watched.stdout)
+        self.assertEqual(signal["messages"][0]["text"], "Which client version?")
+        self.assertEqual(signal["mailbox"], run["mailbox"]["conductor"])
+        response = self.call("next")[1]
+        self.assertEqual((response["action"], response["mailbox"]), ("respond", run["mailbox"]["conductor"]))
+        reply = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(fixtures.SCRIPT),
+                "mailbox",
+                "send",
+                "--session",
+                run["mailbox"]["conductor"],
+                "--to",
+                run["mailbox"]["worker"],
+                "--kind",
+                "reply",
+                "--id",
+                "version-answer",
+                "--reply-to",
+                "which-version",
+                "--text",
+                "Client 2",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(reply.returncode, 0, reply.stderr)
+        completed = list(
+            RUNNER.wait_for_completion_events(
+                [Path(run["event_path"])], repository=None, timeout_seconds=10, poll_seconds=0.02
+            )
+        )[0]
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(json.loads(answer_path.read_text())["messages"][0]["text"], "Client 2")
+        self.assertEqual(self.call("recover")[1]["budget"]["used"], 1)
 
     def test_claim_cannot_verify_an_excerpt_absent_from_the_source(self):
         self.reviewed_evidence()

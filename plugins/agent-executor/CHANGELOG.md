@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Run messaging now uses the mailbox: `messages` is replaced by `mailbox`, and `AGENT_CHANNEL` by
+  `AGENT_MAILBOX`; runs started before this upgrade keep no live channel.
+
 ## 0.15.0
 
 - A machine-wide peer mailbox lets Claude Code, Codex, Antigravity and OpenCode sessions list each

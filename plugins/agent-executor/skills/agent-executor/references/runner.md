@@ -87,9 +87,10 @@ agy slugs use their base model's tariff. It is not an invoice. See
 
 Final-state checks cannot prove that no transient or external side effect occurred.
 
-Every new run also has a [live message channel](communication.md). Questions and replies use
-ordinary CLI tool calls inside the existing executor session; provider text streaming is not
-required. This does not expose internal reasoning or automatically record every native host message.
+Every new run also has dedicated [mailbox sessions](mailbox.md#runs-conductor-and-worker) for conductor
+and worker messages. Questions and replies use ordinary CLI tool calls inside the existing executor
+session; provider text streaming is not required. This does not expose internal reasoning or automatically
+record every native host message.
 
 ## Steering a running job
 

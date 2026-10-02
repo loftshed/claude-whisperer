@@ -31,6 +31,7 @@ SPEC = importlib.util.spec_from_file_location("agent_executor_runner", SCRIPT)
 assert SPEC and SPEC.loader
 RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
+MAILBOX = RUNNER.bundled_module("peer_mailbox")
 
 
 class TemporaryGitRepository:
@@ -83,6 +84,60 @@ class PathScopeTests(unittest.TestCase):
         ):
             with self.subTest(invalid=invalid), self.assertRaises(RUNNER.RunnerError):
                 RUNNER.normalize_repo_paths([invalid], option="--track-path")
+
+
+class RunMessageEventTests(unittest.TestCase):
+    def test_events_wait_messages_returns_the_run_mailbox_without_marking_read(self):
+        with tempfile.TemporaryDirectory(prefix="agent-run-message-event-") as directory:
+            root = Path(directory)
+            with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(root / "cache")}):
+                event_path = RUNNER.prepare_completion_event_path()
+                result_path = root / "result.json"
+                info = MAILBOX.open_run(
+                    MAILBOX.root(),
+                    event_path.stem,
+                    worker_harness="claude",
+                    repository=root,
+                    result_path=result_path,
+                    deadline=(RUNNER.dt.datetime.now(RUNNER.dt.UTC) + RUNNER.dt.timedelta(minutes=5)).isoformat(),
+                    worker_pid=None,
+                )
+                worker = MAILBOX.load(MAILBOX.peer_path(MAILBOX.root(), info["worker"]))
+                question = MAILBOX.send(
+                    MAILBOX.root(),
+                    sender=worker,
+                    to=info["conductor"],
+                    text="Need the target version.",
+                    kind="question",
+                    client_id="version-question",
+                )
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(
+                        RUNNER.events_main(
+                            ["wait", str(event_path), "--messages", "--timeout", "1s", "--poll-seconds", ".01"]
+                        ),
+                        0,
+                    )
+
+                signal = json.loads(output.getvalue())
+                self.assertEqual(signal["schema"], "agent-executor.message-signal.v1")
+                self.assertEqual(signal["mailbox"], info["conductor"])
+                self.assertEqual(signal["messages"][0]["id"], question["id"])
+                self.assertIsNone(signal["run_status"])
+                self.assertIsNone(MAILBOX.messages(MAILBOX.root(), info["conductor"])[0]["readAt"])
+
+
+class RemovedMessagesCommandTests(unittest.TestCase):
+    def test_messages_command_points_to_mailbox_and_exits_with_code_four(self):
+        result = subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "messages", "send"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 4)
+        self.assertEqual(result.stderr.strip(), "run_agent.py messages was removed; use run_agent.py mailbox.")
 
     def test_scope_violations_respect_directory_prefixes(self) -> None:
         delta = {
@@ -2288,6 +2343,7 @@ class SteerTests(unittest.TestCase):
             "event_id": values["AGENT_EVENT_ID"],
             "result_path": Path(values["AGENT_RESULT"]),
             "pid": int(values["AGENT_JOB_PID"]),
+            "mailbox": values["AGENT_MAILBOX"],
             "capture": Path(environment["FAKE_CAPTURE"]),
             "started": Path(environment["FAKE_STARTED"]),
             "release": Path(environment["FAKE_RELEASE"]),
@@ -2336,6 +2392,18 @@ class SteerTests(unittest.TestCase):
         job = self.launch(
             extra_env={"FAKE_RESUME_SLEEP": "1.5", "FAKE_LEASE_PROBE": str(cache / "worktree-locks-v1" / f"{key}.lock")}
         )
+        with mock.patch.dict(os.environ, self.environment()):
+            mailbox = RUNNER.bundled_module("peer_mailbox")
+            mailbox_info = mailbox.run_info(mailbox.root(), job["event_id"])
+            worker = mailbox.load(mailbox.peer_path(mailbox.root(), mailbox_info["worker"]))
+            question = mailbox.send(
+                mailbox.root(),
+                sender=worker,
+                to=mailbox_info["conductor"],
+                text="Does steering keep this conversation?",
+                kind="question",
+                client_id="before-steer",
+            )
         message = "New lead: the root cause is in the tokenizer, not the parser."
         exit_code, output = self.steer(job["event_id"], message, "--cwd", str(self.repository.path))
         self.assertEqual(exit_code, 0)
@@ -2357,6 +2425,10 @@ class SteerTests(unittest.TestCase):
         self.assertEqual(event["steered_from"], [job["event_id"]])
         result = json.loads(Path(values["AGENT_RESULT"]).read_text(encoding="utf-8"))
         self.assertEqual((result["status"], result["verification"]["status"]), ("completed", "passed"))
+        self.assertEqual(result["mailbox"]["run"], job["event_id"])
+        self.assertEqual(result["mailbox"]["conductor"], job["mailbox"])
+        with mock.patch.dict(os.environ, self.environment()):
+            self.assertEqual(mailbox.run_history(mailbox.root(), job["event_id"])["messages"][0]["id"], question["id"])
         self.assertEqual(result["command"][1:4], ["exec", "resume", "codex-thread-1"])
         self.assertEqual(result["session_id"], "codex-thread-1")
         self.assertEqual(result["allowed_paths"], ["allowed"])

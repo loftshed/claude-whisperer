@@ -188,7 +188,7 @@ def audit(
         "session_id": packet["native_handle"],
         "native_event_id": packet["event_id"],
         "transport": "native",
-        "channel_path": run.get("channel_path"),
+        "mailbox": run.get("mailbox"),
         "git_before": before,
         "git_identity_before": identity,
         "git_after_executor": after_executor,

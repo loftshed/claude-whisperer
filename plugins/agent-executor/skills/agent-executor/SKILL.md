@@ -138,9 +138,9 @@ never blocks OpenCode.
    Before a new run in a repository, read its inbox once (`events --cwd <repo>`). Details:
    [references/completion.md](references/completion.md).
 
-4. While supervising, handle live questions and updates through the run's `AGENT_CHANNEL`.
-   For foreground runs without a completion event, use `messages wait CHANNEL --recipient conductor`.
-   See [references/communication.md](references/communication.md). Once complete, review `result.json`,
+4. While supervising, handle live questions and updates through the run's `AGENT_MAILBOX` session.
+   For foreground runs without a completion event, use `run_agent.py mailbox wait --session <AGENT_MAILBOX>`.
+   See [references/mailbox.md](references/mailbox.md). Once complete, review `result.json`,
    starting with `review`: `status`, `task_outcome`, `verification`, `run_delta`,
    `scope_violations`, `history_violations`, `provider_error`. Then read the full diff and map every
    acceptance criterion to code, a test or an observation. A passed runner gate need not be rerun.
@@ -171,9 +171,9 @@ that run; inspect any proposed changes independently before deciding what can be
 
 ## Steer a running job
 
-For ordinary questions, answers, and discoveries, use the live message channel. It preserves the
+For ordinary questions, answers, and discoveries, use the run mailbox. It preserves the
 running executor and consumes no additional executor invocation. Steering is for an urgent change
-that cannot wait for the worker's next communication checkpoint.
+that cannot wait for the worker's next mailbox checkpoint.
 
 When you learn something mid-run that should change a detached job's direction (a new root-cause
 lead, a wrong assumption), steer it instead of killing and relaunching, which loses its context:

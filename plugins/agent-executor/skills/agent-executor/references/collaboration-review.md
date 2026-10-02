@@ -5,23 +5,23 @@ in the working checkout, which the installed skill hub links to. No provider mod
 
 ## Gaps addressed
 
-| Gap                                                                                 | Change                                                                                                                      |
-| ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| A worker could only request consultation in its terminal BLOCKED/FAILED report      | A per-run channel carries questions, replies and updates while the existing executor continues                              |
-| Completion-only waits could leave a worker question unseen                          | `events wait/follow --messages` returns for messages as well as completion; ordinary foreground runs expose `AGENT_CHANNEL` |
-| Foreground dispatch held the task lease and prevented status/next-action inspection | `show` and `next` read atomic snapshots without taking that mutation lease; message writes use their own lock               |
-| All workers took exclusive worktree leases                                          | Empty-scope readers share a lease, while writers remain exclusive                                                           |
-| Coordinator dispatch serialized even independent research                           | Background dispatch returns a durable handle and permits overlapping read-only kinds                                        |
-| Consultation required a known narrow question and hypothesis                        | Investigation mode lets the worker choose and revise its approach within the objective                                      |
-| Consultation and correction could discard task context                              | Original decisions/evidence survive; later briefs point to prior finished results                                           |
-| Coordinator rejected Claude CLI runs after the runner gained Claude support         | Cross-provider Claude dispatch now uses the installed adapter; native-host rules still apply                                |
-| OpenCode could not identify itself as the coordinator host                          | OpenCode is recognized as a native host                                                                                     |
+| Gap                                      | Change                                                             |
+| ---------------------------------------- | ------------------------------------------------------------------ |
+| Worker questions required final reports  | Run mailbox carries questions, replies and updates live.           |
+| Completion waits hid worker questions    | `events wait/follow --messages` wakes; output has `AGENT_MAILBOX`. |
+| Dispatch blocked observation             | `show` and `next` read snapshots without the mutation lease.       |
+| Workers held exclusive leases            | Empty-scope readers share; writers remain exclusive.               |
+| Coordinator serialized research          | Background read-only runs can overlap.                             |
+| Narrow questions were required           | Investigations can choose and revise their approach.               |
+| Later runs lost context                  | Prior decisions and results stay in briefs.                        |
+| Claude CLI runs were rejected cross-host | External Claude dispatch uses its adapter.                         |
+| OpenCode was not a recognized host       | OpenCode is recognized.                                            |
 
 ## Remaining boundaries and follow-up work
 
 - Messages are cooperative tool calls. A worker sees conductor updates at checkpoints or while
   waiting for an answer. Queuing a message does not prove it was read. Urgent detached-job changes
-  still use steering. Native messages outside this channel are not automatically mirrored.
+  still use steering. Native messages outside the run mailbox are not automatically mirrored.
 - The host must remain available to supervise. A filesystem event cannot restart an ended chat turn.
   Waits, explicit acknowledgments and message history support reconnection; they do not supply an
   always-running conductor. Native guard interruption remains the host's responsibility.
@@ -33,8 +33,8 @@ in the working checkout, which the installed skill hub links to. No provider mod
   integration ownership; this change does not introduce automatic worktree creation or merging.
 - Investigation is bounded by the existing task deadline and invocation allowance. Narrow
   consultations still have their separate limit. Expanding exploration does not remove budgets.
-- Adapters and communication were exercised with deterministic local executor processes. This
+- Adapters and run messaging were exercised with deterministic local executor processes. This
   verifies transport and audit behavior, not whether every provider/model consistently follows
   the new checkpoint instructions. A paid cross-provider trial was not performed.
-- The live UI is still future work. `messages history` provides explicit exchanges and receipt
+- The live UI is still future work. `mailbox history` provides explicit exchanges and receipt
   timestamps for it, but does not expose private reasoning or every tool event.
