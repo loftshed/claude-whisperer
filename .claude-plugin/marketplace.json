@@ -18,11 +18,6 @@
       "name": "bailout",
       "source": "./plugins/bailout",
       "description": "Hand off a task before the five-hour Claude usage window runs out; ends a /goal loop after the handoff."
-    },
-    {
-      "name": "claude-migrate",
-      "source": "./plugins/claude-migrate",
-      "description": "Move your whole Claude Code setup to a new Mac: every profile, skills, plugins, memory and history in one encrypted archive, restored with a doctor checklist."
     }
   ],
   "metadata": {
