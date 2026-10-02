@@ -4267,6 +4267,8 @@ def main() -> int:
     argv = sys.argv[1:]
     if argv and argv[0] == "messages":
         return bundled_module("communication").main(argv[1:])
+    if argv and argv[0] == "mailbox":
+        return bundled_module("peer_mailbox").main(argv[1:])
     if argv and argv[0] == "steer":
         return steer_main(argv[1:])
     if argv and argv[0] == "models":
