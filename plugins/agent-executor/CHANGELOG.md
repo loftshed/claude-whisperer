@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.15.0
 
 - A machine-wide peer mailbox lets Claude Code, Codex, Antigravity and OpenCode sessions list each
   other and exchange messages: the `peer-mailbox` MCP server (`peers`, `send`, `inbox`, `wait`, `ack`),
