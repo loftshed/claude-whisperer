@@ -792,6 +792,9 @@ def host_action(args: argparse.Namespace, directory: Path, state: dict[str, Any]
                 if run["status"] not in {"reserved", "active"}:
                     raise CoordinationError("recover reservation readiness before attaching")
                 run.update(native_handle=handle, status="active", attached_at=RUNNER.utc_now())
+                if (run.get("mailbox") or {}).get("run"):
+                    # The native worker gets no AGENT_MAILBOX_SESSION; tell presence which session it is.
+                    MAILBOX.delegate(MAILBOX.root(), handle, run["mailbox"]["run"])
             else:
                 NATIVE.complete(directory, state, run, packet, RUNNER)
                 import_result(run, state)

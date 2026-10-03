@@ -158,8 +158,9 @@ class Server:
         return f"{self.harness}-{hashlib.sha1(seed.encode()).hexdigest()[:16]}"
 
     def me(self, meta: dict[str, Any], state: str = "busy") -> dict[str, Any]:
-        return mailbox.register(
-            self.base, session=self.session(meta), harness=self.harness, cwd=os.getcwd(), pid=self.pid, state=state
+        session = self.session(meta)
+        return mailbox.refresh(
+            self.base, session=session, harness=self.harness, cwd=os.getcwd(), pid=self.pid, source="mcp", state=state
         )
 
     def call(
@@ -208,11 +209,14 @@ class Server:
                         return mailbox.render_all(claimed)
                     # A concurrent wait claimed this mail first; keep waiting for the rest of the timeout.
             finally:
-                self.me(meta, "busy")
+                # Only a record that still exists: the session may have ended while it waited.
+                mailbox.annotate(self.base, me["session"], state="busy")
         if name == "ack":
             return json.dumps({"acknowledged": mailbox.mark_read(self.base, me["session"], list(arguments["ids"]))})
         if name == "focus":
             mailbox.set_focus(self.base, me["session"], arguments["text"])
+            if me.get("delegatedRun"):
+                return "focus set; as a delegated run worker, leave coordination to your conductor"
             return (
                 mailbox.describe_colleagues(mailbox.colleagues(self.base, me), me)
                 or "focus set; no other agents in this repository"

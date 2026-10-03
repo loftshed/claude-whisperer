@@ -30,7 +30,8 @@ start the Claude Code and Codex hooks list the other live sessions in the same r
 branch, state and declared `focus`, and repeat it on a later prompt only when that set changes. Hosts without
 hooks get the same rule from the MCP instructions: call `peers` first, where same-repository sessions come
 first. Agents set their own line with `focus` (CLI: `run_agent.py mailbox focus --text '...'`) and agree on a
-split before editing files another session is working on.
+split before editing files another session is working on. A session launched by the runner is listed as a delegated run worker and gets
+no such notice itself: its conductor coordinates for it. When the last colleague leaves, the next prompt says so.
 
 ## Runs: conductor and worker
 

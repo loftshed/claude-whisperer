@@ -146,9 +146,9 @@ class MailboxTests(unittest.TestCase):
 
     def test_a_reused_pid_does_not_keep_a_dead_peer_live(self):
         peer = self.peer("codex-session-reuse", "codex", "/work/a")
-        self.assertTrue(peer["pidStarted"])
+        self.assertTrue(peer["pidBirth"])
         path = MAILBOX.peer_path(self.base, peer["session"])
-        MAILBOX.write(path, {**MAILBOX.load(path), "pidStarted": "Thu Jan  1 00:00:00 1970"})
+        MAILBOX.write(path, {**MAILBOX.load(path), "pidBirth": "Thu Jan  1 00:00:00 1970"})
         self.assertNotIn(peer["session"], [item["session"] for item in MAILBOX.peers(self.base)])
 
     def test_an_incomplete_peer_record_is_pruned_and_does_not_break_lookup(self):
@@ -218,6 +218,12 @@ class MailboxTests(unittest.TestCase):
         MAILBOX.write(MAILBOX.peer_path(self.base, odd["session"]), odd)
         self.assertIn(odd["session"], [peer["session"] for peer in MAILBOX.peers(self.base)])
 
+    def test_process_identity_does_not_depend_on_the_callers_time_zone(self):
+        with mock.patch.dict(os.environ, {"TZ": "America/Toronto"}):
+            peer = self.peer("codex-session-tz", "codex", "/work/a")
+        with mock.patch.dict(os.environ, {"TZ": "Asia/Tokyo"}):
+            self.assertIn(peer["session"], [item["session"] for item in MAILBOX.peers(self.base)])
+
     def test_pruning_keeps_a_peer_refreshed_after_the_stale_read(self):
         stale = dict(self.codex, pid=None, lastSeenAt="2000-01-01T00:00:00Z")
         path = MAILBOX.peer_path(self.base, stale["session"])
@@ -283,6 +289,168 @@ class MailboxTests(unittest.TestCase):
         self.assertTrue(
             listing.splitlines()[1].endswith("rewriting the login form") or "same repository" in listing.splitlines()[1]
         )
+
+    def test_the_last_colleague_leaving_is_announced(self):
+        repo = self.git_checkout("leaving")
+        self.hook("codex-leave-1", "codex", repo, "SessionStart")
+        self.assertIn(
+            "codex",
+            self.hook("claude-leave-2", "claude", repo, "SessionStart")["hookSpecificOutput"]["additionalContext"],
+        )
+        self.hook("codex-leave-1", "codex", repo, "SessionEnd")
+        update = self.hook("claude-leave-2", "claude", repo, "UserPromptSubmit")
+        self.assertIn("have ended", update["hookSpecificOutput"]["additionalContext"])
+        self.assertIsNone(self.hook("claude-leave-2", "claude", repo, "UserPromptSubmit"))
+
+    def test_a_runner_launched_worker_is_labelled_and_gets_no_colleague_notice(self):
+        repo = self.git_checkout("delegated")
+        self.hook("claude-conductor", "claude", repo, "SessionStart")
+        with mock.patch.object(MAILBOX, "detect_harness", return_value="claude"):
+            MAILBOX.open_run(
+                self.base,
+                "job",
+                worker_harness="codex",
+                repository=repo,
+                result_path=repo / "r.json",
+                deadline=(dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)).isoformat(),
+                worker_pid=os.getpid(),
+            )
+        with mock.patch.dict(os.environ, {"AGENT_MAILBOX_SESSION": "run-job-worker"}):
+            self.assertIsNone(self.hook("codex-worker-host", "codex", repo, "SessionStart"))
+        notice = self.hook("claude-conductor", "claude", repo, "UserPromptSubmit")["hookSpecificOutput"][
+            "additionalContext"
+        ]
+        self.assertIn("delegated run worker", notice)
+
+    def test_becoming_a_delegated_worker_does_not_announce_departures(self):
+        repo = self.git_checkout("adopted")
+        self.hook("codex-around", "codex", repo, "SessionStart")
+        self.hook("claude-adopted", "claude", repo, "SessionStart")
+        with mock.patch.object(MAILBOX, "detect_harness", return_value="claude"):
+            MAILBOX.open_run(
+                self.base,
+                "adopt",
+                worker_harness="claude",
+                repository=repo,
+                result_path=repo / "r.json",
+                deadline=(dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)).isoformat(),
+                worker_pid=os.getpid(),
+            )
+        MAILBOX.delegate(self.base, "claude-adopted", "adopt")
+        self.assertIsNone(self.hook("claude-adopted", "claude", repo, "UserPromptSubmit"))
+
+    def test_cli_calls_apply_and_clear_the_delegation_label(self):
+        result = Path(self.temporary.name) / "cli-run.json"
+        with mock.patch.object(MAILBOX, "detect_harness", return_value="claude"):
+            MAILBOX.open_run(
+                self.base,
+                "clirun",
+                worker_harness="codex",
+                repository=Path(self.temporary.name),
+                result_path=result,
+                deadline=(dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)).isoformat(),
+                worker_pid=os.getpid(),
+            )
+        MAILBOX.delegate(self.base, "native-cli-worker", "clirun")
+        command = [
+            sys.executable,
+            "-B",
+            str(SCRIPTS / "run_agent.py"),
+            "mailbox",
+            "focus",
+            "--session",
+            "native-cli-worker",
+            "--harness",
+            "codex",
+            "--text",
+            "x",
+        ]
+        environment = {**os.environ, "AGENT_EXECUTOR_HOME": str(self.base.parent)}
+        environment.pop("AGENT_MAILBOX_SESSION", None)
+        subprocess.run(command, capture_output=True, timeout=20, env=environment, check=True)
+        self.assertEqual(MAILBOX.load(MAILBOX.peer_path(self.base, "native-cli-worker"))["delegatedRun"], "clirun")
+        result.write_text(json.dumps({"finished_at": "2026-10-03T00:00:00Z", "status": "completed"}))
+        subprocess.run(command, capture_output=True, timeout=20, env=environment, check=True)
+        self.assertIsNone(MAILBOX.load(MAILBOX.peer_path(self.base, "native-cli-worker"))["delegatedRun"])
+
+    def test_cli_peers_marks_the_callers_current_repository(self):
+        repo = self.git_checkout("cli-here")
+        self.hook("codex-cli-1", "codex", repo, "SessionStart")
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(SCRIPTS / "run_agent.py"),
+                "mailbox",
+                "peers",
+                "--session",
+                "fresh",
+                "--harness",
+                "opencode",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            cwd=repo,
+            env={**os.environ, "AGENT_EXECUTOR_HOME": str(self.base.parent)},
+        )
+        first = result.stdout.splitlines()[0]
+        self.assertIn("codex-cli-1"[:8], first)
+        self.assertIn("same repository", first)
+
+    def test_cli_peers_outside_git_marks_no_repository(self):
+        repo = self.git_checkout("was-here")
+        self.hook("codex-was-1", "codex", repo, "SessionStart")
+        self.hook("claude-was-2", "claude", repo, "SessionStart")
+        outside = Path(self.temporary.name) / "plain"
+        outside.mkdir()
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(SCRIPTS / "run_agent.py"),
+                "mailbox",
+                "peers",
+                "--session",
+                "claude-was-2",
+                "--harness",
+                "claude",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            cwd=outside,
+            env={**os.environ, "AGENT_EXECUTOR_HOME": str(self.base.parent)},
+        )
+        self.assertNotIn("same repository", result.stdout)
+
+    def test_a_cli_call_from_another_directory_keeps_the_hooked_directory(self):
+        repo = self.git_checkout("hooked-repo")
+        self.hook("codex-hooked", "codex", repo, "SessionStart")
+        elsewhere = Path(self.temporary.name) / "scratch"
+        elsewhere.mkdir()
+        subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(SCRIPTS / "run_agent.py"),
+                "mailbox",
+                "focus",
+                "--session",
+                "codex-hooked",
+                "--harness",
+                "codex",
+                "--text",
+                "x",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            cwd=elsewhere,
+            check=True,
+            env={**os.environ, "AGENT_EXECUTOR_HOME": str(self.base.parent)},
+        )
+        self.assertEqual(MAILBOX.load(MAILBOX.peer_path(self.base, "codex-hooked"))["cwd"], str(repo))
 
     def test_dead_pids_are_pruned_from_listings(self):
         child = subprocess.Popen([sys.executable, "-c", "pass"])
@@ -1468,6 +1636,96 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("no other agents", replies[1]["result"]["content"][0]["text"])
         base = Path(self.temporary.name) / "mailbox-v1"
         self.assertEqual(MAILBOX.load(MAILBOX.peer_path(base, "codex-focus"))["focus"], "fixing the parser")
+
+    def test_mcp_calls_keep_the_directory_the_hooks_recorded(self):
+        base = Path(self.temporary.name) / "mailbox-v1"
+        repo = Path(self.temporary.name) / "hooked"
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        MAILBOX.register(
+            base, session="claude-moved", harness="claude", cwd=str(repo), pid=os.getpid(), cwd_source="hook"
+        )
+        self.exchange("claude-code", [self.call("focus", {"text": "x"}, session="claude-moved")])
+        self.assertEqual(MAILBOX.load(MAILBOX.peer_path(base, "claude-moved"))["cwd"], str(repo))
+
+    def test_a_restarted_hookless_session_uses_its_launch_directory(self):
+        base = Path(self.temporary.name) / "mailbox-v1"
+        MAILBOX.register(base, session="ses_old", harness="opencode", cwd="/gone/away", pid=None)
+        self.exchange(
+            "opencode",
+            [
+                {
+                    "method": "tools/call",
+                    "params": {"name": "peers", "arguments": {}, "_meta": {"ai.opencode/sessionID": "ses_old"}},
+                }
+            ],
+        )
+        self.assertEqual(MAILBOX.load(MAILBOX.peer_path(base, "ses_old"))["cwd"], os.getcwd())
+
+    def test_a_runner_launched_mcp_worker_is_labelled_delegated(self):
+        base = Path(self.temporary.name) / "mailbox-v1"
+        with mock.patch.object(MAILBOX, "detect_harness", return_value="claude"):
+            MAILBOX.open_run(
+                base,
+                "toolrun",
+                worker_harness="opencode",
+                repository=Path(self.temporary.name),
+                result_path=Path(self.temporary.name) / "r.json",
+                deadline=(dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)).isoformat(),
+                worker_pid=os.getpid(),
+            )
+        replies = self.exchange(
+            "opencode",
+            [
+                {
+                    "method": "tools/call",
+                    "params": {
+                        "name": "focus",
+                        "arguments": {"text": "x"},
+                        "_meta": {"ai.opencode/sessionID": "ses_worker"},
+                    },
+                }
+            ],
+            env={**self.env, "AGENT_MAILBOX_SESSION": "run-toolrun-worker"},
+        )
+        self.assertIn("leave coordination to your conductor", replies[1]["result"]["content"][0]["text"])
+        self.assertEqual(MAILBOX.load(MAILBOX.peer_path(base, "ses_worker"))["delegatedRun"], "toolrun")
+
+    def test_a_session_resumed_outside_its_finished_run_is_ordinary_again(self):
+        base = Path(self.temporary.name) / "mailbox-v1"
+        result = Path(self.temporary.name) / "done.json"
+        with mock.patch.object(MAILBOX, "detect_harness", return_value="claude"):
+            MAILBOX.open_run(
+                base,
+                "finished",
+                worker_harness="opencode",
+                repository=Path(self.temporary.name),
+                result_path=result,
+                deadline=(dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)).isoformat(),
+                worker_pid=os.getpid(),
+            )
+        focus = {
+            "method": "tools/call",
+            "params": {"name": "focus", "arguments": {"text": "x"}, "_meta": {"ai.opencode/sessionID": "ses_resumed"}},
+        }
+        self.exchange("opencode", [focus], env={**self.env, "AGENT_MAILBOX_SESSION": "run-finished-worker"})
+        result.write_text(json.dumps({"finished_at": "2026-10-03T00:00:00Z", "status": "completed"}))
+        replies = self.exchange("opencode", [focus])
+        self.assertNotIn("conductor", replies[1]["result"]["content"][0]["text"])
+        self.assertIsNone(MAILBOX.load(MAILBOX.peer_path(base, "ses_resumed")).get("delegatedRun"))
+
+    def test_a_session_that_ended_while_waiting_stays_ended(self):
+        base = Path(self.temporary.name) / "mailbox-v1"
+        module = RUNNER.bundled_module("mailbox_mcp")
+        server = module.Server(base=base, environ={})
+        server.identify({"name": "codex-mcp-client"})
+
+        def end_session_meanwhile(*args, **kwargs):
+            MAILBOX.unregister(base, "codex-ending")  # SessionEnd arrives while the wait is pending
+            return {"status": "timed_out", "messages": []}
+
+        with mock.patch.object(module.mailbox, "wait", side_effect=end_session_meanwhile):
+            server.call("wait", {"timeoutSeconds": 1}, {"sessionId": "codex-ending"})
+        self.assertFalse(MAILBOX.peer_path(base, "codex-ending").exists())
 
     def test_a_null_request_id_is_refused(self):
         wait = self.call("wait", {"timeoutSeconds": 30}, session="codex-null") | {"jsonrpc": "2.0", "id": None}

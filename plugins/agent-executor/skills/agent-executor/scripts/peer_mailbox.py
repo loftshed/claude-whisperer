@@ -515,10 +515,10 @@ def is_live(peer: dict[str, Any], moment: dt.datetime | None = None) -> bool:
     except (AttributeError, TypeError, ValueError):
         return False
     alive = pid_alive(peer.get("pid"))
-    if alive and peer.get("pidStarted"):
+    if alive and peer.get("pidBirth"):
         # The recorded process itself is still running: present however long it has been idle.
         current = process_started(peer["pid"])
-        if current == peer["pidStarted"]:
+        if current == peer["pidBirth"]:
             return True
         if current is not None:
             return False  # the recorded process ended and its pid now belongs to another one
@@ -528,10 +528,18 @@ def is_live(peer: dict[str, Any], moment: dt.datetime | None = None) -> bool:
 
 
 def process_started(pid: int) -> str | None:
-    """The start time ps reports for a pid, which tells a reused pid from the process recorded."""
+    """The start time ps reports for a pid, which tells a reused pid from the process recorded.
+
+    Fixed to UTC and the C locale: harnesses run with different TZ and LANG, and a stamp rendered in one
+    must compare equal in another. (pidBirth replaced the earlier local-time pidStarted.)
+    """
     try:
         started = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=2
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            env={**os.environ, "TZ": "UTC", "LC_ALL": "C"},
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return None
@@ -600,7 +608,8 @@ def describe_colleagues(rows: list[dict[str, Any]], me: dict[str, Any]) -> str:
     ]
     for peer in rows:
         where = "same checkout" if peer.get("checkout") == me.get("checkout") else f"worktree {peer.get('checkout')}"
-        line = f"- {peer['name']} ({peer['harness']}, {peer['state']}) on {peer.get('branch', '?')}, {where}"
+        role = ", a delegated run worker" if peer.get("delegatedRun") else ""
+        line = f"- {peer['name']} ({peer['harness']}, {peer['state']}{role}) on {peer.get('branch', '?')}, {where}"
         if peer.get("focus"):
             line += f": {peer['focus']}"
         lines.append(line)
@@ -628,6 +637,7 @@ def register(
     cwd: str,
     pid: int | None = None,
     state: str | None = None,
+    cwd_source: str | None = None,
 ) -> dict[str, Any]:
     """Create or refresh presence. A known pid and name survive later refreshes that lack them."""
     if harness not in HARNESSES:
@@ -653,12 +663,14 @@ def register(
             state=state or peer.get("state") or "idle",
         )
         peer["name"] = peer_name(peer["harness"], peer["cwd"], session)
+        if cwd_source:
+            peer["cwdSource"] = cwd_source
         if not is_run_peer(peer):
             for key in ("repo", "checkout", "branch"):
                 peer.pop(key, None)
             peer.update(workspace(peer["cwd"]))
-        if pid and (pid != previous_pid or not peer.get("pidStarted")):
-            peer["pidStarted"] = process_started(pid)
+        if pid and (pid != previous_pid or not peer.get("pidBirth")):
+            peer["pidBirth"] = process_started(pid)
         write(path, peer)
         return peer
 
@@ -1043,7 +1055,7 @@ def prune(base: Path) -> dict[str, int]:
                     with contextlib.suppress(OSError):
                         inbox.rmdir()
                 removed["peers"] += 1
-    for path in (base / "aliases").glob("*.json"):
+    for path in [*(base / "aliases").glob("*.json"), *(base / "delegations").glob("*.json")]:
         with contextlib.suppress(OSError):
             if time.time() - path.stat().st_mtime > MAX_AGE.total_seconds():
                 path.unlink()
@@ -1122,7 +1134,10 @@ def hook(payload: dict[str, Any], *, harness: str | None = None, base: Path | No
     state = {"SessionStart": "idle", "UserPromptSubmit": "busy", "Stop": "idle"}.get(event)
     if state is None:
         return None
-    me = register(base, session=session, harness=harness, cwd=cwd, pid=harness_pid(harness), state=state)
+    me = register(
+        base, session=session, harness=harness, cwd=cwd, pid=harness_pid(harness), state=state, cwd_source="hook"
+    )
+    me = mark_delegated(base, me)
     context = render_all(take(base, session))
     if event == "Stop":
         if not context:
@@ -1130,25 +1145,60 @@ def hook(payload: dict[str, Any], *, harness: str | None = None, base: Path | No
         # New mail arrived during the turn: keep going instead of leaving it unread until the user returns.
         return {"decision": "block", "reason": f"Peer messages arrived while you worked:\n\n{context}"}
     # Who else works in this repository: at session start, and again whenever that set changes.
-    others = colleagues(base, me)
+    others = [] if me.get("delegatedRun") else colleagues(base, me)
     seen = sorted(peer["session"] for peer in others)
-    if event == "SessionStart" or seen != me.get("seenColleagues"):
+    if event == "SessionStart" or seen != me.get("seenColleagues", []):
         notice = describe_colleagues(others, me)
+        if not notice and me.get("seenColleagues") and not me.get("delegatedRun"):
+            notice = "The other agent sessions in this repository have ended; none is working here now."
         if notice:
             context = f"{notice}\n\n{context}" if context else notice
-        remember_colleagues(base, session, seen)
+        annotate(base, session, seenColleagues=seen)
     if not context:
         return None
     return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": context}}
 
 
-def remember_colleagues(base: Path, session: str, seen: list[str]) -> None:
+def delegate(base: Path, session: str, run: str) -> None:
+    """Record that a natively dispatched worker's own session works for this run."""
+    try:
+        key = session_key(session)
+    except MailboxError:
+        return  # a handle that is not a session id never shows up in presence anyway
+    write(base / "delegations" / f"{key}.json", {"run": run})
+    with contextlib.suppress(MailboxError):
+        peer = load(peer_path(base, session))
+        if valid_peer(peer):
+            mark_delegated(base, peer)
+
+
+def mark_delegated(base: Path, me: dict[str, Any]) -> dict[str, Any]:
+    """Label a session the runner launched (it inherits AGENT_MAILBOX_SESSION): its conductor coordinates for it."""
+    run_session = os.environ.get("AGENT_MAILBOX_SESSION", "")
+    if not run_session.startswith("run-"):
+        # A native worker inherits no environment; the coordinator recorded its handle instead.
+        delegation = load(base / "delegations" / f"{session_key(me['session'])}.json")
+        run_session = f"run-{delegation['run']}-worker" if delegation and isinstance(delegation.get("run"), str) else ""
+    try:
+        record = load(peer_path(base, run_session)) if run_session.startswith("run-") else None
+    except MailboxError:
+        record = None
+    # Only while that run is open: a session resumed on its own later is an ordinary colleague again.
+    run = record["run"] if is_run_record(record) and run_status(base, record["run"]) is None else None
+    if me.get("delegatedRun") != run:
+        return annotate(base, me["session"], delegatedRun=run)
+    return me
+
+
+def annotate(base: Path, session: str, **fields: Any) -> dict[str, Any]:
+    """Set extra fields on this session's own record, under the lock register takes."""
     path = peer_path(base, session)
     with locked(path):
         peer = load(path)
         if valid_peer(peer):
-            peer["seenColleagues"] = seen
+            peer.update(fields)
             write(path, peer)
+        return peer or {}
 
 
 def caller(args: argparse.Namespace, base: Path) -> dict[str, Any]:
@@ -1159,13 +1209,35 @@ def caller(args: argparse.Namespace, base: Path) -> dict[str, Any]:
     if is_run_peer(existing):
         return existing
     harness = args.harness or detect_harness()
-    return register(base, session=session, harness=harness, cwd=os.getcwd(), pid=harness_pid(harness))
+    return refresh(base, session=session, harness=harness, cwd=os.getcwd(), pid=harness_pid(harness), source="cli")
 
 
-def table(rows: list[dict[str, Any]], session: str | None, harness: str | None = None) -> str:
+def refresh(
+    base: Path, *, session: str, harness: str, cwd: str, pid: int | None, source: str, state: str | None = None
+) -> dict[str, Any]:
+    """Register a CLI or MCP call. A live session's hooks own its directory: a tool call may run elsewhere."""
+    known = load(peer_path(base, session))
+    hooked = valid_peer(known) and known.get("cwdSource") == "hook" and is_live(known)
+    me = register(
+        base,
+        session=session,
+        harness=harness,
+        cwd=known["cwd"] if hooked else cwd,
+        pid=pid,
+        state=state,
+        cwd_source="hook" if hooked else source,
+    )
+    return mark_delegated(base, me)
+
+
+def table(
+    rows: list[dict[str, Any]], session: str | None, harness: str | None = None, here: dict[str, Any] | None = None
+) -> str:
     if not rows:
         return "no live peers"
-    mine = next((peer for peer in rows if peer["session"] == session), {})
+    own = next((peer for peer in rows if peer["session"] == session), None)
+    # The CLI passes where it runs (outside git: no repository at all); the MCP server passes nothing.
+    mine = here if here is not None else own or {}
     # Sessions in the caller's repository come first: they are the ones that can collide with its edits.
     rows = sorted(rows, key=lambda peer: not (mine.get("repo") and peer.get("repo") == mine.get("repo")))
     lines = []
@@ -1177,6 +1249,8 @@ def table(rows: list[dict[str, Any]], session: str | None, harness: str | None =
         else:
             if mine.get("repo") and peer.get("repo") == mine["repo"]:
                 marks.append("same repository")
+            if peer.get("delegatedRun"):
+                marks.append("delegated run worker")
             if harness and peer["harness"] == harness:
                 marks.append(
                     f"same harness: use {native.split(' ')[0] if native else 'your native agent messaging, if any'}"
@@ -1275,7 +1349,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             rows = peers(base, include_runs=args.runs)
             if args.format != "json":
-                print(table(rows, session, args.harness or detect_harness()))
+                # Mark and sort against the caller's current repository, registered or not.
+                print(table(rows, session, args.harness or detect_harness(), here=workspace(os.getcwd())))
                 return 0
             output = rows
         else:
@@ -1311,7 +1386,7 @@ def main(argv: list[str] | None = None) -> int:
                     output = wait(base, me["session"], timeout=args.timeout, reply_to=args.reply_to, mark=not args.peek)
                 finally:
                     if not is_run_peer(me):
-                        register(base, session=me["session"], harness=me["harness"], cwd=me["cwd"], state="busy")
+                        annotate(base, me["session"], state="busy")  # not if the session ended meanwhile
             else:
                 if args.action == "ack":
                     output = {

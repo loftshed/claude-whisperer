@@ -723,6 +723,10 @@ class CoordinatorTests(unittest.TestCase):
                     self.fail("lease should belong to the native guard")
             packet.write_text(json.dumps({"native_handle": "native-test-session"}))
             self.assertEqual(self.call("native-attach", "--run-id", run["run_id"], "--packet", str(packet))[0], 0)
+            native = MAILBOX.register(
+                MAILBOX.root(), session="native-test-session", harness="codex", cwd=str(self.fixture.repository.path)
+            )
+            self.assertEqual(MAILBOX.mark_delegated(MAILBOX.root(), native).get("delegatedRun"), mailbox["run"])
             (self.fixture.repository.path / "allowed").mkdir(exist_ok=True)
             (self.fixture.repository.path / "allowed/output.txt").write_text("native output\n")
             report = self.fixture.external_path / "native-report.txt"
