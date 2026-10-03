@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.17.0
 
 - Agents see who else works in the same repository: the Claude Code and Codex hooks list other live
   sessions in it (any harness, any worktree) with branch and declared focus at session start and when that
