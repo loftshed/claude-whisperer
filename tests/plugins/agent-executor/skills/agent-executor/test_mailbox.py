@@ -21,6 +21,35 @@ SCRIPTS = Path(MAILBOX.__file__).parent
 SERVER = SCRIPTS / "mailbox_mcp.py"
 
 
+def mailbox_cli(base, *args, cwd=None, check=False):
+    """`run_agent.py mailbox ARGS` against the store at BASE, outside any run."""
+    environment = {**os.environ, "AGENT_EXECUTOR_HOME": str(base.parent)}
+    environment.pop("AGENT_MAILBOX_SESSION", None)
+    return subprocess.run(
+        [sys.executable, "-B", str(SCRIPTS / "run_agent.py"), "mailbox", *args],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        cwd=cwd,
+        env=environment,
+        check=check,
+    )
+
+
+def open_test_run(base, run, *, repository, result_path, worker_harness="codex", worker_pid=None, minutes=5):
+    """A mailbox run as the runner opens it, with a Claude conductor; the worker pid defaults to this process."""
+    with mock.patch.object(MAILBOX, "detect_harness", return_value="claude"):
+        return MAILBOX.open_run(
+            base,
+            run,
+            worker_harness=worker_harness,
+            repository=repository,
+            result_path=result_path,
+            deadline=(dt.datetime.now(dt.UTC) + dt.timedelta(minutes=minutes)).isoformat(),
+            worker_pid=os.getpid() if worker_pid is None else worker_pid,
+        )
+
+
 class MailboxTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -305,16 +334,7 @@ class MailboxTests(unittest.TestCase):
     def test_a_runner_launched_worker_is_labelled_and_gets_no_colleague_notice(self):
         repo = self.git_checkout("delegated")
         self.hook("claude-conductor", "claude", repo, "SessionStart")
-        with mock.patch.object(MAILBOX, "detect_harness", return_value="claude"):
-            MAILBOX.open_run(
-                self.base,
-                "job",
-                worker_harness="codex",
-                repository=repo,
-                result_path=repo / "r.json",
-                deadline=(dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)).isoformat(),
-                worker_pid=os.getpid(),
-            )
+        open_test_run(self.base, "job", repository=repo, result_path=repo / "r.json")
         with mock.patch.dict(os.environ, {"AGENT_MAILBOX_SESSION": "run-job-worker"}):
             self.assertIsNone(self.hook("codex-worker-host", "codex", repo, "SessionStart"))
         notice = self.hook("claude-conductor", "claude", repo, "UserPromptSubmit")["hookSpecificOutput"][
@@ -326,74 +346,25 @@ class MailboxTests(unittest.TestCase):
         repo = self.git_checkout("adopted")
         self.hook("codex-around", "codex", repo, "SessionStart")
         self.hook("claude-adopted", "claude", repo, "SessionStart")
-        with mock.patch.object(MAILBOX, "detect_harness", return_value="claude"):
-            MAILBOX.open_run(
-                self.base,
-                "adopt",
-                worker_harness="claude",
-                repository=repo,
-                result_path=repo / "r.json",
-                deadline=(dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)).isoformat(),
-                worker_pid=os.getpid(),
-            )
+        open_test_run(self.base, "adopt", repository=repo, result_path=repo / "r.json", worker_harness="claude")
         MAILBOX.delegate(self.base, "claude-adopted", "adopt")
         self.assertIsNone(self.hook("claude-adopted", "claude", repo, "UserPromptSubmit"))
 
     def test_cli_calls_apply_and_clear_the_delegation_label(self):
         result = Path(self.temporary.name) / "cli-run.json"
-        with mock.patch.object(MAILBOX, "detect_harness", return_value="claude"):
-            MAILBOX.open_run(
-                self.base,
-                "clirun",
-                worker_harness="codex",
-                repository=Path(self.temporary.name),
-                result_path=result,
-                deadline=(dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)).isoformat(),
-                worker_pid=os.getpid(),
-            )
+        open_test_run(self.base, "clirun", repository=Path(self.temporary.name), result_path=result)
         MAILBOX.delegate(self.base, "native-cli-worker", "clirun")
-        command = [
-            sys.executable,
-            "-B",
-            str(SCRIPTS / "run_agent.py"),
-            "mailbox",
-            "focus",
-            "--session",
-            "native-cli-worker",
-            "--harness",
-            "codex",
-            "--text",
-            "x",
-        ]
-        environment = {**os.environ, "AGENT_EXECUTOR_HOME": str(self.base.parent)}
-        environment.pop("AGENT_MAILBOX_SESSION", None)
-        subprocess.run(command, capture_output=True, timeout=20, env=environment, check=True)
+        focus = ("focus", "--session", "native-cli-worker", "--harness", "codex", "--text", "x")
+        mailbox_cli(self.base, *focus, check=True)
         self.assertEqual(MAILBOX.load(MAILBOX.peer_path(self.base, "native-cli-worker"))["delegatedRun"], "clirun")
         result.write_text(json.dumps({"finished_at": "2026-10-03T00:00:00Z", "status": "completed"}))
-        subprocess.run(command, capture_output=True, timeout=20, env=environment, check=True)
+        mailbox_cli(self.base, *focus, check=True)
         self.assertIsNone(MAILBOX.load(MAILBOX.peer_path(self.base, "native-cli-worker"))["delegatedRun"])
 
     def test_cli_peers_marks_the_callers_current_repository(self):
         repo = self.git_checkout("cli-here")
         self.hook("codex-cli-1", "codex", repo, "SessionStart")
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-B",
-                str(SCRIPTS / "run_agent.py"),
-                "mailbox",
-                "peers",
-                "--session",
-                "fresh",
-                "--harness",
-                "opencode",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            cwd=repo,
-            env={**os.environ, "AGENT_EXECUTOR_HOME": str(self.base.parent)},
-        )
+        result = mailbox_cli(self.base, "peers", "--session", "fresh", "--harness", "opencode", cwd=repo)
         first = result.stdout.splitlines()[0]
         self.assertIn("codex-cli-1"[:8], first)
         self.assertIn("same repository", first)
@@ -404,24 +375,7 @@ class MailboxTests(unittest.TestCase):
         self.hook("claude-was-2", "claude", repo, "SessionStart")
         outside = Path(self.temporary.name) / "plain"
         outside.mkdir()
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-B",
-                str(SCRIPTS / "run_agent.py"),
-                "mailbox",
-                "peers",
-                "--session",
-                "claude-was-2",
-                "--harness",
-                "claude",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            cwd=outside,
-            env={**os.environ, "AGENT_EXECUTOR_HOME": str(self.base.parent)},
-        )
+        result = mailbox_cli(self.base, "peers", "--session", "claude-was-2", "--harness", "claude", cwd=outside)
         self.assertNotIn("same repository", result.stdout)
 
     def test_a_cli_call_from_another_directory_keeps_the_hooked_directory(self):
@@ -429,27 +383,8 @@ class MailboxTests(unittest.TestCase):
         self.hook("codex-hooked", "codex", repo, "SessionStart")
         elsewhere = Path(self.temporary.name) / "scratch"
         elsewhere.mkdir()
-        subprocess.run(
-            [
-                sys.executable,
-                "-B",
-                str(SCRIPTS / "run_agent.py"),
-                "mailbox",
-                "focus",
-                "--session",
-                "codex-hooked",
-                "--harness",
-                "codex",
-                "--text",
-                "x",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            cwd=elsewhere,
-            check=True,
-            env={**os.environ, "AGENT_EXECUTOR_HOME": str(self.base.parent)},
-        )
+        focus = ("focus", "--session", "codex-hooked", "--harness", "codex", "--text", "x")
+        mailbox_cli(self.base, *focus, cwd=elsewhere, check=True)
         self.assertEqual(MAILBOX.load(MAILBOX.peer_path(self.base, "codex-hooked"))["cwd"], str(repo))
 
     def test_dead_pids_are_pruned_from_listings(self):
@@ -555,16 +490,9 @@ class RunMailboxTests(unittest.TestCase):
         self.directory = Path(self.temporary.name)
         self.base = self.directory / "mailbox-v1"
         self.result_path = self.directory / "result.json"
-        with mock.patch.object(MAILBOX, "detect_harness", return_value="claude"):
-            self.info = MAILBOX.open_run(
-                self.base,
-                "run-test",
-                worker_harness="claude",
-                repository=self.directory,
-                result_path=self.result_path,
-                deadline=(dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)).isoformat(),
-                worker_pid=os.getpid(),
-            )
+        self.info = open_test_run(
+            self.base, "run-test", repository=self.directory, result_path=self.result_path, worker_harness="claude"
+        )
         self.worker = MAILBOX.load(MAILBOX.peer_path(self.base, self.info["worker"]))
         self.conductor = MAILBOX.load(MAILBOX.peer_path(self.base, self.info["conductor"]))
         self.interactive = MAILBOX.register(
@@ -1014,48 +942,23 @@ class RunMailboxTests(unittest.TestCase):
             MAILBOX.write(MAILBOX.peer_path(self.base, session), peer)
         result = MAILBOX.wait(self.base, self.info["worker"], timeout=1)
         self.assertEqual((result["status"], result["reason"]), ("closed", "deadline_expired"))
-        command = subprocess.run(
-            [
-                sys.executable,
-                "-B",
-                str(SCRIPTS / "run_agent.py"),
-                "mailbox",
-                "wait",
-                "--session",
-                self.info["worker"],
-                "--timeout",
-                "1",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            env={**os.environ, "AGENT_EXECUTOR_HOME": str(self.directory)},
-        )
+        command = mailbox_cli(self.base, "wait", "--session", self.info["worker"], "--timeout", "1")
         self.assertEqual((command.returncode, json.loads(command.stdout)["reason"]), (30, "deadline_expired"))
 
     def test_invalid_run_send_returns_cli_error_four(self):
-        command = subprocess.run(
-            [
-                sys.executable,
-                "-B",
-                str(SCRIPTS / "run_agent.py"),
-                "mailbox",
-                "send",
-                "--session",
-                self.info["worker"],
-                "--to",
-                self.interactive["session"],
-                "--kind",
-                "update",
-                "--id",
-                "bad-target",
-                "--text",
-                "Not allowed",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            env={**os.environ, "AGENT_EXECUTOR_HOME": str(self.directory)},
+        command = mailbox_cli(
+            self.base,
+            "send",
+            "--session",
+            self.info["worker"],
+            "--to",
+            self.interactive["session"],
+            "--kind",
+            "update",
+            "--id",
+            "bad-target",
+            "--text",
+            "Not allowed",
         )
         self.assertEqual(command.returncode, 4)
         self.assertIn("only their counterpart", command.stderr)
@@ -1152,16 +1055,10 @@ class RunMailboxTests(unittest.TestCase):
         self.assertIsNone(MAILBOX.run_info(self.base, "run-test"))
         self.assertIsNone(MAILBOX.run_status(self.base, "run-test"))  # read from the complete conductor record
 
-    def open(self, run, **overrides):
-        options = {
-            "worker_harness": "codex",
-            "repository": self.directory,
-            "result_path": self.directory / f"{run}.json",
-            "deadline": (dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)).isoformat(),
-            "worker_pid": os.getpid(),
-        } | overrides
-        with mock.patch.object(MAILBOX, "detect_harness", return_value="claude"):
-            return MAILBOX.open_run(self.base, run, **options)
+    def open(self, run, minutes=5):
+        return open_test_run(
+            self.base, run, repository=self.directory, result_path=self.directory / f"{run}.json", minutes=minutes
+        )
 
     def test_a_run_never_takes_over_a_live_ordinary_session_of_the_same_name(self):
         ordinary = MAILBOX.register(
@@ -1193,7 +1090,7 @@ class RunMailboxTests(unittest.TestCase):
         self.assertEqual([item["text"] for item in MAILBOX.run_history(self.base, "Caps")["messages"]], ["kept"])
 
     def test_events_wait_reports_a_run_whose_deadline_passed_without_an_event(self):
-        info = self.open("late", deadline=(dt.datetime.now(dt.UTC) + dt.timedelta(seconds=0.3)).isoformat())
+        info = self.open("late", minutes=0.3 / 60)
         started = time.monotonic()
         with mock.patch.dict(os.environ, {"AGENT_EXECUTOR_HOME": str(self.directory)}):
             signal = next(
@@ -1663,16 +1560,13 @@ class McpServerTests(unittest.TestCase):
 
     def test_a_runner_launched_mcp_worker_is_labelled_delegated(self):
         base = Path(self.temporary.name) / "mailbox-v1"
-        with mock.patch.object(MAILBOX, "detect_harness", return_value="claude"):
-            MAILBOX.open_run(
-                base,
-                "toolrun",
-                worker_harness="opencode",
-                repository=Path(self.temporary.name),
-                result_path=Path(self.temporary.name) / "r.json",
-                deadline=(dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)).isoformat(),
-                worker_pid=os.getpid(),
-            )
+        open_test_run(
+            base,
+            "toolrun",
+            repository=Path(self.temporary.name),
+            result_path=Path(self.temporary.name) / "r.json",
+            worker_harness="opencode",
+        )
         replies = self.exchange(
             "opencode",
             [
@@ -1693,16 +1587,9 @@ class McpServerTests(unittest.TestCase):
     def test_a_session_resumed_outside_its_finished_run_is_ordinary_again(self):
         base = Path(self.temporary.name) / "mailbox-v1"
         result = Path(self.temporary.name) / "done.json"
-        with mock.patch.object(MAILBOX, "detect_harness", return_value="claude"):
-            MAILBOX.open_run(
-                base,
-                "finished",
-                worker_harness="opencode",
-                repository=Path(self.temporary.name),
-                result_path=result,
-                deadline=(dt.datetime.now(dt.UTC) + dt.timedelta(minutes=5)).isoformat(),
-                worker_pid=os.getpid(),
-            )
+        open_test_run(
+            base, "finished", repository=Path(self.temporary.name), result_path=result, worker_harness="opencode"
+        )
         focus = {
             "method": "tools/call",
             "params": {"name": "focus", "arguments": {"text": "x"}, "_meta": {"ai.opencode/sessionID": "ses_resumed"}},

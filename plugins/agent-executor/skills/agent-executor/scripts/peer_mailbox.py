@@ -30,9 +30,10 @@ MAIL_SCHEMA = "agent-executor.mail.v1"
 MAX_BYTES = 32 * 1024
 MAX_RUN_BYTES = 16 * 1024
 MAX_RUN_MESSAGES = 1024
-# No colon: session_key() maps it to "_", which would let two run ids share one set of files.
+# Run ids name lock files and session ids, so no colon or other separator.
 RUN_ID = r"[A-Za-z0-9_.-]{1,80}"
 MESSAGE_ID = r"[0-9a-f]+-[0-9a-f]{6}"
+CLIENT_ID = r"[A-Za-z0-9_-]{1,80}"
 RUN_FIELDS = ("session", "name", "harness", "cwd", "role", "run", "counterpart", "repository", "resultPath", "deadline")
 MAX_AGE = dt.timedelta(days=7)
 # A peer without a known pid counts as live this long after it was last seen.
@@ -78,6 +79,15 @@ def stamp(moment: dt.datetime | None = None) -> str:
 def parse_stamp(value: str) -> dt.datetime:
     moment = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
     return moment if moment.tzinfo else moment.replace(tzinfo=dt.UTC)
+
+
+def check_deadline(deadline: str) -> None:
+    try:
+        parsed = dt.datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise MailboxError("run deadline must be an ISO-8601 timestamp") from error
+    if parsed.tzinfo is None:
+        raise MailboxError("run deadline must include a timezone")
 
 
 def run_deadline(peer: dict[str, Any]) -> dt.datetime | None:
@@ -224,31 +234,33 @@ def run_info(base: Path, run: str) -> dict[str, str] | None:
     }
 
 
+def final_result(peer: dict[str, Any]) -> tuple[dict[str, Any], Path] | None:
+    """The run's finished result and its file, following steers; None while there is none."""
+    path = Path(peer["resultPath"])
+    seen: set[Path] = set()
+    while path.is_file() and path not in seen:
+        seen.add(path)
+        result = load(path)
+        if result is None:
+            return None
+        steered = result.get("steered_to")
+        continuation = steered.get("result_path") if isinstance(steered, dict) else None
+        if isinstance(continuation, str) and continuation:
+            path = Path(continuation)
+            continue
+        return (result, path) if result.get("finished_at") else None
+    return None
+
+
 def run_status(base: Path, run: str) -> str | None:
     """Return the terminal result status, following steers, or deadline_expired."""
     found = run_peers(base, run)
     peer = found.get("worker") or found.get("conductor")
     if not peer:
         raise MailboxError(f"no mailbox run {run!r}")
-    path = Path(peer["resultPath"])
-    seen: set[Path] = set()
-    while path.is_file() and path not in seen:
-        seen.add(path)
-        try:
-            result = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            break
-        if not isinstance(result, dict):
-            break
-        steered = result.get("steered_to")
-        continuation = steered.get("result_path") if isinstance(steered, dict) else None
-        if isinstance(continuation, str) and continuation:
-            path = Path(continuation)
-            continue
-        if result.get("finished_at"):
-            status = result.get("status")
-            return status if isinstance(status, str) and status else "finished"
-        break
+    if finished := final_result(peer):
+        status = finished[0].get("status")
+        return status if isinstance(status, str) and status else "finished"
     deadline = run_deadline(peer)
     if deadline is None or now() >= deadline:
         return "deadline_expired"
@@ -260,28 +272,12 @@ def run_closed_at(base: Path, run: str) -> dt.datetime | None:
     peer = found.get("worker") or found.get("conductor")
     if not peer:
         return None
-    path = Path(peer["resultPath"])
-    seen: set[Path] = set()
-    while path.is_file() and path not in seen:
-        seen.add(path)
+    if finished := final_result(peer):
+        result, path = finished
         try:
-            result = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            break
-        if not isinstance(result, dict):
-            break
-        steered = result.get("steered_to")
-        continuation = steered.get("result_path") if isinstance(steered, dict) else None
-        if isinstance(continuation, str) and continuation:
-            path = Path(continuation)
-            continue
-        finished = result.get("finished_at")
-        if finished:
-            try:
-                return parse_stamp(str(finished))
-            except ValueError:
-                return dt.datetime.fromtimestamp(path.stat().st_mtime, dt.UTC)
-        break
+            return parse_stamp(str(result["finished_at"]))
+        except ValueError:
+            return dt.datetime.fromtimestamp(path.stat().st_mtime, dt.UTC)
     deadline = run_deadline(peer)
     if deadline is None:
         # Retention runs from the last write, not from a made-up deadline in the past.
@@ -310,12 +306,7 @@ def open_run(
         worker_harness = "gemini"
     if worker_harness not in HARNESSES:
         raise MailboxError(f"unknown worker harness {worker_harness!r}")
-    try:
-        parsed_deadline = dt.datetime.fromisoformat(deadline.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise MailboxError("run deadline must be an ISO-8601 timestamp") from error
-    if parsed_deadline.tzinfo is None:
-        raise MailboxError("run deadline must include a timezone")
+    check_deadline(deadline)
     repo = str(Path(repository).expanduser().resolve())
     result = str(Path(result_path).expanduser().resolve())
     sessions = {role: f"run-{run_id}-{role}" for role in ("conductor", "worker")}
@@ -371,12 +362,7 @@ def open_run(
 
 
 def _update_run_deadline_locked(base: Path, run: str, deadline: str) -> None:
-    try:
-        parsed = dt.datetime.fromisoformat(deadline.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise MailboxError("run deadline must be an ISO-8601 timestamp") from error
-    if parsed.tzinfo is None:
-        raise MailboxError("run deadline must include a timezone")
+    check_deadline(deadline)
     found = run_peers(base, run)
     if len(found) != 2:
         raise MailboxError(f"no complete mailbox run {run!r}")
@@ -405,15 +391,10 @@ def run_inbox(base: Path, run: str, role: str) -> list[dict[str, Any]]:
 
 
 def run_history(base: Path, run: str) -> dict[str, Any]:
-    found = run_peers(base, run)
-    if len(found) != 2:
-        raise MailboxError(f"no complete mailbox run {run!r}")
-    history = []
-    for peer in found.values():
-        history.extend(run_traffic(messages(base, peer["session"], unread_only=False), run))
+    history = run_messages(base, run)  # raises unless the run is complete
     return {
         "run": run,
-        "mailbox": found["conductor"]["session"],
+        "mailbox": run_peers(base, run)["conductor"]["session"],
         "messages": sorted(history, key=lambda item: item["id"]),
     }
 
@@ -618,15 +599,10 @@ def describe_colleagues(rows: list[dict[str, Any]], me: dict[str, Any]) -> str:
 
 def set_focus(base: Path, session: str, text: str) -> dict[str, Any]:
     """One line on what this session is working on, shown to every agent in the same repository."""
-    focus = " ".join(text.split())[:200]
-    path = peer_path(base, session)
-    with locked(path):
-        peer = load(path)
-        if not valid_peer(peer) or is_run_peer(peer):
-            raise MailboxError("register this session before setting its focus")
-        peer["focus"] = focus
-        write(path, peer)
-        return peer
+    peer = load(peer_path(base, session))
+    if not valid_peer(peer) or is_run_peer(peer):
+        raise MailboxError("register this session before setting its focus")
+    return annotate(base, session, focus=" ".join(text.split())[:200])
 
 
 def register(
@@ -735,6 +711,10 @@ def resolve(base: Path, address: str) -> dict[str, Any]:
     return exact[0]
 
 
+def sender_address(peer: dict[str, Any]) -> dict[str, Any]:
+    return {key: peer.get(key) for key in ("session", "name", "harness", "cwd")}
+
+
 def message_id() -> str:
     return f"{time.time_ns():x}-{secrets.token_hex(3)}"
 
@@ -751,13 +731,13 @@ def run_send(
 ) -> dict[str, Any]:
     if kind not in {"question", "reply", "update"}:
         raise MailboxError("run messages require kind question, reply, or update")
-    if client_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", client_id):
+    if client_id is not None and not re.fullmatch(CLIENT_ID, client_id):
         raise MailboxError("message ID must be 1-80 letters, digits, underscores, or hyphens")
     if not text.strip() or len(text.encode()) > MAX_RUN_BYTES:
         raise MailboxError("run message must be nonempty and at most 16 KiB")
     if (kind == "reply") != bool(reply_to):
         raise MailboxError("a reply requires --reply-to; other kinds cannot reply")
-    if reply_to and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", reply_to):
+    if reply_to and not re.fullmatch(CLIENT_ID, reply_to):
         raise MailboxError("invalid reply-to message ID")
     run = sender["run"]
     pair = run_peers(base, run)
@@ -771,7 +751,7 @@ def run_send(
 
     payload = {
         "schema": MAIL_SCHEMA,
-        "from": {key: sender.get(key) for key in ("session", "name", "harness", "cwd")},
+        "from": sender_address(sender),
         "to": {"session": target["session"], "name": target["name"]},
         "text": text,
         "replyTo": reply_to,
@@ -824,9 +804,7 @@ def run_send(
             ):
                 raise MailboxError("question already has a reply")
         payload.update(id=message_id(), sentAt=stamp(), readAt=None)
-        path = inbox_dir(base, target["session"]) / f"{payload['id']}.json"
-        write(path, payload)
-        os.chmod(path, 0o600)
+        write(inbox_dir(base, target["session"]) / f"{payload['id']}.json", payload)
         if kind == "reply":
             mark_read(base, sender["session"], [question["id"]])
     return payload
@@ -856,7 +834,7 @@ def send(
         raise MailboxError("message text is empty")
     if len(text.encode()) > MAX_BYTES:
         raise MailboxError(f"message is over {MAX_BYTES // 1024} KiB; send a path to a file instead")
-    if reply_to is not None and not re.fullmatch(r"[0-9a-f]+-[0-9a-f]{6}", reply_to):
+    if reply_to is not None and not re.fullmatch(MESSAGE_ID, reply_to):
         raise MailboxError(f"invalid replyTo id: {reply_to!r}")
     target = resolve(base, to)
     if target["session"] == sender["session"]:
@@ -869,16 +847,14 @@ def send(
     message = {
         "schema": MAIL_SCHEMA,
         "id": message_id(),
-        "from": {key: sender.get(key) for key in ("session", "name", "harness", "cwd")},
+        "from": sender_address(sender),
         "to": {"session": target["session"], "name": target["name"]},
         "text": text,
         "replyTo": reply_to,
         "sentAt": stamp(),
         "readAt": None,
     }
-    path = inbox_dir(base, target["session"]) / f"{message['id']}.json"
-    write(path, message)
-    os.chmod(path, 0o600)
+    write(inbox_dir(base, target["session"]) / f"{message['id']}.json", message)
     return {"id": message["id"], "to": target["name"], "toState": target["state"], "toHarness": target["harness"]}
 
 
@@ -927,35 +903,32 @@ def messages(base: Path, session: str, *, unread_only: bool = True) -> list[dict
     return found
 
 
+def mark_one(base: Path, session: str, identifier: str) -> bool | None:
+    """Mark a message read under its lock: True if this call did, False if it already was, None if absent."""
+    path = inbox_dir(base, session) / f"{identifier}.json"
+    with locked(path):
+        message = load(path)
+        if not valid_message(message):
+            return None
+        if message.get("readAt"):
+            return False
+        message["readAt"] = stamp()
+        write(path, message)
+        return True
+
+
 def mark_read(base: Path, session: str, ids: list[str]) -> list[str]:
-    marked = []
     for identifier in ids:
         if not re.fullmatch(MESSAGE_ID, identifier):
             raise MailboxError(f"invalid message id: {identifier!r}")
-        path = inbox_dir(base, session) / f"{identifier}.json"
-        with locked(path):
-            message = load(path)
-            if not message:
-                raise MailboxError(f"no message {identifier} in this inbox")
-            if not message.get("readAt"):
-                message["readAt"] = stamp()
-                write(path, message)
-        marked.append(identifier)
-    return marked
+        if mark_one(base, session, identifier) is None:
+            raise MailboxError(f"no message {identifier} in this inbox")
+    return list(ids)
 
 
 def claim(base: Path, session: str, found: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Mark messages read and keep only those this call was first to mark, so each reader gets its own."""
-    claimed = []
-    for message in found:
-        path = inbox_dir(base, session) / f"{message['id']}.json"
-        with locked(path):
-            current = load(path)
-            if valid_message(current) and not current.get("readAt"):
-                current["readAt"] = stamp()
-                write(path, current)
-                claimed.append(message)
-    return claimed
+    return [message for message in found if mark_one(base, session, message["id"])]
 
 
 def take(base: Path, session: str, *, mark: bool = True, limit: int = 20) -> list[dict[str, Any]]:
@@ -1201,8 +1174,12 @@ def annotate(base: Path, session: str, **fields: Any) -> dict[str, Any]:
         return peer or {}
 
 
+def session_arg(args: argparse.Namespace) -> str | None:
+    return args.session or os.environ.get("AGENT_MAILBOX_SESSION") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+
+
 def caller(args: argparse.Namespace, base: Path) -> dict[str, Any]:
-    session = args.session or os.environ.get("AGENT_MAILBOX_SESSION") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    session = session_arg(args)
     if not session:
         raise MailboxError("pass --session (or set AGENT_MAILBOX_SESSION / CLAUDE_CODE_SESSION_ID)")
     existing = load(peer_path(base, session))
@@ -1344,13 +1321,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "prune":
             output: Any = prune(base)
         elif args.action == "peers":
-            session = (
-                args.session or os.environ.get("AGENT_MAILBOX_SESSION") or os.environ.get("CLAUDE_CODE_SESSION_ID")
-            )
             rows = peers(base, include_runs=args.runs)
             if args.format != "json":
                 # Mark and sort against the caller's current repository, registered or not.
-                print(table(rows, session, args.harness or detect_harness(), here=workspace(os.getcwd())))
+                print(table(rows, session_arg(args), args.harness or detect_harness(), here=workspace(os.getcwd())))
                 return 0
             output = rows
         else:

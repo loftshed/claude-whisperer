@@ -96,12 +96,22 @@ TOOLS = [
     },
 ]
 
+TOOL_NAMES = {tool["name"] for tool in TOOLS}
 JSON_TYPES = {
     "string": lambda value: isinstance(value, str),
     "boolean": lambda value: isinstance(value, bool),
     "number": lambda value: isinstance(value, (int, float)) and not isinstance(value, bool),
     "array": lambda value: isinstance(value, list),
 }
+
+
+def valid_id(value: Any) -> bool:
+    """A request id MCP accepts: a string or a number, never null (and a bool is not a number here)."""
+    return isinstance(value, (str, int, float)) and not isinstance(value, bool)
+
+
+def tool_result(text: str, *, error: bool = False) -> dict[str, Any]:
+    return {"content": [{"type": "text", "text": text}], **({"isError": True} if error else {})}
 
 
 def argument_problem(name: str, arguments: dict[str, Any]) -> str | None:
@@ -226,9 +236,7 @@ class Server:
     def handle(self, request: dict[str, Any], cancelled: threading.Event | None = None) -> dict[str, Any] | None:
         method = request.get("method")
         params = request.get("params", {})
-        identifier = request.get("id")
-        if "id" in request and (isinstance(identifier, bool) or not isinstance(identifier, (str, int, float))):
-            # MCP narrows JSON-RPC here: a request id must not be null.
+        if "id" in request and not valid_id(request["id"]):
             return rpc_error(None, -32600, "id must be a string or a number")
         if request.get("jsonrpc") != "2.0" or not isinstance(method, str):
             return rpc_error(request.get("id"), -32600, "invalid request")
@@ -254,23 +262,20 @@ class Server:
             meta = params.get("_meta", {})
             if not isinstance(arguments, dict) or not isinstance(meta, dict):
                 return rpc_error(request["id"], -32602, "arguments and _meta must be objects")
-            if not isinstance(params.get("name"), str) or params["name"] not in {tool["name"] for tool in TOOLS}:
+            if not isinstance(params.get("name"), str) or params["name"] not in TOOL_NAMES:
                 return rpc_error(request["id"], -32602, f"unknown tool {params.get('name')!r}")
+            # Bad arguments are a tool error the model can correct; nothing is touched before they pass.
             problem = argument_problem(params["name"], arguments)
-            if problem:
-                # Bad arguments are a tool error the model can correct, and nothing has been touched.
-                return {
-                    "jsonrpc": "2.0",
-                    "id": request["id"],
-                    "result": {"content": [{"type": "text", "text": f"mailbox: {problem}"}], "isError": True},
-                }
-            try:
-                text = self.call(params["name"], arguments, meta, cancelled)
-                if text is None:
-                    return None
-                result = {"content": [{"type": "text", "text": text}]}
-            except (mailbox.MailboxError, OSError, KeyError, TypeError, ValueError) as error:
-                result = {"content": [{"type": "text", "text": f"mailbox: {error}"}], "isError": True}
+            text = None
+            if not problem:
+                try:
+                    text = self.call(params["name"], arguments, meta, cancelled)
+                except (mailbox.MailboxError, OSError, KeyError, TypeError, ValueError) as error:
+                    problem = str(error)
+                else:
+                    if text is None:
+                        return None  # a cancelled wait gets no reply
+            result = tool_result(f"mailbox: {problem}", error=True) if problem else tool_result(text or "")
         else:
             return rpc_error(request["id"], -32601, f"unknown method {method}")
         return {"jsonrpc": "2.0", "id": request["id"], "result": result}
@@ -294,8 +299,7 @@ def is_wait(request: Any) -> bool:
         return False
     params = request.get("params")
     return (
-        isinstance(request.get("id"), (str, int, float))
-        and not isinstance(request.get("id"), bool)
+        valid_id(request.get("id"))
         and request.get("method") == "tools/call"
         and isinstance(params, dict)
         and params.get("name") == "wait"
@@ -313,25 +317,27 @@ def main() -> int:
             sys.stdout.write(json.dumps(response, ensure_ascii=True) + "\n")
             sys.stdout.flush()
 
-    def run_wait(request: dict[str, Any], cancelled: threading.Event) -> None:
-        response = respond(server, request, cancelled)
-        with output:
-            pending.pop(request["id"], None)
-        if response:
-            emit(response)
+    def answer(request: Any, events: dict[Any, threading.Event]) -> Any:
+        """The response to one request, or the replies to a batch (none when it held only notifications)."""
 
-    def run_batch(batch: list[Any], events: dict[Any, threading.Event]) -> None:
-        replies = []
-        for item in batch:
-            cancelled = events.get(item["id"]) if is_wait(item) else None
-            reply = respond(server, item, cancelled)
-            if reply:
-                replies.append(reply)
+        def one(item: Any) -> dict[str, Any] | None:
+            return respond(server, item, events.get(item["id"]) if is_wait(item) else None)
+
+        if isinstance(request, list):
+            return (
+                [reply for item in request if (reply := one(item))]
+                if request
+                else rpc_error(None, -32600, "empty batch")
+            )
+        return one(request)
+
+    def serve(request: Any, events: dict[Any, threading.Event]) -> None:
+        response = answer(request, events)
         with output:
             for identifier in events:
                 pending.pop(identifier, None)
-        if replies:
-            emit(replies)
+        if response:
+            emit(response)
 
     def cancel(item: Any) -> bool:
         """Apply a cancellation notification; False for anything else."""
@@ -345,8 +351,7 @@ def main() -> int:
         params = item.get("params")
         target = params.get("requestId") if isinstance(params, dict) else None
         with output:
-            valid = isinstance(target, (str, int, float)) and not isinstance(target, bool)  # True would match id 1
-            event = pending.get(target) if valid else None
+            event = pending.get(target) if valid_id(target) else None  # True would otherwise match id 1
         if event:
             with server.commit:
                 event.set()
@@ -367,34 +372,17 @@ def main() -> int:
                 continue
         elif cancel(request):
             continue
-        if is_wait(request):
-            # A wait blocks for minutes; serve it on its own thread so cancellation and other requests get through.
-            cancelled = threading.Event()
-            with output:
-                pending[request["id"]] = cancelled
-            worker = threading.Thread(target=run_wait, args=(request, cancelled), daemon=True)
-            workers.append(worker)
-            worker.start()
+        waits = [item for item in (request if isinstance(request, list) else [request]) if is_wait(item)]
+        if not waits:
+            serve(request, {})
             continue
-        if isinstance(request, list) and any(is_wait(item) for item in request):
-            # A batch with a wait runs on a thread too; each wait in it can be cancelled by id.
-            events = {}
-            with output:
-                for item in request:
-                    if is_wait(item):
-                        events[item["id"]] = pending[item["id"]] = threading.Event()
-            worker = threading.Thread(target=run_batch, args=(request, events), daemon=True)
-            workers.append(worker)
-            worker.start()
-            continue
-        if isinstance(request, list):
-            # A batch answers every request in it, and nothing when it held only notifications.
-            replies = [reply for item in request if (reply := respond(server, item))]
-            response: Any = replies if request else rpc_error(None, -32600, "empty batch")
-        else:
-            response = respond(server, request)
-        if response:
-            emit(response)
+        # A wait blocks for minutes: serve it (or its batch) on a thread, so cancellation and other requests get
+        # through; each wait can be cancelled by its id.
+        with output:
+            events = {item["id"]: pending.setdefault(item["id"], threading.Event()) for item in waits}
+        worker = threading.Thread(target=serve, args=(request, events), daemon=True)
+        workers.append(worker)
+        worker.start()
     # The host is gone: end every wait, so the server exits now rather than after its timeout.
     with output, server.commit:
         for event in pending.values():
