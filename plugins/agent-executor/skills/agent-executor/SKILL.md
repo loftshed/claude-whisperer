@@ -2,7 +2,7 @@
 name: agent-executor
 description: "Delegate bounded implementation or read-only consultation across provider boundaries using local Codex, Antigravity, Claude Code, or OpenCode. Validate model and effort, check live quota, preserve context, record usage and evidence, recover bounded corrections, and audit results. Use for explicitly requested external-agent work or cross-platform handoffs, for example 'ask GPT-5.6 Sol', 'have Gemini check this', 'try it with GLM'. Use native tools for models native to the caller: GPT models in Codex, Gemini in Gemini/Antigravity, and Claude in Claude. Do not trigger for ordinary coding or native collaboration."
 metadata:
-  version: 0.16.0
+  version: 0.16.1
   requirements: Python 3, POSIX file locking, git, and at least one installed/authenticated executor CLI (`codex`, `agy`, `claude`, or `opencode`).
 ---
 

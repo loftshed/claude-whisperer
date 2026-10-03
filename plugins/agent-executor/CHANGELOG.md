@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.16.1
 
 - The peer mailbox is hardened against races, stale or damaged state, and edge cases a host can hit:
   - **Mail delivery:** concurrent readers never get the same message, and a cancelled `wait` leaves its
