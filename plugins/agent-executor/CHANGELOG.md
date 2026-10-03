@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- The peer mailbox is hardened against races, stale or damaged state, and edge cases a host can hit:
+  - **Mail delivery:** concurrent readers never get the same message, and a cancelled `wait` leaves its
+    mail unread.
+  - **Runs:** a send cannot land after a run's result, and `events wait --messages` reports a run that
+    closed without a completion event and follows steered jobs.
+  - **Identity:**
+    - session ids that differ only by `:`/`_` or by case keep separate files, and older names migrate;
+    - a run cannot take over a live session with the same name;
+    - output directories with spaces or a shared basename get their own runs;
+    - each OpenCode session gets its own identity.
+  - **Liveness:** a live session stays listed however long it is idle, and a reused pid no longer keeps
+    a dead one.
+  - **MCP server:** it validates JSON-RPC requests and tool arguments, answers batches, and honours
+    cancellation.
+
 ## 0.16.0
 
 - Run messaging now uses the mailbox: `messages` is replaced by `mailbox`, and `AGENT_CHANNEL` by

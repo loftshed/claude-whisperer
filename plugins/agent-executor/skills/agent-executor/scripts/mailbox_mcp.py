@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +68,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "timeoutSeconds": {"type": "number", "minimum": 1, "maximum": WAIT_MAX},
+                "timeoutSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": WAIT_MAX},
                 "replyTo": {"type": "string", "description": "Only return the reply to this sent message id."},
             },
             "additionalProperties": False,
@@ -83,6 +86,36 @@ TOOLS = [
     },
 ]
 
+JSON_TYPES = {
+    "string": lambda value: isinstance(value, str),
+    "boolean": lambda value: isinstance(value, bool),
+    "number": lambda value: isinstance(value, (int, float)) and not isinstance(value, bool),
+    "array": lambda value: isinstance(value, list),
+}
+
+
+def argument_problem(name: str, arguments: dict[str, Any]) -> str | None:
+    """What is wrong with a call's arguments against the tool's own inputSchema, or None."""
+    schema = next(tool["inputSchema"] for tool in TOOLS if tool["name"] == name)
+    properties = schema["properties"]
+    unknown = sorted(set(arguments) - set(properties))
+    if unknown:
+        return f"unknown argument(s): {', '.join(unknown)}"
+    missing = [key for key in schema.get("required", []) if key not in arguments]
+    if missing:
+        return f"missing argument(s): {', '.join(missing)}"
+    for key, value in arguments.items():
+        wanted = properties[key]["type"]
+        if not JSON_TYPES[wanted](value):
+            return f"{key} must be a {wanted}"
+        items = properties[key].get("items")
+        if items and not all(JSON_TYPES[items["type"]](item) for item in value):
+            return f"every {key} entry must be a {items['type']}"
+        if isinstance(value, list) and len(value) < properties[key].get("minItems", 0):
+            return f"{key} needs at least {properties[key]['minItems']} entry"
+    return None
+
+
 HARNESS_BY_CLIENT = {"claude-code": "claude", "codex-mcp-client": "codex", "opencode": "opencode"}
 
 
@@ -92,6 +125,8 @@ class Server:
         self.environ = os.environ if environ is None else environ
         self.harness = "unknown"
         self.pid: int | None = None
+        # Held while a wait commits its mail as read and while a cancellation lands, so one wins cleanly.
+        self.commit = threading.Lock()
 
     def identify(self, client: dict[str, Any]) -> None:
         name = str(client.get("name") or "").lower()
@@ -103,7 +138,8 @@ class Server:
         self.pid = mailbox.harness_pid(self.harness) if self.harness != "unknown" else os.getppid()
 
     def session(self, meta: dict[str, Any]) -> str:
-        for key in ("sessionId", "threadId"):
+        # Codex sends sessionId (or threadId); OpenCode sends its own namespaced key.
+        for key in ("sessionId", "threadId", "ai.opencode/sessionID"):
             if isinstance(meta.get(key), str) and meta[key]:
                 return meta[key]
         if self.environ.get("CLAUDE_CODE_SESSION_ID"):
@@ -116,7 +152,13 @@ class Server:
             self.base, session=self.session(meta), harness=self.harness, cwd=os.getcwd(), pid=self.pid, state=state
         )
 
-    def call(self, name: str, arguments: dict[str, Any], meta: dict[str, Any]) -> str:
+    def call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        meta: dict[str, Any],
+        cancelled: threading.Event | None = None,
+    ) -> str | None:
         me = self.me(meta)
         if name == "peers":
             return mailbox.table(mailbox.peers(self.base), me["session"], self.harness)
@@ -129,24 +171,51 @@ class Server:
             found = mailbox.take(self.base, me["session"], mark=arguments.get("markRead", True))
             return mailbox.render_all(found) or "no unread peer messages"
         if name == "wait":
-            timeout = min(float(arguments.get("timeoutSeconds") or WAIT_DEFAULT), WAIT_MAX)
+            requested = arguments.get("timeoutSeconds")
+            timeout = min(float(WAIT_DEFAULT if requested is None else requested), WAIT_MAX)
+            if not math.isfinite(timeout) or timeout <= 0:
+                raise mailbox.MailboxError("timeoutSeconds must be a finite number greater than zero")
+            until = time.monotonic() + timeout
             self.me(meta, "waiting")
             try:
-                result = mailbox.wait(self.base, me["session"], timeout=timeout, reply_to=arguments.get("replyTo"))
+                while True:
+                    result = mailbox.wait(
+                        self.base,
+                        me["session"],
+                        timeout=max(until - time.monotonic(), 0.01),
+                        reply_to=arguments.get("replyTo"),
+                        mark=False,
+                        cancelled=cancelled,
+                    )
+                    with self.commit:
+                        if result["status"] == "cancelled" or (cancelled is not None and cancelled.is_set()):
+                            return None  # no reply for a cancelled request, and the mail stays unread
+                        if result["status"] == "timed_out":
+                            return f"timed_out after {timeout:g}s: no peer message arrived"
+                        # Once claimed, the reply is always sent, even if a cancellation arrives meanwhile.
+                        claimed = mailbox.claim(self.base, me["session"], result["messages"])
+                    if claimed:
+                        return mailbox.render_all(claimed)
+                    # A concurrent wait claimed this mail first; keep waiting for the rest of the timeout.
             finally:
                 self.me(meta, "busy")
-            if result["status"] == "timed_out":
-                return f"timed_out after {timeout:g}s: no peer message arrived"
-            return mailbox.render_all(result["messages"])
         if name == "ack":
             return json.dumps({"acknowledged": mailbox.mark_read(self.base, me["session"], list(arguments["ids"]))})
         raise mailbox.MailboxError(f"unknown tool {name!r}")
 
-    def handle(self, request: dict[str, Any]) -> dict[str, Any] | None:
+    def handle(self, request: dict[str, Any], cancelled: threading.Event | None = None) -> dict[str, Any] | None:
         method = request.get("method")
-        params = request.get("params") or {}
+        params = request.get("params", {})
+        identifier = request.get("id")
+        if "id" in request and (isinstance(identifier, bool) or not isinstance(identifier, (str, int, float))):
+            # MCP narrows JSON-RPC here: a request id must not be null.
+            return rpc_error(None, -32600, "id must be a string or a number")
+        if request.get("jsonrpc") != "2.0" or not isinstance(method, str):
+            return rpc_error(request.get("id"), -32600, "invalid request")
         if "id" not in request:
             return None
+        if not isinstance(params, dict):
+            return rpc_error(request["id"], -32602, "params must be an object")
         if method == "initialize":
             self.identify(params.get("clientInfo") or {})
             wanted = params.get("protocolVersion")
@@ -161,38 +230,157 @@ class Server:
         elif method == "tools/list":
             result = {"tools": TOOLS}
         elif method == "tools/call":
+            arguments = params.get("arguments", {})
+            meta = params.get("_meta", {})
+            if not isinstance(arguments, dict) or not isinstance(meta, dict):
+                return rpc_error(request["id"], -32602, "arguments and _meta must be objects")
+            if not isinstance(params.get("name"), str) or params["name"] not in {tool["name"] for tool in TOOLS}:
+                return rpc_error(request["id"], -32602, f"unknown tool {params.get('name')!r}")
+            problem = argument_problem(params["name"], arguments)
+            if problem:
+                # Bad arguments are a tool error the model can correct, and nothing has been touched.
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": {"content": [{"type": "text", "text": f"mailbox: {problem}"}], "isError": True},
+                }
             try:
-                text = self.call(params.get("name"), params.get("arguments") or {}, params.get("_meta") or {})
+                text = self.call(params["name"], arguments, meta, cancelled)
+                if text is None:
+                    return None
                 result = {"content": [{"type": "text", "text": text}]}
             except (mailbox.MailboxError, OSError, KeyError, TypeError, ValueError) as error:
                 result = {"content": [{"type": "text", "text": f"mailbox: {error}"}], "isError": True}
         else:
-            return {
-                "jsonrpc": "2.0",
-                "id": request["id"],
-                "error": {"code": -32601, "message": f"unknown method {method}"},
-            }
+            return rpc_error(request["id"], -32601, f"unknown method {method}")
         return {"jsonrpc": "2.0", "id": request["id"], "result": result}
+
+
+def rpc_error(identifier: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": identifier, "error": {"code": code, "message": message}}
+
+
+def respond(server: Server, request: Any, cancelled: threading.Event | None = None) -> dict[str, Any] | None:
+    if not isinstance(request, dict):
+        return rpc_error(None, -32600, "invalid request")
+    try:
+        return server.handle(request, cancelled)
+    except Exception as failure:  # noqa: BLE001 -- one bad request must not end the server
+        return rpc_error(request.get("id"), -32603, f"internal error: {failure}")
+
+
+def is_wait(request: Any) -> bool:
+    if not isinstance(request, dict):
+        return False
+    params = request.get("params")
+    return (
+        isinstance(request.get("id"), (str, int, float))
+        and not isinstance(request.get("id"), bool)
+        and request.get("method") == "tools/call"
+        and isinstance(params, dict)
+        and params.get("name") == "wait"
+    )
 
 
 def main() -> int:
     server = Server()
+    output = threading.Lock()
+    pending: dict[Any, threading.Event] = {}
+    workers: list[threading.Thread] = []
+
+    def emit(response: Any) -> None:
+        with output:
+            sys.stdout.write(json.dumps(response, ensure_ascii=True) + "\n")
+            sys.stdout.flush()
+
+    def run_wait(request: dict[str, Any], cancelled: threading.Event) -> None:
+        response = respond(server, request, cancelled)
+        with output:
+            pending.pop(request["id"], None)
+        if response:
+            emit(response)
+
+    def run_batch(batch: list[Any], events: dict[Any, threading.Event]) -> None:
+        replies = []
+        for item in batch:
+            cancelled = events.get(item["id"]) if is_wait(item) else None
+            reply = respond(server, item, cancelled)
+            if reply:
+                replies.append(reply)
+        with output:
+            for identifier in events:
+                pending.pop(identifier, None)
+        if replies:
+            emit(replies)
+
+    def cancel(item: Any) -> bool:
+        """Apply a cancellation notification; False for anything else."""
+        if not (
+            isinstance(item, dict)
+            and item.get("method") == "notifications/cancelled"
+            and item.get("jsonrpc") == "2.0"
+            and "id" not in item
+        ):
+            return False
+        params = item.get("params")
+        target = params.get("requestId") if isinstance(params, dict) else None
+        with output:
+            valid = isinstance(target, (str, int, float)) and not isinstance(target, bool)  # True would match id 1
+            event = pending.get(target) if valid else None
+        if event:
+            with server.commit:
+                event.set()
+        return True
+
     for line in sys.stdin:
         if not line.strip():
             continue
         try:
             request = json.loads(line)
         except ValueError:
-            response: dict[str, Any] | None = {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32700, "message": "parse error"},
-            }
+            emit(rpc_error(None, -32700, "parse error"))
+            continue
+        if isinstance(request, list) and request:
+            # Cancellations inside a batch apply at once, like single ones; they get no reply either way.
+            request = [item for item in request if not cancel(item)]
+            if not request:
+                continue
+        elif cancel(request):
+            continue
+        if is_wait(request):
+            # A wait blocks for minutes; serve it on its own thread so cancellation and other requests get through.
+            cancelled = threading.Event()
+            with output:
+                pending[request["id"]] = cancelled
+            worker = threading.Thread(target=run_wait, args=(request, cancelled), daemon=True)
+            workers.append(worker)
+            worker.start()
+            continue
+        if isinstance(request, list) and any(is_wait(item) for item in request):
+            # A batch with a wait runs on a thread too; each wait in it can be cancelled by id.
+            events = {}
+            with output:
+                for item in request:
+                    if is_wait(item):
+                        events[item["id"]] = pending[item["id"]] = threading.Event()
+            worker = threading.Thread(target=run_batch, args=(request, events), daemon=True)
+            workers.append(worker)
+            worker.start()
+            continue
+        if isinstance(request, list):
+            # A batch answers every request in it, and nothing when it held only notifications.
+            replies = [reply for item in request if (reply := respond(server, item))]
+            response: Any = replies if request else rpc_error(None, -32600, "empty batch")
         else:
-            response = server.handle(request) if isinstance(request, dict) else None
+            response = respond(server, request)
         if response:
-            sys.stdout.write(json.dumps(response, ensure_ascii=True) + "\n")
-            sys.stdout.flush()
+            emit(response)
+    # The host is gone: end every wait, so the server exits now rather than after its timeout.
+    with output, server.commit:
+        for event in pending.values():
+            event.set()
+    for worker in workers:
+        worker.join()
     return 0
 
 

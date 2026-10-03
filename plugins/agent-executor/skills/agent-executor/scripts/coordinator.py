@@ -383,7 +383,7 @@ def reverify(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
             "verification_of": {"path": str(path), "sha256": work["result_sha256"], "reason": args.reason},
             "model_invoked": False,
         }
-        RUNNER.write_json_atomic(Path(run["result_path"]), result)
+        RUNNER.write_run_result(Path(run["result_path"]), result)
     import_result(run, state)
     save(directory, state)
     return run
@@ -544,7 +544,7 @@ def dispatch(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
     (run_dir / "brief.md").write_text(RUNNER.brief_renderer_module().render_brief(spec), encoding="utf-8")
     result_path = run_dir / "artifacts" / "result.json"
     event_path = RUNNER.prepare_completion_event_path()
-    mailbox_run_id = event_path.stem
+    mailbox_run_id = MAILBOX.run_id_for(event_path.stem)
     mailbox_info = {
         "run": mailbox_run_id,
         "conductor": f"run-{mailbox_run_id}-conductor",
@@ -716,22 +716,22 @@ def host_action(args: argparse.Namespace, directory: Path, state: dict[str, Any]
         if observation.get("review_id"):
             EVIDENCE.receipt(state, observation["review_id"], RUNNER)
         remaining = RUNNER.deadline_remaining(state["deadline"])
-        if remaining > 0:
-            for run in state["runs"]:
-                mailbox = run.get("mailbox")
-                if not mailbox or not MAILBOX.run_info(MAILBOX.root(), mailbox.get("run", "")):
-                    continue
-                incoming = MAILBOX.run_inbox(MAILBOX.root(), mailbox["run"], "conductor")
-                if incoming:
-                    ended = MAILBOX.run_status(MAILBOX.root(), mailbox["run"])
-                    return {
-                        "action": "review_message" if ended else "respond",
-                        "owner": "conductor",
-                        "run_id": run["run_id"],
-                        "run_status": ended,
-                        "mailbox": mailbox["conductor"],
-                        "messages": incoming,
-                    }
+        # Unread run mail comes first even past the task deadline: it may hold the reason the run stopped.
+        for run in state["runs"]:
+            mailbox = run.get("mailbox")
+            if not mailbox or not MAILBOX.run_info(MAILBOX.root(), mailbox.get("run", "")):
+                continue
+            incoming = MAILBOX.run_inbox(MAILBOX.root(), mailbox["run"], "conductor")
+            if incoming:
+                ended = MAILBOX.run_status(MAILBOX.root(), mailbox["run"])
+                return {
+                    "action": "review_message" if ended else "respond",
+                    "owner": "conductor",
+                    "run_id": run["run_id"],
+                    "run_status": ended,
+                    "mailbox": mailbox["conductor"],
+                    "messages": incoming,
+                }
         return POLICY.next_action(state, observation, remaining)
     if action == "knowledge":
         for entry in state.get("knowledge", []):

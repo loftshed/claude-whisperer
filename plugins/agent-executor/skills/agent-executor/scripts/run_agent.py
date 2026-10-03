@@ -1888,6 +1888,10 @@ def print_completion_signal(event: dict[str, Any], *, output_format: str) -> Non
     print(f"AGENT_RESULT={signal_payload['result_path'] or ''}", flush=True)
 
 
+# How long a finished run's result may stand without its completion event before waiting reports it.
+MISSING_EVENT_GRACE_SECONDS = 5.0
+
+
 def wait_for_completion_events(
     event_paths: list[Path],
     *,
@@ -1900,6 +1904,7 @@ def wait_for_completion_events(
         raise RunnerError("--poll-seconds must be a finite number greater than 0", 4)
 
     pending: dict[Path, str | None] = dict.fromkeys(event_paths)
+    terminal_since: dict[Path, float] = {}
     mailbox = bundled_module("peer_mailbox") if messages else None
     deadline = time.monotonic() + timeout_seconds
     repository_text = str(repository.resolve()) if repository else None
@@ -1907,20 +1912,34 @@ def wait_for_completion_events(
         for path in list(pending):
             event = read_completion_event(path)
             if messages:
-                run_id = (event or {}).get("run_id") or pending[path] or path.stem
+                run_id = (
+                    (event or {}).get("run_id")
+                    or pending[path]
+                    or mailbox.aliased_run(mailbox.root(), path.stem)
+                    or path.stem
+                )
                 info = mailbox.run_info(mailbox.root(), run_id)
                 if info is not None:
                     run_peer = mailbox.run_peers(mailbox.root(), run_id)["conductor"]
                     if repository_text and run_peer["repository"] != repository_text:
                         raise RunnerError("mailbox run does not belong to this repository", 4)
                     incoming = mailbox.run_inbox(mailbox.root(), run_id, "conductor")
-                    if incoming:
+                    status = mailbox.run_status(mailbox.root(), run_id)
+                    if event is None and status:
+                        terminal_since.setdefault(path, time.monotonic())
+                    # A run past its deadline publishes no event, and one whose result was written but whose
+                    # event still is not there a few seconds later lost it; say so instead of waiting out.
+                    stalled = event is None and (
+                        status == "deadline_expired"
+                        or (status and time.monotonic() - terminal_since[path] >= MISSING_EVENT_GRACE_SECONDS)
+                    )
+                    if incoming or stalled:
                         yield {
                             "schema": "agent-executor.message-signal.v1",
                             "event_id": path.stem,
                             "mailbox": info["conductor"],
                             "messages": incoming,
-                            "run_status": mailbox.run_status(mailbox.root(), run_id),
+                            "run_status": status,
                         }
                         return
             if event is None:
@@ -3225,7 +3244,7 @@ def detached_runner_command(
         "--notify",
         notification_mode,
         "--mailbox-run-id",
-        args.mailbox_run_id or event_path.stem,
+        bundled_module("peer_mailbox").run_id_for(args.mailbox_run_id or event_path.stem),
     ]
     if task_spec_path is not None:
         command.extend(["--task-spec", str(task_spec_path)])
@@ -3324,7 +3343,7 @@ def launch_detached(args: argparse.Namespace) -> int:
     run_dir = job_dir / "run"
     result_path = run_dir / "result.json"
     mailbox_module = bundled_module("peer_mailbox")
-    mailbox_run_id = args.mailbox_run_id or event_path.stem
+    mailbox_run_id = bundled_module("peer_mailbox").run_id_for(args.mailbox_run_id or event_path.stem)
     mailbox_deadline = (
         args.deadline or (dt.datetime.now(dt.UTC) + dt.timedelta(seconds=timeout_seconds + 60)).isoformat()
     )
@@ -3479,6 +3498,7 @@ class JobSteering:
         self.stdout_path: Path | None = None
         self.log_path: Path | None = None
         self.session_hint: str | None = None
+        self.mailbox_run: str | None = None
         self.state: dict[str, Any] = {
             "schema": STEER_STATE_SCHEMA,
             "protocol": STEER_PROTOCOL,
@@ -3579,6 +3599,10 @@ class JobSteering:
                 "the new instruction in the brief (the executor's context is lost)"
             )
         event_path = prepare_completion_event_path()
+        if self.mailbox_run:
+            # Waiting on the new event finds the run's mail before that event exists.
+            mailbox = bundled_module("peer_mailbox")
+            mailbox.alias_event(mailbox.root(), event_path.stem, self.mailbox_run)
         run_dir = steer_dir / "run"
         run_dir.mkdir(mode=0o700)
         accepted = {
@@ -3602,6 +3626,22 @@ class JobSteering:
         self.save(phase="steering", executor_pid=None)
         self.pending = {**accepted, "message": message}
         return True
+
+
+def foreground_run_name(out_dir: Path) -> str:
+    """Output directories can share a basename; the path's hash keeps their mailbox runs apart."""
+    return f"{out_dir.name}-{hashlib.sha1(str(out_dir.resolve()).encode()).hexdigest()[:8]}"
+
+
+def write_run_result(result_path: Path, result: dict[str, Any]) -> None:
+    """Publish a run's result under the lock every run send holds, so no message lands after it."""
+    run = (result.get("mailbox") or {}).get("run")
+    if not run:
+        write_json_atomic(result_path, result)
+        return
+    mailbox = bundled_module("peer_mailbox")
+    with mailbox.run_lock(mailbox.root(), run):
+        write_json_atomic(result_path, result)
 
 
 # The segment a detached runner is on, so an uncaught failure publishes to the event people wait on.
@@ -3630,7 +3670,7 @@ def finish_run(
         )
     except (OSError, ValueError, KeyError, TypeError):
         result["tariff_estimate"] = {"estimated_usd": None, "gaps": ["tariff_registry_unavailable_or_invalid"]}
-    write_json_atomic(result_path, result)
+    write_run_result(result_path, result)
     if completion_event_path is not None:
         publish_completion_event(
             result=result,
@@ -3688,11 +3728,11 @@ def publish_uncaught_completion_failure(error: Exception, exit_code: int) -> Non
                 skipped_reason=("runner_failed" if args.verify_command else None),
             ),
         }
-        run_id = args.mailbox_run_id or event_path.stem
+        run_id = bundled_module("peer_mailbox").run_id_for(args.mailbox_run_id or event_path.stem)
         mailbox_info = bundled_module("peer_mailbox").run_info(bundled_module("peer_mailbox").root(), run_id)
         if mailbox_info:
             result["mailbox"] = mailbox_info
-        write_json_atomic(result_path, result)
+        write_run_result(result_path, result)
         completion_hook: Path | None
         try:
             completion_hook = resolve_completion_hook(args.completion_hook)
@@ -4376,7 +4416,11 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
     out_dir = prepare_out_dir(args.out_dir, repo)
     result_path = out_dir / "result.json"
     mailbox_module = bundled_module("peer_mailbox")
-    mailbox_run_id = args.mailbox_run_id or (completion_event_path.stem if completion_event_path else out_dir.name)
+    mailbox_run_id = bundled_module("peer_mailbox").run_id_for(
+        args.mailbox_run_id or (completion_event_path.stem if completion_event_path else foreground_run_name(out_dir))
+    )
+    if steering is not None:
+        steering.mailbox_run = mailbox_run_id
     mailbox_deadline = (
         args.deadline or (dt.datetime.now(dt.UTC) + dt.timedelta(seconds=timeout_seconds + 60)).isoformat()
     )

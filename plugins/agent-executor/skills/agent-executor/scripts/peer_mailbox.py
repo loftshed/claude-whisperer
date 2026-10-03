@@ -20,6 +20,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,8 @@ MAX_RUN_BYTES = 16 * 1024
 MAX_RUN_MESSAGES = 1024
 # No colon: session_key() maps it to "_", which would let two run ids share one set of files.
 RUN_ID = r"[A-Za-z0-9_.-]{1,80}"
+MESSAGE_ID = r"[0-9a-f]+-[0-9a-f]{6}"
+RUN_FIELDS = ("session", "name", "harness", "cwd", "role", "run", "counterpart", "repository", "resultPath", "deadline")
 MAX_AGE = dt.timedelta(days=7)
 # A peer without a known pid counts as live this long after it was last seen.
 UNKNOWN_PID_TTL = dt.timedelta(hours=2)
@@ -73,7 +76,16 @@ def stamp(moment: dt.datetime | None = None) -> str:
 
 
 def parse_stamp(value: str) -> dt.datetime:
-    return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    moment = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return moment if moment.tzinfo else moment.replace(tzinfo=dt.UTC)
+
+
+def run_deadline(peer: dict[str, Any]) -> dt.datetime | None:
+    """None for an unreadable deadline, which callers treat as already passed."""
+    try:
+        return parse_stamp(str(peer.get("deadline")))
+    except ValueError:
+        return None
 
 
 def write(path: Path, value: dict[str, Any]) -> None:
@@ -91,9 +103,10 @@ def write(path: Path, value: dict[str, Any]) -> None:
 
 def load(path: Path) -> dict[str, Any] | None:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return value if isinstance(value, dict) else None
 
 
 @contextlib.contextmanager
@@ -110,7 +123,20 @@ def locked(path: Path):
 def session_key(session: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", session):
         raise MailboxError(f"invalid session id: {session!r}")
-    return session.replace(":", "_")
+    # "%" and "~" are not allowed in a session id, so the mapping stays one-to-one. Ids with capitals
+    # carry a hash, so ids differing only by case keep apart on a case-insensitive filesystem.
+    key = session.replace(":", "%3A")
+    if session == session.lower() and len(key) <= 128:
+        return key
+    # Capitals and over-long names carry a hash of the full id, so neither case-folding nor
+    # truncation can make two ids share a file.
+    return f"{key[:128]}~{hashlib.sha1(session.encode()).hexdigest()[:10]}"
+
+
+def legacy_session_keys(session: str) -> list[str]:
+    """File names earlier versions used for this session, which could collide with another session's."""
+    keys = {session.replace(":", "_"), session.replace(":", "%3A")} - {session_key(session)}
+    return sorted(keys)
 
 
 def peer_path(base: Path, session: str) -> Path:
@@ -132,11 +158,57 @@ def is_run_peer(peer: dict[str, Any] | None) -> bool:
     return bool(peer and isinstance(peer.get("run"), str) and peer.get("role") in {"worker", "conductor"})
 
 
+def owns(base: Path, path: Path, peer: dict[str, Any]) -> bool:
+    """Whether the record sits at its own session's file, not a copy or a stray."""
+    try:
+        return peer_path(base, peer["session"]) == path
+    except MailboxError:
+        return False
+
+
+def run_traffic(items: list[dict[str, Any]], run: str) -> list[dict[str, Any]]:
+    """Messages of this run, leaving out anything an ordinary session of the same name received."""
+    return [item for item in items if item.get("run") == run]
+
+
+def alias_event(base: Path, event_id: str, run: str) -> None:
+    """Record that a continuation event (from steering) belongs to an existing run."""
+    write(base / "aliases" / f"{run_id_for(event_id)}.json", {"run": run})
+
+
+def aliased_run(base: Path, event_id: str) -> str | None:
+    alias = load(base / "aliases" / f"{run_id_for(event_id)}.json")
+    run = alias.get("run") if alias else None
+    return run if isinstance(run, str) and re.fullmatch(RUN_ID, run) else None
+
+
+def run_id_for(name: str) -> str:
+    """A valid run id for a job or event name, unchanged when it already is one."""
+    if re.fullmatch(RUN_ID, name):
+        return name
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-")[:60] or "run"
+    return f"{stem}-{hashlib.sha1(name.encode()).hexdigest()[:8]}"
+
+
+def is_run_record(peer: dict[str, Any] | None) -> bool:
+    """A run peer with every field the run code reads."""
+    if not (is_run_peer(peer) and all(isinstance(peer.get(field), str) for field in RUN_FIELDS)):
+        return False
+    if not re.fullmatch(RUN_ID, peer["run"]):
+        return False  # the run id becomes a lock-file name
+    try:
+        session_key(peer["session"])
+        session_key(peer["counterpart"])
+    except MailboxError:
+        return False
+    return True
+
+
 def run_peers(base: Path, run: str) -> dict[str, dict[str, Any]]:
     found = {}
     for path in sorted((base / "peers").glob("*.json")):
         peer = load(path)
-        if is_run_peer(peer) and peer.get("run") == run:
+        if is_run_record(peer) and peer.get("run") == run and owns(base, path, peer):
             found[peer["role"]] = peer
     return found
 
@@ -166,15 +238,19 @@ def run_status(base: Path, run: str) -> str | None:
             result = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             break
-        continuation = (result.get("steered_to") or {}).get("result_path")
-        if continuation:
+        if not isinstance(result, dict):
+            break
+        steered = result.get("steered_to")
+        continuation = steered.get("result_path") if isinstance(steered, dict) else None
+        if isinstance(continuation, str) and continuation:
             path = Path(continuation)
             continue
         if result.get("finished_at"):
-            return result.get("status", "finished")
+            status = result.get("status")
+            return status if isinstance(status, str) and status else "finished"
         break
-    deadline = dt.datetime.fromisoformat(peer["deadline"].replace("Z", "+00:00"))
-    if now() >= deadline:
+    deadline = run_deadline(peer)
+    if deadline is None or now() >= deadline:
         return "deadline_expired"
     return None
 
@@ -192,18 +268,28 @@ def run_closed_at(base: Path, run: str) -> dt.datetime | None:
             result = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             break
-        continuation = (result.get("steered_to") or {}).get("result_path")
-        if continuation:
+        if not isinstance(result, dict):
+            break
+        steered = result.get("steered_to")
+        continuation = steered.get("result_path") if isinstance(steered, dict) else None
+        if isinstance(continuation, str) and continuation:
             path = Path(continuation)
             continue
         finished = result.get("finished_at")
         if finished:
             try:
-                return dt.datetime.fromisoformat(str(finished).replace("Z", "+00:00"))
+                return parse_stamp(str(finished))
             except ValueError:
                 return dt.datetime.fromtimestamp(path.stat().st_mtime, dt.UTC)
         break
-    deadline = dt.datetime.fromisoformat(peer["deadline"].replace("Z", "+00:00"))
+    deadline = run_deadline(peer)
+    if deadline is None:
+        # Retention runs from the last write, not from a made-up deadline in the past.
+        stamps = []
+        for item in found.values():
+            with contextlib.suppress(OSError):
+                stamps.append(peer_path(base, item["session"]).stat().st_mtime)
+        return dt.datetime.fromtimestamp(max(stamps), dt.UTC) if stamps else now()
     return deadline if now() >= deadline else None
 
 
@@ -235,6 +321,9 @@ def open_run(
     sessions = {role: f"run-{run_id}-{role}" for role in ("conductor", "worker")}
     lock_path = base / "locks" / f"run-{run_id}.lock"
     with locked(lock_path):
+        for session in sessions.values():
+            with locked(peer_path(base, session)):
+                migrate_legacy_session(base, session)
         found = run_peers(base, run_id)
         if any(peer.get("repository") != repo or peer.get("resultPath") != result for peer in found.values()):
             raise MailboxError(f"mailbox run {run_id!r} already belongs to another result")
@@ -251,18 +340,33 @@ def open_run(
         }
         for role, session in sessions.items():
             harness, pid = values[role]
-            peer = register(base, session=session, harness=harness, cwd=repo, pid=pid, state="waiting")
-            peer.update(
-                role=role,
-                run=run_id,
-                counterpart=sessions["worker" if role == "conductor" else "conductor"],
-                repository=repo,
-                resultPath=result,
-                deadline=deadline,
-            )
+            moment = stamp()
             path = peer_path(base, session)
+            # One write with the run fields, so the peer is never briefly an ordinary, reachable session.
             with locked(path):
-                write(path, peer)
+                existing = load(path)
+                if existing and not is_run_peer(existing) and is_live(existing):
+                    raise MailboxError(f"session {session!r} belongs to a live ordinary peer")
+                write(
+                    path,
+                    {
+                        "schema": PEER_SCHEMA,
+                        "session": session,
+                        "harness": harness,
+                        "cwd": repo,
+                        "pid": pid,
+                        "startedAt": (load(path) or {}).get("startedAt") or moment,
+                        "lastSeenAt": moment,
+                        "state": "waiting",
+                        "name": peer_name(harness, repo, session),
+                        "role": role,
+                        "run": run_id,
+                        "counterpart": sessions["worker" if role == "conductor" else "conductor"],
+                        "repository": repo,
+                        "resultPath": result,
+                        "deadline": deadline,
+                    },
+                )
     return {"run": run_id, **sessions}
 
 
@@ -289,7 +393,7 @@ def _update_run_deadline_locked(base: Path, run: str, deadline: str) -> None:
 def set_run_deadline(base: Path, run: str, deadline: str) -> None:
     if not re.fullmatch(RUN_ID, run):
         raise MailboxError("invalid run id")
-    with locked(base / "locks" / f"run-{run}.lock"):
+    with run_lock(base, run):
         _update_run_deadline_locked(base, run, deadline)
 
 
@@ -297,7 +401,7 @@ def run_inbox(base: Path, run: str, role: str) -> list[dict[str, Any]]:
     peer = run_peers(base, run).get(role)
     if not peer:
         raise MailboxError(f"mailbox run {run!r} has no {role} session")
-    return messages(base, peer["session"])[:20]
+    return run_traffic(messages(base, peer["session"]), run)[:20]
 
 
 def run_history(base: Path, run: str) -> dict[str, Any]:
@@ -306,7 +410,7 @@ def run_history(base: Path, run: str) -> dict[str, Any]:
         raise MailboxError(f"no complete mailbox run {run!r}")
     history = []
     for peer in found.values():
-        history.extend(messages(base, peer["session"], unread_only=False))
+        history.extend(run_traffic(messages(base, peer["session"], unread_only=False), run))
     return {
         "run": run,
         "mailbox": found["conductor"]["session"],
@@ -321,12 +425,14 @@ def run_question(base: Path, session: str, identifier: str) -> dict[str, Any] | 
     return None
 
 
-def find_run_question(base: Path, run: str, identifier: str) -> dict[str, Any] | None:
+def find_run_question(base: Path, run: str, identifier: str, *, sender: str) -> dict[str, Any] | None:
     return next(
         (
             message
             for message in run_messages(base, run)
-            if identifier in (message.get("id"), message.get("clientId")) and message.get("kind") == "question"
+            if identifier in (message.get("id"), message.get("clientId"))
+            and message.get("kind") == "question"
+            and message.get("from", {}).get("session") == sender
         ),
         None,
     )
@@ -338,19 +444,19 @@ def run_messages(base: Path, run: str) -> list[dict[str, Any]]:
         raise MailboxError(f"no complete mailbox run {run!r}")
     history = []
     for peer in found.values():
-        history.extend(messages(base, peer["session"], unread_only=False))
+        history.extend(run_traffic(messages(base, peer["session"], unread_only=False), run))
     return history
 
 
 def run_ack(base: Path, session: str, identifiers: list[str]) -> list[str]:
+    peer = load(peer_path(base, session))
+    inbox = messages(base, session, unread_only=False)
+    if is_run_peer(peer):
+        inbox = run_traffic(inbox, peer["run"])
     found = []
     for identifier in identifiers:
         match = next(
-            (
-                message
-                for message in messages(base, session, unread_only=False)
-                if identifier in (message.get("id"), message.get("clientId"))
-            ),
+            (message for message in inbox if identifier in (message.get("id"), message.get("clientId"))),
             None,
         )
         if not match:
@@ -360,8 +466,13 @@ def run_ack(base: Path, session: str, identifiers: list[str]) -> list[str]:
     return found
 
 
+def run_lock(base: Path, run: str):
+    """Held by every run send and by the runner while it publishes the run's result."""
+    return locked(base / "locks" / f"run-{run}.lock")
+
+
 def pid_alive(pid: int | None) -> bool | None:
-    if not pid:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None
     try:
         os.kill(pid, 0)
@@ -369,6 +480,8 @@ def pid_alive(pid: int | None) -> bool | None:
         return False
     except PermissionError:
         return True
+    except (OverflowError, ValueError):
+        return None  # not a pid this system can have
     return True
 
 
@@ -397,11 +510,55 @@ def harness_pid(harness: str, start: int | None = None) -> int | None:
 
 def is_live(peer: dict[str, Any], moment: dt.datetime | None = None) -> bool:
     moment = moment or now()
-    seen = parse_stamp(peer.get("lastSeenAt") or peer.get("startedAt") or stamp(moment))
-    if moment - seen > MAX_AGE:
+    try:
+        seen = parse_stamp(peer.get("lastSeenAt") or peer.get("startedAt") or stamp(moment))
+    except (AttributeError, TypeError, ValueError):
         return False
     alive = pid_alive(peer.get("pid"))
+    if alive and peer.get("pidStarted"):
+        # The recorded process itself is still running: present however long it has been idle.
+        current = process_started(peer["pid"])
+        if current == peer["pidStarted"]:
+            return True
+        if current is not None:
+            return False  # the recorded process ended and its pid now belongs to another one
+    if moment - seen > MAX_AGE:
+        return False
     return alive if alive is not None else moment - seen <= UNKNOWN_PID_TTL
+
+
+def process_started(pid: int) -> str | None:
+    """The start time ps reports for a pid, which tells a reused pid from the process recorded."""
+    try:
+        started = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=2
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return started or None
+
+
+def migrate_legacy_session(base: Path, session: str) -> None:
+    """Move a session's peer and inbox from file names earlier versions used, keeping only what is its own."""
+    for legacy in legacy_session_keys(session):
+        legacy_peer = base / "peers" / f"{legacy}.json"
+        old = load(legacy_peer)
+        if old and old.get("session") == session:
+            if not peer_path(base, session).exists():
+                write(peer_path(base, session), old)
+            legacy_peer.unlink(missing_ok=True)
+        legacy_inbox = base / "inbox" / legacy
+        if not legacy_inbox.is_dir():
+            continue
+        for message_path in legacy_inbox.glob("*.json"):
+            message = load(message_path)
+            recipient = message.get("to") if message else None
+            if isinstance(recipient, dict) and recipient.get("session") == session:
+                target = inbox_dir(base, session) / message_path.name
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                os.replace(message_path, target)
+        with contextlib.suppress(OSError):
+            legacy_inbox.rmdir()
 
 
 def register(
@@ -420,7 +577,9 @@ def register(
         raise MailboxError(f"unknown state {state!r}")
     path = peer_path(base, session)
     with locked(path):
+        migrate_legacy_session(base, session)
         peer = load(path) or {}
+        previous_pid = peer.get("pid")
         moment = stamp()
         if peer.get("harness") not in (None, harness, "unknown") and harness == "unknown":
             harness = peer["harness"]
@@ -430,13 +589,25 @@ def register(
             harness=harness,
             cwd=cwd or peer.get("cwd") or "",
             pid=pid or peer.get("pid"),
-            startedAt=peer.get("startedAt") or moment,
+            startedAt=peer["startedAt"] if valid_stamp(peer.get("startedAt")) else moment,
             lastSeenAt=moment,
             state=state or peer.get("state") or "idle",
         )
         peer["name"] = peer_name(peer["harness"], peer["cwd"], session)
+        if pid and (pid != previous_pid or not peer.get("pidStarted")):
+            peer["pidStarted"] = process_started(pid)
         write(path, peer)
         return peer
+
+
+def drop_if_dead(path: Path, moment: dt.datetime) -> bool:
+    """Remove a stale interactive peer, re-checked under the lock register takes."""
+    with locked(path):
+        peer = load(path)
+        if is_run_record(peer) or (valid_peer(peer) and is_live(peer, moment)):
+            return False
+        path.unlink(missing_ok=True)
+        return True
 
 
 def unregister(base: Path, session: str) -> None:
@@ -450,15 +621,28 @@ def peers(base: Path, *, prune_dead: bool = True, include_runs: bool = False) ->
         peer = load(path)
         if not peer or peer.get("schema") != PEER_SCHEMA:
             continue
+        try:
+            canonical = peer_path(base, str(peer.get("session")))
+        except MailboxError:
+            continue
+        if canonical != path and canonical.exists():
+            continue  # a pre-%3A record of a session that has registered again
         if is_run_peer(peer):
-            if include_runs:
+            if include_runs and is_run_record(peer):
                 found.append(peer)
+            continue
+        if not valid_peer(peer):
+            if prune_dead:
+                drop_if_dead(path, moment)
             continue
         if is_live(peer, moment):
             found.append(peer)
-        elif prune_dead:
-            path.unlink(missing_ok=True)
-    return sorted(found, key=lambda peer: (peer["name"], peer["startedAt"]))
+        elif prune_dead and not drop_if_dead(path, moment):
+            # The session refreshed itself after the read above.
+            fresh = load(path)
+            if valid_peer(fresh) and not is_run_peer(fresh) and is_live(fresh, moment):
+                found.append(fresh)
+    return sorted(found, key=lambda peer: (str(peer.get("name")), str(peer.get("startedAt"))))
 
 
 def resolve(base: Path, address: str) -> dict[str, Any]:
@@ -521,7 +705,7 @@ def run_send(
     }
     if client_id is not None:
         payload["clientId"] = client_id
-    with locked(base / "locks" / f"run-{run}.lock"):
+    with run_lock(base, run):
         all_messages = run_messages(base, run)
         existing = None
         if client_id is not None:
@@ -557,7 +741,12 @@ def run_send(
             question_ids = {question["id"]}
             if question.get("clientId") is not None:
                 question_ids.add(question["clientId"])
-            if any(message.get("replyTo") in question_ids for message in all_messages):
+            if any(
+                message.get("replyTo") in question_ids
+                and message.get("kind") == "reply"
+                and message.get("from", {}).get("session") == sender["session"]
+                for message in all_messages
+            ):
                 raise MailboxError("question already has a reply")
         payload.update(id=message_id(), sentAt=stamp(), readAt=None)
         path = inbox_dir(base, target["session"]) / f"{payload['id']}.json"
@@ -618,11 +807,47 @@ def send(
     return {"id": message["id"], "to": target["name"], "toState": target["state"], "toHarness": target["harness"]}
 
 
+def valid_stamp(value: Any) -> bool:
+    try:
+        parse_stamp(value)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return True
+
+
+def valid_message(message: dict[str, Any] | None) -> bool:
+    """A message with every field the readers and the renderer use; anything else is skipped."""
+    return bool(
+        message
+        and message.get("schema") == MAIL_SCHEMA
+        and isinstance(message.get("text"), str)
+        and isinstance(message.get("id"), str)
+        and re.fullmatch(MESSAGE_ID, message["id"]) is not None
+        and valid_stamp(message.get("sentAt"))
+        and isinstance(message.get("from"), dict)
+        and isinstance(message["from"].get("session"), str)
+        and isinstance(message.get("to"), dict)
+        and all(isinstance(message.get(field), (str, type(None))) for field in ("clientId", "replyTo", "kind", "run"))
+    )
+
+
+def valid_peer(peer: dict[str, Any] | None) -> bool:
+    """A peer record with every field listings and addressing use."""
+    return bool(
+        peer
+        and peer.get("schema") == PEER_SCHEMA
+        and all(isinstance(peer.get(field), str) for field in ("session", "name", "harness", "cwd"))
+        and valid_stamp(peer.get("startedAt"))
+        and valid_stamp(peer.get("lastSeenAt"))
+    )
+
+
 def messages(base: Path, session: str, *, unread_only: bool = True) -> list[dict[str, Any]]:
     found = []
     for path in sorted(inbox_dir(base, session).glob("*.json")):
         message = load(path)
-        if message and message.get("schema") == MAIL_SCHEMA and not (unread_only and message.get("readAt")):
+        # A record must sit at its own id's file, or marking it read would touch another file or none.
+        if valid_message(message) and message["id"] == path.stem and not (unread_only and message.get("readAt")):
             found.append(message)
     return found
 
@@ -630,7 +855,7 @@ def messages(base: Path, session: str, *, unread_only: bool = True) -> list[dict
 def mark_read(base: Path, session: str, ids: list[str]) -> list[str]:
     marked = []
     for identifier in ids:
-        if not re.fullmatch(r"[0-9a-f]+-[0-9a-f]{6}", identifier):
+        if not re.fullmatch(MESSAGE_ID, identifier):
             raise MailboxError(f"invalid message id: {identifier!r}")
         path = inbox_dir(base, session) / f"{identifier}.json"
         with locked(path):
@@ -644,11 +869,31 @@ def mark_read(base: Path, session: str, ids: list[str]) -> list[str]:
     return marked
 
 
+def claim(base: Path, session: str, found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark messages read and keep only those this call was first to mark, so each reader gets its own."""
+    claimed = []
+    for message in found:
+        path = inbox_dir(base, session) / f"{message['id']}.json"
+        with locked(path):
+            current = load(path)
+            if valid_message(current) and not current.get("readAt"):
+                current["readAt"] = stamp()
+                write(path, current)
+                claimed.append(message)
+    return claimed
+
+
 def take(base: Path, session: str, *, mark: bool = True, limit: int = 20) -> list[dict[str, Any]]:
-    unread = messages(base, session)[:limit]
-    if mark and unread:
-        mark_read(base, session, [message["id"] for message in unread])
-    return unread
+    if not mark:
+        return messages(base, session)[:limit]
+    taken: list[dict[str, Any]] = []
+    while len(taken) < limit:  # every pass claims a message, here or in a competing reader, so this ends
+        # Re-read after each claim: a concurrent reader may have taken part of the last snapshot.
+        unread = messages(base, session)[: limit - len(taken)]
+        if not unread:
+            break
+        taken += claim(base, session, unread)
+    return taken
 
 
 def wait(
@@ -659,6 +904,7 @@ def wait(
     reply_to: str | None = None,
     mark: bool = True,
     poll: float = 0.25,
+    cancelled: threading.Event | None = None,
 ) -> dict[str, Any]:
     if not math.isfinite(timeout) or timeout <= 0:
         raise MailboxError("timeout must be a finite number of seconds greater than zero")
@@ -667,13 +913,15 @@ def wait(
     run_peer = peer if is_run_peer(peer) else None
     question_ids = {reply_to} if reply_to else set()
     if run_peer and reply_to:
-        question = find_run_question(base, run_peer["run"], reply_to)
-        if not question or question.get("from", {}).get("session") != session:
+        question = find_run_question(base, run_peer["run"], reply_to, sender=session)
+        if not question:
             raise MailboxError("wait requires a question sent by this recipient")
         question_ids = {question["id"], question.get("clientId")} - {None}
     while True:
         # A run reply stays replayable after it was read, as the old channel's were.
         unread = messages(base, session, unread_only=not (run_peer and reply_to))
+        if run_peer:
+            unread = run_traffic(unread, run_peer["run"])
         if reply_to:
             unread = [
                 message
@@ -683,7 +931,9 @@ def wait(
         if unread:
             unread = unread[:20]
             if mark and not run_peer:
-                mark_read(base, session, [message["id"] for message in unread])
+                unread = claim(base, session, unread)
+                if not unread:
+                    continue  # another reader took them first; keep waiting
             result = {"status": "messages", "messages": unread}
             if run_peer:
                 result.update(mailbox=session, run_status=run_status(base, run_peer["run"]))
@@ -695,7 +945,11 @@ def wait(
         remaining = until - time.monotonic()
         if remaining <= 0:
             return {"status": "timed_out", "messages": []}
-        time.sleep(min(poll, remaining))
+        if cancelled is not None:
+            if cancelled.wait(min(poll, remaining)):
+                return {"status": "cancelled", "messages": []}
+        else:
+            time.sleep(min(poll, remaining))
 
 
 def prune(base: Path) -> dict[str, int]:
@@ -704,13 +958,19 @@ def prune(base: Path) -> dict[str, int]:
     run_sessions: set[str] = set()
     for path in (base / "peers").glob("*.json"):
         peer = load(path)
-        if not is_run_peer(peer):
+        if not is_run_record(peer):
             continue
         run = peer["run"]
         run_sessions.add(peer["session"])
-        closed_at = run_closed_at(base, run)
-        if closed_at and moment - closed_at > MAX_AGE:
-            for session in (item["session"] for item in run_peers(base, run).values()):
+        # Under the run's lock, so a reopen or a send cannot land between the decision and the delete.
+        with run_lock(base, run):
+            closed_at = run_closed_at(base, run)
+            expired = (
+                [item["session"] for item in run_peers(base, run).values()]
+                if (closed_at and moment - closed_at > MAX_AGE)
+                else []
+            )
+            for session in expired:
                 peer_path(base, session).unlink(missing_ok=True)
                 inbox = inbox_dir(base, session)
                 if inbox.exists():
@@ -720,20 +980,23 @@ def prune(base: Path) -> dict[str, int]:
                     with contextlib.suppress(OSError):
                         inbox.rmdir()
                 removed["peers"] += 1
-    live = {peer["session"] for peer in peers(base, prune_dead=False)}
+    for path in (base / "aliases").glob("*.json"):
+        with contextlib.suppress(OSError):
+            if time.time() - path.stat().st_mtime > MAX_AGE.total_seconds():
+                path.unlink()
     for path in (base / "peers").glob("*.json"):
-        peer = load(path)
-        if is_run_peer(peer):
-            continue
-        if not peer or peer.get("session") not in live:
-            path.unlink(missing_ok=True)
+        if drop_if_dead(path, now()):
             removed["peers"] += 1
     cutoff = now() - MAX_AGE
     for path in (base / "inbox").glob("*/*.json"):
         if path.parent.name in {session_key(session) for session in run_sessions}:
             continue
         message = load(path)
-        if not message or parse_stamp(message.get("sentAt", "1970-01-01T00:00:00Z")) < cutoff:
+        try:
+            expired = not message or parse_stamp(str(message.get("sentAt"))) < cutoff
+        except ValueError:
+            expired = True
+        if expired:
             path.unlink(missing_ok=True)
             removed["messages"] += 1
     return removed

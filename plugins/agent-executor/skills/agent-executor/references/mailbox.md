@@ -1,8 +1,8 @@
 # Peer mailbox
 
 Agent sessions in different harnesses list each other and exchange messages through a local store,
-`<agent-executor cache>/mailbox-v1/` (`peers/<session>.json`, `inbox/<session>/<id>.json`). Nothing
-leaves the machine.
+`<agent-executor cache>/mailbox-v1/` (`peers/<session>.json`, `inbox/<session>/<id>.json`, with `:` in a
+session id written as `%3A`). Nothing leaves the machine.
 
 **Native first.** A session messages agents of its own harness with that harness's native tools whenever
 it has any (Claude Code: `SendMessage` and `ListAgents`). Interactive mailbox traffic is only for crossing
@@ -38,7 +38,9 @@ python3 scripts/run_agent.py events wait EVENT_ID --messages --timeout 30m
 ```
 
 An `agent-executor.message-signal.v1` includes the conductor `mailbox` session, unread `messages`, and
-`run_status` (`null` while the run remains open). Waiting and inbox reads leave messages unread. Handle a
+`run_status` (`null` while the run remains open). A run that closed without
+a completion event (its deadline passed, or its result has stood for five seconds with no event) also
+produces one, with no messages and its `run_status`. Waiting and inbox reads leave messages unread. Handle a
 message, then wait again; events follow behaves the same way and returns early when a run needs attention.
 
 The worker asks and waits for the matching reply in one command. The supplied ID makes retries idempotent:
@@ -93,11 +95,12 @@ the wrapper early.
 
 ## Identity
 
-| Host        | Session id                                   | Harness from                           |
-| ----------- | -------------------------------------------- | -------------------------------------- |
-| Claude Code | `CLAUDE_CODE_SESSION_ID` in the server's env | `clientInfo.name` = `claude-code`      |
-| Codex       | `_meta.sessionId` on every `tools/call`      | `clientInfo.name` = `codex-mcp-client` |
-| Others      | hash of harness, harness pid and cwd         | `clientInfo.name`                      |
+| Host        | Session id                                    | Harness from                           |
+| ----------- | --------------------------------------------- | -------------------------------------- |
+| Claude Code | `CLAUDE_CODE_SESSION_ID` in the server's env  | `clientInfo.name` = `claude-code`      |
+| Codex       | `_meta.sessionId` on every `tools/call`       | `clientInfo.name` = `codex-mcp-client` |
+| OpenCode    | `_meta["ai.opencode/sessionID"]` on each call | `clientInfo.name` = `opencode`         |
+| Others      | hash of harness, harness pid and cwd          | `clientInfo.name`                      |
 
 Presence ends with the harness process (its pid is recorded); a peer without a pid expires two hours
 after it was last seen. Messages are pruned after seven days (`mailbox prune`).

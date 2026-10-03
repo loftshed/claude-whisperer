@@ -256,7 +256,7 @@ def main() -> None:
             time.sleep(0.2)
         packet = json.loads((folder / "completion.json").read_text())
         result = audit(state, run, ready, packet, runner, support, lease)
-        runner.write_json_atomic(Path(run["result_path"]), result)
+        runner.write_run_result(Path(run["result_path"]), result)
 
 
 if __name__ == "__main__":

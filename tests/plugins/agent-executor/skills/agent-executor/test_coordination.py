@@ -747,6 +747,8 @@ class CoordinatorTests(unittest.TestCase):
             self.assertEqual(result["mailbox"], mailbox)
             review_message = self.call("next")[1]
             self.assertEqual((review_message["action"], review_message["run_status"]), ("review_message", "completed"))
+            with mock.patch.object(COORDINATOR.RUNNER, "deadline_remaining", return_value=0):
+                self.assertEqual(self.call("next")[1]["action"], "review_message")
             with self.assertRaisesRegex(MAILBOX.MailboxError, "run is closed"):
                 MAILBOX.send(
                     MAILBOX.root(),
