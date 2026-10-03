@@ -391,11 +391,11 @@ def run_inbox(base: Path, run: str, role: str) -> list[dict[str, Any]]:
 
 
 def run_history(base: Path, run: str) -> dict[str, Any]:
-    history = run_messages(base, run)  # raises unless the run is complete
+    found = run_peers(base, run)  # read once: a prune may remove the run while the history is collected
     return {
         "run": run,
-        "mailbox": run_peers(base, run)["conductor"]["session"],
-        "messages": sorted(history, key=lambda item: item["id"]),
+        "mailbox": found.get("conductor", {}).get("session"),
+        "messages": sorted(run_messages(base, run, found), key=lambda item: item["id"]),
     }
 
 
@@ -419,8 +419,8 @@ def find_run_question(base: Path, run: str, identifier: str, *, sender: str) -> 
     )
 
 
-def run_messages(base: Path, run: str) -> list[dict[str, Any]]:
-    found = run_peers(base, run)
+def run_messages(base: Path, run: str, found: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    found = run_peers(base, run) if found is None else found
     if len(found) != 2:
         raise MailboxError(f"no complete mailbox run {run!r}")
     history = []
@@ -600,9 +600,11 @@ def describe_colleagues(rows: list[dict[str, Any]], me: dict[str, Any]) -> str:
 def set_focus(base: Path, session: str, text: str) -> dict[str, Any]:
     """One line on what this session is working on, shown to every agent in the same repository."""
     peer = load(peer_path(base, session))
-    if not valid_peer(peer) or is_run_peer(peer):
+    if valid_peer(peer) and not is_run_peer(peer):
+        peer = annotate(base, session, focus=" ".join(text.split())[:200])
+    if not valid_peer(peer) or is_run_peer(peer):  # also when the session ended in between
         raise MailboxError("register this session before setting its focus")
-    return annotate(base, session, focus=" ".join(text.split())[:200])
+    return peer
 
 
 def register(

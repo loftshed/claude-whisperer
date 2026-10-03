@@ -21,7 +21,7 @@ SCRIPTS = Path(MAILBOX.__file__).parent
 SERVER = SCRIPTS / "mailbox_mcp.py"
 
 
-def mailbox_cli(base, *args, cwd=None, check=False):
+def mailbox_cli(base, *args, cwd=None, check=False, timeout=20):
     """`run_agent.py mailbox ARGS` against the store at BASE, outside any run."""
     environment = {**os.environ, "AGENT_EXECUTOR_HOME": str(base.parent)}
     environment.pop("AGENT_MAILBOX_SESSION", None)
@@ -29,7 +29,7 @@ def mailbox_cli(base, *args, cwd=None, check=False):
         [sys.executable, "-B", str(SCRIPTS / "run_agent.py"), "mailbox", *args],
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=timeout,
         cwd=cwd,
         env=environment,
         check=check,
@@ -361,6 +361,15 @@ class MailboxTests(unittest.TestCase):
         mailbox_cli(self.base, *focus, check=True)
         self.assertIsNone(MAILBOX.load(MAILBOX.peer_path(self.base, "native-cli-worker"))["delegatedRun"])
 
+    def test_focus_fails_when_the_session_ends_before_it_is_written(self):
+        def end_first(base, session, **fields):
+            MAILBOX.unregister(base, session)
+            return {}
+
+        with mock.patch.object(MAILBOX, "annotate", side_effect=end_first):
+            with self.assertRaisesRegex(MAILBOX.MailboxError, "register this session"):
+                MAILBOX.set_focus(self.base, self.codex["session"], "x")
+
     def test_cli_peers_marks_the_callers_current_repository(self):
         repo = self.git_checkout("cli-here")
         self.hook("codex-cli-1", "codex", repo, "SessionStart")
@@ -653,13 +662,18 @@ class RunMailboxTests(unittest.TestCase):
             )
 
     def test_ask_with_an_invalid_timeout_sends_nothing(self):
-        result = subprocess.run(
-            [sys.executable, "-B", str(SCRIPTS / "run_agent.py"), "mailbox", "ask"]
-            + ["--session", self.info["worker"], "--id", "q9", "--text", "hi", "--timeout", "0"],
-            capture_output=True,
-            text=True,
+        result = mailbox_cli(
+            self.base,
+            "ask",
+            "--session",
+            self.info["worker"],
+            "--id",
+            "q9",
+            "--text",
+            "hi",
+            "--timeout",
+            "0",
             timeout=10,
-            env={**os.environ, "AGENT_EXECUTOR_HOME": str(self.directory)},
         )
         self.assertEqual(result.returncode, 4)
         self.assertEqual(MAILBOX.run_messages(self.base, "run-test"), [])
@@ -909,25 +923,11 @@ class RunMailboxTests(unittest.TestCase):
             )
 
     def test_wait_timeout_closed_deadline_and_finished_result_exit_codes(self):
-        environment = {**os.environ, "AGENT_EXECUTOR_HOME": str(self.directory)}
-        script = str(SCRIPTS / "run_agent.py")
-        timed_out = subprocess.run(
-            [sys.executable, "-B", script, "mailbox", "wait", "--session", self.info["worker"], "--timeout", ".02"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            env=environment,
-        )
+        timed_out = mailbox_cli(self.base, "wait", "--session", self.info["worker"], "--timeout", ".02", timeout=3)
         self.assertEqual((timed_out.returncode, json.loads(timed_out.stdout)["status"]), (12, "timed_out"))
         self.result_path.write_text(json.dumps({"finished_at": "now", "status": "completed"}))
         self.assertEqual(MAILBOX.wait(self.base, self.info["worker"], timeout=1)["reason"], "completed")
-        closed = subprocess.run(
-            [sys.executable, "-B", script, "mailbox", "wait", "--session", self.info["worker"], "--timeout", "1"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            env=environment,
-        )
+        closed = mailbox_cli(self.base, "wait", "--session", self.info["worker"], "--timeout", "1", timeout=3)
         self.assertEqual((closed.returncode, json.loads(closed.stdout)["reason"]), (30, "completed"))
         with self.assertRaisesRegex(MAILBOX.MailboxError, "run is closed"):
             MAILBOX.send(
@@ -1207,6 +1207,18 @@ class RunMailboxTests(unittest.TestCase):
         path = MAILBOX.peer_path(self.base, self.info["worker"])
         MAILBOX.write(path, {**MAILBOX.load(path), "session": "missing-worker", "deadline": "bad"})
         MAILBOX.prune(self.base)
+
+    def test_history_reads_the_run_once(self):
+        original = MAILBOX.run_peers
+        calls = []
+
+        def pruned_after_first_read(base, run):
+            calls.append(run)
+            return original(base, run) if len(calls) == 1 else {}
+
+        with mock.patch.object(MAILBOX, "run_peers", side_effect=pruned_after_first_read):
+            history = MAILBOX.run_history(self.base, "run-test")
+        self.assertEqual((history["mailbox"], len(calls)), (self.info["conductor"], 1))
 
     def test_steered_run_keeps_messages_until_the_final_result_closes(self):
         next_result = self.directory / "next-result.json"
