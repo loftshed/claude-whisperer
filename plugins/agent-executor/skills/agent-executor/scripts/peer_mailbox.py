@@ -561,6 +561,65 @@ def migrate_legacy_session(base: Path, session: str) -> None:
             legacy_inbox.rmdir()
 
 
+def workspace(cwd: str) -> dict[str, str]:
+    """The repository a directory belongs to (one id for all its worktrees), its checkout and branch."""
+    if not cwd or not Path(cwd).is_dir():
+        return {}
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        lines = result.stdout.splitlines()
+        if result.returncode != 0 or len(lines) < 2:
+            return {}
+        branch = subprocess.run(
+            ["git", "-C", cwd, "symbolic-ref", "--short", "-q", "HEAD"], capture_output=True, text=True, timeout=3
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return {"repo": lines[0], "checkout": lines[1], "branch": branch or "(detached)"}
+
+
+def colleagues(base: Path, me: dict[str, Any]) -> list[dict[str, Any]]:
+    """Other live sessions, any harness, working in the same repository (any of its worktrees)."""
+    if not me.get("repo"):
+        return []
+    return [peer for peer in peers(base) if peer.get("repo") == me["repo"] and peer["session"] != me["session"]]
+
+
+def describe_colleagues(rows: list[dict[str, Any]], me: dict[str, Any]) -> str:
+    if not rows:
+        return ""
+    lines = [
+        "Other agent sessions are working in this repository right now. Before you edit, make sure you are not "
+        "about to change the same files or branch as one of them; if your work overlaps, agree on a split first "
+        f"({RULE}). Say what you are working on with the peer mailbox `focus` tool so they can see it too."
+    ]
+    for peer in rows:
+        where = "same checkout" if peer.get("checkout") == me.get("checkout") else f"worktree {peer.get('checkout')}"
+        line = f"- {peer['name']} ({peer['harness']}, {peer['state']}) on {peer.get('branch', '?')}, {where}"
+        if peer.get("focus"):
+            line += f": {peer['focus']}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def set_focus(base: Path, session: str, text: str) -> dict[str, Any]:
+    """One line on what this session is working on, shown to every agent in the same repository."""
+    focus = " ".join(text.split())[:200]
+    path = peer_path(base, session)
+    with locked(path):
+        peer = load(path)
+        if not valid_peer(peer) or is_run_peer(peer):
+            raise MailboxError("register this session before setting its focus")
+        peer["focus"] = focus
+        write(path, peer)
+        return peer
+
+
 def register(
     base: Path,
     *,
@@ -594,6 +653,10 @@ def register(
             state=state or peer.get("state") or "idle",
         )
         peer["name"] = peer_name(peer["harness"], peer["cwd"], session)
+        if not is_run_peer(peer):
+            for key in ("repo", "checkout", "branch"):
+                peer.pop(key, None)
+            peer.update(workspace(peer["cwd"]))
         if pid and (pid != previous_pid or not peer.get("pidStarted")):
             peer["pidStarted"] = process_started(pid)
         write(path, peer)
@@ -1059,14 +1122,33 @@ def hook(payload: dict[str, Any], *, harness: str | None = None, base: Path | No
     state = {"SessionStart": "idle", "UserPromptSubmit": "busy", "Stop": "idle"}.get(event)
     if state is None:
         return None
-    register(base, session=session, harness=harness, cwd=cwd, pid=harness_pid(harness), state=state)
+    me = register(base, session=session, harness=harness, cwd=cwd, pid=harness_pid(harness), state=state)
     context = render_all(take(base, session))
-    if not context:
-        return None
     if event == "Stop":
+        if not context:
+            return None
         # New mail arrived during the turn: keep going instead of leaving it unread until the user returns.
         return {"decision": "block", "reason": f"Peer messages arrived while you worked:\n\n{context}"}
+    # Who else works in this repository: at session start, and again whenever that set changes.
+    others = colleagues(base, me)
+    seen = sorted(peer["session"] for peer in others)
+    if event == "SessionStart" or seen != me.get("seenColleagues"):
+        notice = describe_colleagues(others, me)
+        if notice:
+            context = f"{notice}\n\n{context}" if context else notice
+        remember_colleagues(base, session, seen)
+    if not context:
+        return None
     return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": context}}
+
+
+def remember_colleagues(base: Path, session: str, seen: list[str]) -> None:
+    path = peer_path(base, session)
+    with locked(path):
+        peer = load(path)
+        if valid_peer(peer):
+            peer["seenColleagues"] = seen
+            write(path, peer)
 
 
 def caller(args: argparse.Namespace, base: Path) -> dict[str, Any]:
@@ -1083,13 +1165,28 @@ def caller(args: argparse.Namespace, base: Path) -> dict[str, Any]:
 def table(rows: list[dict[str, Any]], session: str | None, harness: str | None = None) -> str:
     if not rows:
         return "no live peers"
+    mine = next((peer for peer in rows if peer["session"] == session), {})
+    # Sessions in the caller's repository come first: they are the ones that can collide with its edits.
+    rows = sorted(rows, key=lambda peer: not (mine.get("repo") and peer.get("repo") == mine.get("repo")))
     lines = []
     native = NATIVE_MESSAGING.get(harness or "")
     for peer in rows:
-        mark = "  (you)" if peer["session"] == session else ""
-        if not mark and harness and peer["harness"] == harness:
-            mark = f"  (same harness: use {native.split(' ')[0] if native else 'your native agent messaging, if any'})"
-        lines.append(f"{peer['name']} [{peer['session'][:8]}]  {peer['harness']}  {peer['state']}  {peer['cwd']}{mark}")
+        marks = []
+        if peer["session"] == session:
+            marks.append("you")
+        else:
+            if mine.get("repo") and peer.get("repo") == mine["repo"]:
+                marks.append("same repository")
+            if harness and peer["harness"] == harness:
+                marks.append(
+                    f"same harness: use {native.split(' ')[0] if native else 'your native agent messaging, if any'}"
+                )
+        mark = f"  ({'; '.join(marks)})" if marks else ""
+        branch = f"  {peer['branch']}" if peer.get("branch") else ""
+        focus = f"  -- {peer['focus']}" if peer.get("focus") else ""
+        lines.append(
+            f"{peer['name']} [{peer['session'][:8]}]  {peer['harness']}  {peer['state']}  {peer['cwd']}{branch}{mark}{focus}"
+        )
     return "\n".join(lines)
 
 
@@ -1127,7 +1224,7 @@ other agents yourself; route requests for peer help through the conductor.
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="run_agent.py mailbox", description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
-    for name in ("peers", "send", "ask", "inbox", "wait", "ack", "history", "prune", "hook"):
+    for name in ("peers", "send", "ask", "inbox", "wait", "ack", "history", "focus", "prune", "hook"):
         sub = commands.add_parser(name)
         sub.add_argument(
             "--session",
@@ -1155,6 +1252,8 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--reply-to")
         if name == "ack":
             sub.add_argument("ids", nargs="+")
+        if name == "focus":
+            sub.add_argument("--text", required=True, help="one line on what this session is working on")
     args = parser.parse_args(argv)
     base = root()
     try:
@@ -1220,6 +1319,10 @@ def main(argv: list[str] | None = None) -> int:
                         if is_run_peer(me)
                         else mark_read(base, me["session"], args.ids)
                     }
+                elif args.action == "focus":
+                    if is_run_peer(me):
+                        raise MailboxError("focus is for interactive sessions")
+                    output = set_focus(base, me["session"], args.text)
                 elif args.action == "history":
                     if not is_run_peer(me):
                         raise MailboxError("history is only supported for run sessions")

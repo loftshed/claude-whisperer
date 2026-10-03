@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Agents see who else works in the same repository: the Claude Code and Codex hooks list other live
+  sessions in it (any harness, any worktree) with branch and declared focus at session start and when that
+  set changes, `peers` puts them first, and a new `focus` tool lets each session say what it is working on.
+
 ## 0.16.1
 
 - The peer mailbox is hardened against races, stale or damaged state, and edge cases a host can hit:

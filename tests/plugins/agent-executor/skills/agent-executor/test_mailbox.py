@@ -238,6 +238,52 @@ class MailboxTests(unittest.TestCase):
         self.assertTrue(path.exists())
         self.assertIn(stale["session"], [peer["session"] for peer in listed])
 
+    def git_checkout(self, name):
+        path = Path(self.temporary.name) / name
+        subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
+        subprocess.run(
+            ["git", "-C", str(path), "commit", "-q", "--allow-empty", "-m", "init"],
+            check=True,
+            env={
+                **os.environ,
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@t",
+            },
+        )
+        return path
+
+    def hook(self, session, harness, cwd, event):
+        payload = {"hook_event_name": event, "session_id": session, "cwd": str(cwd)}
+        with mock.patch.object(MAILBOX, "harness_pid", return_value=os.getpid()):
+            return MAILBOX.hook(payload, harness=harness, base=self.base)
+
+    def test_sessions_in_one_repository_are_told_about_each_other(self):
+        repo = self.git_checkout("shared")
+        worktree = Path(self.temporary.name) / "shared-feature"
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "feature", str(worktree)], check=True)
+        other = self.git_checkout("elsewhere")
+        self.assertIsNone(self.hook("codex-repo-1", "codex", repo, "SessionStart"))
+        MAILBOX.set_focus(self.base, "codex-repo-1", "rewriting the login form")
+        self.hook("opencode-else-1", "opencode", other, "SessionStart")
+        notice = self.hook("claude-repo-2", "claude", worktree, "SessionStart")["hookSpecificOutput"][
+            "additionalContext"
+        ]
+        self.assertIn("rewriting the login form", notice)
+        self.assertIn("on main, worktree", notice)
+        self.assertNotIn("opencode", notice)
+        # Nothing new on the next prompt; a newcomer is announced once.
+        self.assertIsNone(self.hook("claude-repo-2", "claude", worktree, "UserPromptSubmit"))
+        self.hook("gemini-repo-3", "gemini", repo, "SessionStart")
+        update = self.hook("claude-repo-2", "claude", worktree, "UserPromptSubmit")
+        self.assertIn("gemini", update["hookSpecificOutput"]["additionalContext"])
+        listing = MAILBOX.table(MAILBOX.peers(self.base), "claude-repo-2", "claude")
+        self.assertIn("feature  (you)", listing)
+        self.assertTrue(
+            listing.splitlines()[1].endswith("rewriting the login form") or "same repository" in listing.splitlines()[1]
+        )
+
     def test_dead_pids_are_pruned_from_listings(self):
         child = subprocess.Popen([sys.executable, "-c", "pass"])
         child.wait()
@@ -1415,6 +1461,14 @@ class McpServerTests(unittest.TestCase):
         base = Path(self.temporary.name) / "mailbox-v1"
         self.assertTrue({"ses_a", "ses_b"} <= {peer["session"] for peer in MAILBOX.peers(base)})
 
+    def test_focus_is_set_through_the_mcp_server(self):
+        replies = self.exchange(
+            "codex-mcp-client", [self.call("focus", {"text": "  fixing\n the  parser "}, session="codex-focus")]
+        )
+        self.assertIn("no other agents", replies[1]["result"]["content"][0]["text"])
+        base = Path(self.temporary.name) / "mailbox-v1"
+        self.assertEqual(MAILBOX.load(MAILBOX.peer_path(base, "codex-focus"))["focus"], "fixing the parser")
+
     def test_a_null_request_id_is_refused(self):
         wait = self.call("wait", {"timeoutSeconds": 30}, session="codex-null") | {"jsonrpc": "2.0", "id": None}
         replies = self.serve([wait], expect=1)
@@ -1469,7 +1523,8 @@ class McpServerTests(unittest.TestCase):
         self.assertTrue(responses[1]["result"]["isError"])
         self.assertEqual(responses[2]["error"]["code"], -32601)
         self.assertEqual(
-            [tool["name"] for tool in responses[3]["result"]["tools"]], ["peers", "send", "inbox", "wait", "ack"]
+            [tool["name"] for tool in responses[3]["result"]["tools"]],
+            ["peers", "focus", "send", "inbox", "wait", "ack"],
         )
 
     def test_mcp_peer_listing_hides_run_scoped_sessions(self):

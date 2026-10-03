@@ -21,6 +21,16 @@ The MCP server (`scripts/mailbox_mcp.py`) and the CLI (`run_agent.py mailbox …
 | `inbox` | Unread messages, oldest first, marked read unless `markRead: false`.                         |
 | `wait`  | Blocks up to `timeoutSeconds` (max 600) for a message, or for the reply to `replyTo`.        |
 | `ack`   | Marks message ids read.                                                                      |
+| `focus` | One line on what this session is working on, shown to agents in the same repository.         |
+
+## Who else is in this repository
+
+Every peer record carries its git repository (one id for all worktrees), checkout and branch. At session
+start the Claude Code and Codex hooks list the other live sessions in the same repository, any harness, with
+branch, state and declared `focus`, and repeat it on a later prompt only when that set changes. Hosts without
+hooks get the same rule from the MCP instructions: call `peers` first, where same-repository sessions come
+first. Agents set their own line with `focus` (CLI: `run_agent.py mailbox focus --text '...'`) and agree on a
+split before editing files another session is working on.
 
 ## Runs: conductor and worker
 
