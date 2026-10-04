@@ -1,6 +1,29 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/lint-changed.mjs"]
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/lint-changed.mjs"]
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -8,7 +31,8 @@
             "type": "command",
             "command": "node",
             "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/lint-changed.mjs"],
-            "statusMessage": "Formatting changed files..."
+            "timeout": 130,
+            "statusMessage": "Linting files edited this turn"
           }
         ]
       }
