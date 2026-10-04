@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.18.0
 
 - Discovery, sending and incoming context default to the same project, including sibling worktrees and
   clones sharing a Git remote. Explicit `scope: "cross-project"` or CLI `--scope cross-project` enables
