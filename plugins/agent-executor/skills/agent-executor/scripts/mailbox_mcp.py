@@ -201,6 +201,8 @@ class Server:
         self.pid = mailbox.harness_pid(self.harness) if self.harness != "unknown" else os.getppid()
 
     def session(self, meta: dict[str, Any]) -> str:
+        if self.environ.get("AGENT_MAILBOX_LISTENER_SESSION"):
+            return self.environ["AGENT_MAILBOX_LISTENER_SESSION"]
         # Codex sends sessionId (or threadId); OpenCode sends its own namespaced key.
         for key in ("sessionId", "threadId", "ai.opencode/sessionID"):
             if isinstance(meta.get(key), str) and meta[key]:

@@ -4364,6 +4364,8 @@ def main() -> int:
         return 4
     if argv and argv[0] == "mailbox":
         return bundled_module("peer_mailbox").main(argv[1:])
+    if argv and argv[0] == "listen":
+        return bundled_module("mailbox_listener").main(argv[1:])
     if argv and argv[0] == "steer":
         return steer_main(argv[1:])
     if argv and argv[0] == "models":
@@ -4666,6 +4668,8 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         )
 
     environment = executor_environment(args.engine, repo, args.claude_config_dir)
+    # A delegated worker owns its own mailbox identity, even when its conductor is a listener.
+    environment.pop("AGENT_MAILBOX_LISTENER_SESSION", None)
     environment["AGENT_MAILBOX_SESSION"] = mailbox_info["worker"]
     environment["AGENT_MAILBOX_PEER"] = mailbox_info["conductor"]
     remaining = deadline_remaining(args.deadline)

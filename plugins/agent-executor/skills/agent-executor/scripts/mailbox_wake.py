@@ -81,10 +81,14 @@ def wake_opencode(target: dict, message_id: str) -> dict:
     return {"status": "scheduled", "reason": "native OpenCode queue wakes idle sessions and defers busy sessions"}
 
 
-def wake(target: dict, message_id: str) -> dict:
-    if target.get("harness") not in {"codex", "opencode"}:
+def wake(target: dict, message_id: str, *, base: Path | None = None) -> dict:
+    if target.get("harness") not in {"codex", "opencode", "claude", "gemini"}:
         return {"status": "unsupported", "reason": "this harness has no mailbox wake adapter; message remains queued"}
     try:
+        if target["harness"] in {"claude", "gemini"}:
+            from mailbox_listener import request_wake
+
+            return request_wake(base, target, message_id)
         return wake_codex(target, message_id) if target["harness"] == "codex" else wake_opencode(target, message_id)
     except (OSError, ValueError, KeyError, ControlError, subprocess.SubprocessError):
         # Sending succeeded already. A missing/offline control endpoint must never lose the message.

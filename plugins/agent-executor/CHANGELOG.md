@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add persistent Claude and Gemini/Antigravity wake adapters with `run_agent.py listen`.
+  Queue mailbox notifications between completed turns in one conversation, preserve project scope,
+  and keep quiet delivery and unread mail intact.
+
 ## 0.19.0
 
 - Agents can report communication problems and what they needed through the local `feedback` tool.

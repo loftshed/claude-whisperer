@@ -1005,7 +1005,7 @@ def send(
         import mailbox_wake
 
         result["wake"] = (
-            mailbox_wake.wake(target, message["id"])
+            mailbox_wake.wake(target, message["id"], base=base)
             if scope == "project"
             else {"status": "queued", "reason": "cross-project mail requires the recipient's explicit inbox opt-in"}
         )

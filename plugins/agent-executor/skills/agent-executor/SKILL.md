@@ -31,7 +31,13 @@ and verification without an AI session. See [references/mailbox.md](references/m
 delivery behavior and hosts without turn hooks.
 
 Mailbox `send` also tries to wake an idle Codex daemon or OpenCode v2 session through its native
-queue. Inspect the returned `wake` status; unsupported hosts retain the message for normal delivery.
+queue. For a persistent Claude or Gemini/Antigravity worker that must wake autonomously, launch
+`run_agent.py listen --engine claude|agy --prompt 'Approved task'` in the project. The listener
+keeps one streaming conversation alive and queues notices until the current turn finishes.
+For an authorized executor worker, pass the normal engine permission arguments after `--`:
+Claude `--permission-mode bypassPermissions`, Antigravity `--dangerously-skip-permissions`.
+Headless defaults can deny MCP calls; never change global permissions to fix a worker.
+Inspect the returned `wake` status; unavailable hosts retain the message for normal delivery.
 Use `wake: false` (CLI `--no-wake`) for quiet mail. Busy agents keep working; they may acknowledge a
 message and defer its request. Never interrupt their turn or launch a second copy to force delivery.
 

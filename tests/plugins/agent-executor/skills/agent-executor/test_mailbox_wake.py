@@ -129,7 +129,7 @@ class MailboxWakeTests(unittest.TestCase):
             quiet = json.loads(
                 server.call("send", {"to": "target", "text": "later", "wake": False}, {"sessionId": "sender"})
             )
-            self.assertEqual(loud["wake"]["status"], "unsupported")
+            self.assertEqual(loud["wake"]["status"], "unavailable")
             self.assertNotIn("wake", quiet)
             self.assertEqual([m["text"] for m in peer_mailbox.take(base, "target")], ["hello", "later"])
 

@@ -44,7 +44,7 @@ The MCP server (`scripts/mailbox_mcp.py`) and the CLI (`run_agent.py mailbox …
 
 MCP `send` wakes the receiver by default; set `wake: false` for quiet delivery. The CLI equivalent
 is `mailbox send --no-wake`. Mail is saved before activation is attempted, and the result includes a
-`wake` status: `scheduled` (native queue accepted it), `queued` (busy Codex), `unsupported`, or
+`wake` status: `scheduled` (queue accepted it), `queued` (busy Codex), `unsupported`, or
 `unavailable`. A wake failure leaves the message unread for normal delivery.
 
 Automatic activation stays within the project boundary. Cross-project mail remains queued until
@@ -57,10 +57,28 @@ working and receive mail at their next hook boundary. OpenCode v2 admits the not
 `delivery: queue`, which wakes an idle session and defers a busy one. Neither adapter interrupts a
 turn, changes the model, or changes permissions. Waking an idle peer can use its model quota.
 
-Claude and Antigravity currently have no native mailbox wake adapter. They keep their existing
-delivery behavior; `send` reports `unsupported` rather than claiming they woke. A standalone Codex
-session outside the shared daemon similarly reports `unavailable`. After receiving mail, an agent
-may reply that it is busy and will handle the request later; peer messages cannot expand user scope.
+Claude and Gemini/Antigravity use a persistent streaming listener. Launch it once in the project:
+
+```sh
+python3 <skill-directory>/scripts/run_agent.py listen --engine claude --prompt 'Your task'
+python3 <skill-directory>/scripts/run_agent.py listen --engine agy --prompt 'Your task'
+```
+
+Enter additional prompts as lines on stdin. EOF closes after queued work; `--stay-open` keeps a
+mailbox-only listener alive after EOF. Native CLI options follow `--`; no model or permission
+override is added automatically. Output is the harness's JSON event stream. The listener owns one
+native process and conversation for its lifetime. Mailbox notices wait for its terminal `result`
+event before starting the next turn. Quiet sends create no wake request, and notification submission
+does not mark mail read. Both adapters retain project boundaries and teammate authority limits.
+
+Use this launch path when an idle Claude/Gemini peer must answer autonomously; the skill can start
+it directly for an authorized persistent worker. Already-running terminal sessions cannot be attached
+through these streaming interfaces. They report `unavailable` and keep normal mailbox delivery.
+A standalone Codex session outside the shared daemon does the same. A `scheduled` result confirms
+local admission, not a model response; authentication, quota, and approval prompts still apply.
+For an authorized executor worker, pass its usual engine permission arguments after `--`:
+Claude `--permission-mode bypassPermissions` or Antigravity `--dangerously-skip-permissions`.
+This applies to that process only; default headless permission prompts can deny the mailbox read.
 
 ## Project scope and cross-project coordination
 
