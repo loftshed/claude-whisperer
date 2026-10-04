@@ -31,7 +31,7 @@ Both scripts call `./node_modules/.bin` directly, so they work without `yarn` on
 ## Hooks
 
 - `.husky/pre-commit` runs the lint gate. `.husky/pre-push` hands off to the pre-push hook in the global `core.hooksPath`, which husky would otherwise bypass.
-- [`.claude/hooks/lint-changed.mjs`](.claude/hooks/lint-changed.mjs) runs when Claude stops: it fixes and formats changed files, restages the ones that were staged, and blocks the first stop if a tool still reports a problem.
+- [`.claude/hooks/lint-changed.mjs`](.claude/hooks/lint-changed.mjs) collects each session's Write/Edit targets and fixes and formats them together when Claude stops. It leaves unrelated dirty files and Git staging alone, and sends remaining problems back with bounded retries. Shell edits and interrupted turns still need the normal lint gate.
 
 ## Tooling notes
 
