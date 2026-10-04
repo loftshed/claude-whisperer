@@ -3941,7 +3941,23 @@ def doctor_main(argv: list[str] | None = None) -> int:
         description="Report host, installed CLIs, routes, quota source, paths and skill installs.",
     )
     parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument(
+        "--check-messaging", action="store_true", help="verify messaging with isolated, model-free round trips"
+    )
+    parser.add_argument(
+        "--repair-messaging", action="store_true", help="register missing mailbox servers and turn hooks"
+    )
+    parser.add_argument(
+        "--trust-codex-hooks", action="store_true", help="with --repair-messaging, trust only the four mailbox hooks"
+    )
     args = parser.parse_args(argv)
+    messaging_check = None
+    if args.trust_codex_hooks and not args.repair_messaging:
+        parser.error("--trust-codex-hooks requires --repair-messaging")
+    if args.repair_messaging:
+        bundled_module("install_mailbox").install(trust_codex_hooks=args.trust_codex_hooks)
+    elif args.check_messaging:
+        messaging_check = bundled_module("check_mailbox").check()
     hosts = [host for host, keys in HOST_MARKERS.items() if any(os.environ.get(key) for key in keys)]
     clis = {}
     for engine in EXECUTION_ENGINES:
@@ -3983,7 +3999,10 @@ def doctor_main(argv: list[str] | None = None) -> int:
         "cache_dir": str(default_agent_cache_dir()),
         "skill_installs": installs,
         "stale_copies": [loc for loc, info in installs.items() if not info["same_as_this"]],
+        "peer_messaging": bundled_module("install_mailbox").configuration_status(),
     }
+    if messaging_check is not None:
+        report["messaging_check"] = messaging_check
     if args.format == "json":
         print(json.dumps(report, indent=2))
         return 0
@@ -3996,9 +4015,16 @@ def doctor_main(argv: list[str] | None = None) -> int:
     print(f"routes: {report['routes_config']} ({len(report['routes'])} roles; run `routes` for detail)")
     print(f"quota source: {report['ai_usage'] or 'ai-usage not installed (quota unknown, runs not blocked)'}")
     print(f"cache: {report['cache_dir']}")
+    if messaging_check is not None:
+        print(f"mailbox check: {len(messaging_check['round_trips'])} message/reply round trips passed")
     for location, info in installs.items():
         flag = "" if info["same_as_this"] else "  <- different copy: update or relink it"
         print(f"  skill {location}: {info['kind']} -> {info['resolves_to']}{flag}")
+    for harness, state in report["peer_messaging"].items():
+        summary = "configured" if state["configured"] else "; ".join(state["issues"])
+        print(f"  mailbox {harness}: {summary}")
+    if any(not row["configured"] for row in report["peer_messaging"].values()):
+        print("Repair messaging with: doctor --repair-messaging (add --trust-codex-hooks only after review).")
     return 0
 
 

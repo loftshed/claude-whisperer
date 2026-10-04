@@ -14,6 +14,13 @@
   coordination across projects for one call; automatic hooks stay within the project.
 - Claude Code and Codex hooks announce other live sessions in the project with branch and declared
   focus at session start and when that set changes. `focus` lets each session say what it is working on.
+- Wake idle Codex daemon and OpenCode v2 peers when sending mail; defer busy sessions without
+  interruption, support quiet delivery, and report unsupported or unavailable activation explicitly.
+
+- Install and repair Linux peer messaging from the skill itself: register each installed harness,
+  preserve existing settings, install delivery hooks, apply scoped Codex mailbox permissions, and
+  verify message/reply round trips without model quota. Codex hook trust remains limited to the
+  four reviewed mailbox commands.
 
 ## 0.17.0
 

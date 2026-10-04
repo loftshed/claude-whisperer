@@ -56,7 +56,7 @@ TOOLS = [
     },
     {
         "name": "send",
-        "description": "Send a message to a live session in the same project by name (from `peers`). Reach your own harness's agents with native messaging whenever it has any (Claude Code: SendMessage). A busy session sees it at its next turn boundary; use `wait` with the returned id as replyTo to block for the answer.",
+        "description": 'Send to a live peer in the same project and another harness; use scope="cross-project" explicitly for necessary coordination across projects. Wake an idle receiver through its native queue when supported; busy receivers continue their work. The result\'s wake status says whether activation succeeded or mail remains queued. Set wake:false for quiet delivery. Within your own harness use native messaging when available. Use wait with the returned id as replyTo for an answer.',
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -67,6 +67,10 @@ TOOLS = [
                     "description": "The message, at most 32 KiB. Point at files for anything long.",
                 },
                 "replyTo": {"type": "string", "description": "Id of the message this answers."},
+                "wake": {
+                    "type": "boolean",
+                    "description": "Wake an idle receiver when supported (default true); never interrupt busy work.",
+                },
             },
             "required": ["to", "text"],
             "additionalProperties": False,
@@ -233,6 +237,7 @@ class Server:
                 text=arguments["text"],
                 reply_to=arguments.get("replyTo"),
                 scope=scope,
+                wake=arguments.get("wake", True),
             )
             return json.dumps(sent)
         if name == "inbox":

@@ -4,6 +4,22 @@ Agent sessions in different harnesses list each other and exchange messages with
 `<agent-executor cache>/mailbox-v1/` (`peers/<session>.json`, `inbox/<session>/<id>.json`, with `:` in a
 session id written as `%3A`). Nothing leaves the machine.
 
+## Setup and repair
+
+Run `python3 scripts/run_agent.py doctor --repair-messaging` from this skill directory to install
+missing registrations, turn hooks and scoped Codex tool permissions. Changed settings get adjacent
+`.mailbox-bak.*` copies. For approved Codex hooks, add `--trust-codex-hooks`; this trusts only the four
+mailbox commands. Without approval, review them in Codex `/hooks` instead.
+
+`doctor --check-messaging` checks settings and hook trust, then exchanges messages and matching
+replies between installed harness identities in an isolated store. Codex uses its native app server;
+the other identities use MCP protocol clients. This consumes no model quota. Evidence is retained
+under `~/.cache/agent-executor/checks/`. It checks transport and configuration; it does not start
+models or test idle activation. Restart an existing harness session after changing registrations.
+
+The checkout installer `plugins/agent-executor/install.sh` includes messaging setup. A native plugin
+copy can also run `scripts/install_mailbox.py` directly, so setup needs no separate AI intervention.
+
 **Native first.** A session messages agents of its own harness with that harness's native tools whenever
 it has any (Claude Code: `SendMessage` and `ListAgents`). Interactive mailbox traffic is only for crossing
 harnesses; run-scoped conductor and worker sessions are an exception so every run has one durable message
@@ -23,6 +39,28 @@ The MCP server (`scripts/mailbox_mcp.py`) and the CLI (`run_agent.py mailbox …
 | `ack`      | Marks message ids read.                                                                                     |
 | `focus`    | One line on what this session is working on, shown to agents in the same project.                           |
 | `feedback` | Record a communication problem, your intent and what you needed instead. Writes locally; sends no message.  |
+
+## Wake an idle peer
+
+MCP `send` wakes the receiver by default; set `wake: false` for quiet delivery. The CLI equivalent
+is `mailbox send --no-wake`. Mail is saved before activation is attempted, and the result includes a
+`wake` status: `scheduled` (native queue accepted it), `queued` (busy Codex), `unsupported`, or
+`unavailable`. A wake failure leaves the message unread for normal delivery.
+
+Automatic activation stays within the project boundary. Cross-project mail remains queued until
+the receiver explicitly reads it with `scope: "cross-project"`; sending it never widens their
+automatic context or wakes an unrelated project.
+
+Codex uses the existing daemon's local Unix socket and native task queue. It starts only a thread
+already loaded there; it never resumes a second copy of a terminal session. Busy threads keep
+working and receive mail at their next hook boundary. OpenCode v2 admits the notification with
+`delivery: queue`, which wakes an idle session and defers a busy one. Neither adapter interrupts a
+turn, changes the model, or changes permissions. Waking an idle peer can use its model quota.
+
+Claude and Antigravity currently have no native mailbox wake adapter. They keep their existing
+delivery behavior; `send` reports `unsupported` rather than claiming they woke. A standalone Codex
+session outside the shared daemon similarly reports `unavailable`. After receiving mail, an agent
+may reply that it is busy and will handle the request later; peer messages cannot expand user scope.
 
 ## Project scope and cross-project coordination
 
@@ -211,8 +249,8 @@ agy mcp add peer-mailbox python3 ~/.agents/skills/agent-executor/scripts/mailbox
 
 ## Troubleshooting
 
-- **An idle session does not answer.** Mail is pulled at turn boundaries; nothing wakes an idle session.
-  Hosts without hooks (Antigravity, OpenCode) see mail only when the agent calls `inbox`.
+- **An idle session does not answer.** Check the send result's `wake` status. Unsupported or offline
+  hosts still need a turn or an `inbox` call; quiet sends deliberately do not activate them.
 - **Run the CLI from Claude Code with the sandbox off.** The store is under `~/.cache/agent-executor`,
   outside the sandbox's write allowlist. The MCP server and hooks are not sandboxed.
 - **`no live peer`.** The target's session ended, or it never registered: it has no hooks and has not

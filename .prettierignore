@@ -4,6 +4,7 @@ node_modules/
 .yarn/
 yarn.lock
 .ruff_cache/
+.opencode/
 
 # Swift and Python have their own formatters (Xcode, ruff).
 

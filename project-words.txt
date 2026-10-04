@@ -23,3 +23,5 @@ unstarted
 xcrun
 xhigh
 xpzf
+cwds
+urandom

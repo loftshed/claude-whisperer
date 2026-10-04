@@ -960,6 +960,7 @@ def send(
     kind: str | None = None,
     client_id: str | None = None,
     scope: str = "project",
+    wake: bool = False,
 ) -> dict[str, Any]:
     check_scope(scope)
     if is_run_peer(sender):
@@ -999,7 +1000,16 @@ def send(
         "scope": scope,
     }
     write(inbox_dir(base, target["session"]) / f"{message['id']}.json", message)
-    return {"id": message["id"], "to": target["name"], "toState": target["state"], "toHarness": target["harness"]}
+    result = {"id": message["id"], "to": target["name"], "toState": target["state"], "toHarness": target["harness"]}
+    if wake:
+        import mailbox_wake
+
+        result["wake"] = (
+            mailbox_wake.wake(target, message["id"])
+            if scope == "project"
+            else {"status": "queued", "reason": "cross-project mail requires the recipient's explicit inbox opt-in"}
+        )
+    return result
 
 
 def valid_stamp(value: Any) -> bool:
@@ -1534,6 +1544,7 @@ def main(argv: list[str] | None = None) -> int:
         if name == "peers":
             sub.add_argument("--runs", action="store_true", help="include run-scoped worker/conductor sessions")
         if name == "send":
+            sub.add_argument("--no-wake", action="store_true", help="queue mail without waking an idle receiver")
             sub.add_argument("--to", default=os.environ.get("AGENT_MAILBOX_PEER"))
             sub.add_argument("--text", required=True)
             sub.add_argument("--kind", choices=("question", "reply", "update"))
@@ -1618,6 +1629,7 @@ def main(argv: list[str] | None = None) -> int:
                     kind="question" if args.action == "ask" else args.kind,
                     client_id=args.id,
                     scope=getattr(args, "scope", "project"),
+                    wake=args.action == "send" and not args.no_wake,
                 )
                 if args.action == "ask":
                     output = wait(base, me["session"], timeout=args.timeout, reply_to=args.id)

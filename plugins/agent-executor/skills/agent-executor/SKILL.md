@@ -3,7 +3,7 @@ name: agent-executor
 description: "Delegate bounded implementation or read-only consultation across provider boundaries using local Codex, Antigravity, Claude Code, or OpenCode. Validate model and effort, check live quota, preserve context, record usage and evidence, recover bounded corrections, and audit results. Use for explicitly requested external-agent work or cross-platform handoffs, for example 'ask GPT-5.6 Sol', 'have Gemini check this', 'try it with GLM'. Use native tools for models native to the caller: GPT models in Codex, Gemini in Gemini/Antigravity, and Claude in Claude. Do not trigger for ordinary coding or native collaboration."
 metadata:
   version: 0.19.0
-  requirements: Python 3, POSIX file locking, git, and at least one installed/authenticated executor CLI (`codex`, `agy`, `claude`, or `opencode`).
+  requirements: Python 3.11+, POSIX file locking, git, and at least one installed/authenticated executor CLI (`codex`, `agy`, `claude`, or `opencode`).
 ---
 
 # Agent executor
@@ -15,6 +15,25 @@ full tool permissions; that removes friction, it does not widen the task's autho
 `<skill-directory>` below is this file's physical directory. Start with
 `python3 <skill-directory>/scripts/run_agent.py doctor` on an unfamiliar machine: it names the host,
 the installed CLIs, the routes in effect, and stale skill copies.
+
+Before using cross-harness messages on an unfamiliar install, run
+`python3 <skill-directory>/scripts/run_agent.py doctor --check-messaging`. If setup is missing or
+stale, repair it yourself with `doctor --repair-messaging`, then repeat the check. This creates the
+skill hub if needed, registers the local mailbox, installs turn hooks, and permits only its six local
+Codex tools; it preserves unrelated settings and backs up changed files. Do not leave these routine
+repairs for the user to ask another agent to perform.
+
+Codex requires review and trust of command hooks. After the user approves these four mailbox hooks,
+use `doctor --repair-messaging --trust-codex-hooks`; otherwise point them to Codex `/hooks` for that
+one-time review. Never trust unrelated hooks. The standalone installer
+`python3 <skill-directory>/scripts/install_mailbox.py --trust-codex-hooks` performs the same setup
+and verification without an AI session. See [references/mailbox.md](references/mailbox.md) for
+delivery behavior and hosts without turn hooks.
+
+Mailbox `send` also tries to wake an idle Codex daemon or OpenCode v2 session through its native
+queue. Inspect the returned `wake` status; unsupported hosts retain the message for normal delivery.
+Use `wake: false` (CLI `--no-wake`) for quiet mail. Busy agents keep working; they may acknowledge a
+message and defer its request. Never interrupt their turn or launch a second copy to force delivery.
 
 ## Native first; OpenRouter only for open-weight models
 
