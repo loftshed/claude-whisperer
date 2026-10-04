@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.19.0
 
 - Agents can report communication problems and what they needed through the local `feedback` tool.
   Automatic diagnostics capture routing errors, reply timeouts, withheld context and extended turns

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0
 
 - Restore bailout with explicit per-session arming. Installation, existing config
   and old threshold state leave it inactive. Disarming cancels pending requests;

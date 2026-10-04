@@ -4,9 +4,9 @@ Private personal plugin marketplace and versioned skill backup.
 
 | Plugin                                                | Version | What it does                                                                                                                               |
 | ----------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `agent-executor`                                      | 0.18.0  | Bounded agent execution, consultation, evidence, and audit across Codex, Antigravity, Claude Code and OpenCode.                            |
+| `agent-executor`                                      | 0.19.0  | Bounded agent execution, consultation, evidence, and audit across Codex, Antigravity, Claude Code and OpenCode.                            |
 | [`ai-usage`](plugins/ai-usage/README.md)              | 0.10.0  | Remaining quota across Claude Code profiles, Codex and Antigravity, and where to spend it: MCP server, skill, CLI/TUI, macOS menu bar app. |
-| [`bailout`](plugins/bailout/skills/bailout/README.md) | 1.1.0   | Manual handoffs and automatic usage checkpoints that stay inactive until you explicitly arm the session.                                   |
+| [`bailout`](plugins/bailout/skills/bailout/README.md) | 1.2.0   | Manual handoffs and automatic usage checkpoints that stay inactive until you explicitly arm the session.                                   |
 
 agent-executor 0.10.0 adds a native `claude` engine, keeps hosted models off OpenRouter, reads routes from `~/.config/agent-executor/config.json` (`routes`, `init`, `doctor`), and installs from a checkout with `plugins/agent-executor/install.sh`, which links every harness to one copy. Routing calibration is still deferred; model profiles remain provisional. See the [checkpoint and resume notes](plugins/agent-executor/skills/agent-executor/references/design-completion.md).
 
