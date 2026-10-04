@@ -14,14 +14,15 @@ store, including when both sessions use Claude Code. Harnesses known to have nat
 
 The MCP server (`scripts/mailbox_mcp.py`) and the CLI (`run_agent.py mailbox …`) share the names.
 
-| Tool    | Does                                                                                                        |
-| ------- | ----------------------------------------------------------------------------------------------------------- |
-| `peers` | Live sessions in this project: name, harness, state (`idle`, `busy`, `waiting`), cwd. Dead ones are pruned. |
-| `send`  | `to` (name, session id, or a unique prefix of 6+ characters), `text` (≤ 32 KiB), `replyTo?`.                |
-| `inbox` | Unread messages, oldest first, marked read unless `markRead: false`.                                        |
-| `wait`  | Blocks up to `timeoutSeconds` (max 600) for a message, or for the reply to `replyTo`.                       |
-| `ack`   | Marks message ids read.                                                                                     |
-| `focus` | One line on what this session is working on, shown to agents in the same project.                           |
+| Tool       | Does                                                                                                        |
+| ---------- | ----------------------------------------------------------------------------------------------------------- |
+| `peers`    | Live sessions in this project: name, harness, state (`idle`, `busy`, `waiting`), cwd. Dead ones are pruned. |
+| `send`     | `to` (name, session id, or a unique prefix of 6+ characters), `text` (≤ 32 KiB), `replyTo?`.                |
+| `inbox`    | Unread messages, oldest first, marked read unless `markRead: false`.                                        |
+| `wait`     | Blocks up to `timeoutSeconds` (max 600) for a message, or for the reply to `replyTo`.                       |
+| `ack`      | Marks message ids read.                                                                                     |
+| `focus`    | One line on what this session is working on, shown to agents in the same project.                           |
+| `feedback` | Record a communication problem, your intent and what you needed instead. Writes locally; sends no message.  |
 
 ## Project scope and cross-project coordination
 
@@ -54,6 +55,57 @@ default and puts same-repository sessions first. Agents set their own line with 
 (CLI: `run_agent.py mailbox focus --text '...'`) and agree on a
 split before editing files another session is working on. A session launched by the runner is listed as a delegated run worker and gets
 no such notice itself: its conductor coordinates for it. When the last colleague leaves, the next prompt says so.
+
+## Communication feedback
+
+Report actual friction once with `feedback`, such as wrong context, unclear routing, unnecessary
+interruptions, repeated polling or wasted effort. The tool asks what you intended, what went wrong,
+and what information, timing or behavior would have helped. It does not ask other agents, wake sessions,
+or alter task files. It cannot authorize retries or cross-project contact.
+
+MCP fields are `category`, `intent`, `problem`, `needed`, optional `operation`, `scope`, and `messageIds`.
+Categories are `routing`, `context`, `delivery`, `interruption`, `efficiency`, `other`. Each text field
+is at most 800 characters. Omit task contents, source code, paths, secrets and transcripts. Obvious
+credential and path patterns are redacted, but redaction cannot identify all private text. Duplicate
+reports from the same session return the existing report id.
+
+```bash
+python3 scripts/run_agent.py mailbox feedback --session MY_SESSION --category routing \
+  --intent 'Find the agent responsible for an API contract' \
+  --problem 'Several peer names matched and I could not choose the owner' \
+  --needed 'A stable project and owner address' --operation send
+python3 scripts/run_agent.py mailbox feedback-summary --scope cross-project --format json
+```
+
+Automatic diagnostics record failed CLI and MCP calls, unanswered reply waits, context withheld by
+project filtering, and mail that extends a turn through the Stop hook. Ordinary empty inboxes and
+waits are not problems. A withheld message or extended turn can be correct behavior; these records
+are observations, while agent feedback explains unwanted impact. Context filtering records each
+message once per operation and avoids repeated disk writes during a wait.
+The first failed call or unanswered reply wait asks the agent to explain what it needed. A session
+gets that reminder once, while the tool remains available for later distinct problems.
+
+Automatic records contain fixed codes, hashed reporter identity, message ids, and counts or durations.
+They never contain exception text, peer names, project paths, remotes or message bodies. Byte counts
+are not token measurements. Reports are not injected into other sessions; `feedback-summary` is a
+deliberate maintainer review of the collector, including recent agent needs.
+It shows only the current project's reports by default. Use `--scope cross-project` explicitly when
+reviewing the central collector across projects.
+
+Configure a central local folder in the existing agent-executor config:
+
+```json
+{
+  "mailbox_feedback": {
+    "directory": "/absolute/path/to/checkout/docs/mailbox-feedback/reports"
+  }
+}
+```
+
+`AGENT_EXECUTOR_FEEDBACK_DIR` overrides that folder. Without configuration, reports stay beside the
+mailbox cache in `mailbox-feedback-v1`. `mailbox_feedback.enabled: false` disables collection.
+Automatic recording is best effort and cannot fail a mailbox operation; an explicit report returns
+an error if it cannot be saved. Nothing commits, pushes, publishes or sends reports automatically.
 
 ## Runs: conductor and worker
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Agents can report communication problems and what they needed through the local `feedback` tool.
+  Automatic diagnostics capture routing errors, reply timeouts, withheld context and extended turns
+  without copying message bodies. Reports deduplicate, write to a configurable collector, and never
+  message or wake another agent. `feedback-summary` groups observations and recent agent needs.
+
 ## 0.18.0
 
 - Discovery, sending and incoming context default to the same project, including sibling worktrees and

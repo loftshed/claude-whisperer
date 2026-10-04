@@ -54,7 +54,7 @@ class MailboxTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.base = Path(self.temporary.name) / "mailbox-v1"
-        self.repository = Path(self.temporary.name) / "sender-ui"
+        self.repository = Path(self.temporary.name) / "example-app"
         subprocess.run(["git", "init", "-q", "-b", "main", str(self.repository)], check=True)
         self.claude = self.peer("claude-session-1111", "claude", str(self.repository))
         self.codex = self.peer("codex-session-2222", "codex", str(self.repository))
@@ -66,8 +66,8 @@ class MailboxTests(unittest.TestCase):
         return MAILBOX.register(self.base, session=session, harness=harness, cwd=cwd, pid=pid or os.getpid())
 
     def test_names_follow_claude_style_and_prefix_other_harnesses(self):
-        self.assertRegex(self.claude["name"], r"^sender-ui-[0-9a-f]{2}$")
-        self.assertRegex(self.codex["name"], r"^codex:sender-ui-[0-9a-f]{2}$")
+        self.assertRegex(self.claude["name"], r"^example-app-[0-9a-f]{2}$")
+        self.assertRegex(self.codex["name"], r"^codex:example-app-[0-9a-f]{2}$")
         self.assertEqual(sorted(peer["harness"] for peer in MAILBOX.peers(self.base)), ["claude", "codex"])
 
     def test_send_delivers_in_order_and_marks_read_once(self):
@@ -1982,7 +1982,7 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(responses[2]["error"]["code"], -32601)
         self.assertEqual(
             [tool["name"] for tool in responses[3]["result"]["tools"]],
-            ["peers", "focus", "send", "inbox", "wait", "ack"],
+            ["peers", "focus", "send", "inbox", "wait", "ack", "feedback"],
         )
 
     def test_mcp_peer_listing_hides_run_scoped_sessions(self):

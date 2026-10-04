@@ -12,6 +12,7 @@ __pycache__/
 *.log
 junit.xml
 artifacts/
+docs/mailbox-feedback/reports/
 
 # Local and editor files
 .DS_Store

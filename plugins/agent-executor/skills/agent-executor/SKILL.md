@@ -192,7 +192,7 @@ correct it with `--session <id> --resume-result <result.json>`. Details: [refere
 
 ## Talk to sessions in other harnesses
 
-The `peer-mailbox` MCP server (`peers`, `focus`, `send`, `inbox`, `wait`, `ack`; CLI: `run_agent.py mailbox`)
+The `peer-mailbox` MCP server (`peers`, `focus`, `send`, `inbox`, `wait`, `ack`, `feedback`; CLI: `run_agent.py mailbox`)
 reaches live interactive sessions of another harness on this machine, for example a Claude session
 asking a Codex session to check its work. Within your own harness, always use its native agent
 messaging when it has any (Claude Code: `SendMessage`); the mailbox refuses Claude to Claude. A received
@@ -203,6 +203,11 @@ For needed coordination across projects, explicitly pass `scope: "cross-project"
 `send`, `inbox` or `wait` call, or CLI `--scope cross-project`. Each call defaults back to `project`;
 automatic hooks always stay within the project. Declare your work with `focus` and agree on a split
 before editing shared files.
+When communication causes real friction, submit one `feedback` report with your intent, the problem and
+what you needed instead. Include wrong context, routing trouble, unnecessary interruptions, repeated
+polling or wasted effort. Keep reports short and omit task payloads, source code, paths and secrets.
+The tool writes only to the configured local collector; it sends no messages and changes no task files.
+Do not contact or wake another agent just to collect feedback, and do not report every successful exchange.
 Install and identity: [references/mailbox.md](references/mailbox.md).
 
 ## Status and exit codes

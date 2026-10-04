@@ -11,6 +11,7 @@ import contextlib
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -22,6 +23,7 @@ import sys
 import tempfile
 import threading
 import time
+from functools import cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -59,7 +61,52 @@ NOTICE = (
 
 
 class MailboxError(ValueError):
-    pass
+    def __init__(self, message: str, code: str = "invalid_request"):
+        super().__init__(message)
+        self.code = code
+
+
+@cache
+def feedback_module() -> Any:
+    path = Path(__file__).with_name("mailbox_feedback.py")
+    spec = importlib.util.spec_from_file_location("agent_executor_mailbox_feedback", path)
+    if spec is None or spec.loader is None:
+        raise MailboxError("cannot load mailbox feedback")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def record_failure(base: Path, peer: dict[str, Any], operation: str, scope: str, error: Exception) -> None:
+    """Record only a fixed error code, never the exception text or the rejected request."""
+    code = (
+        error.code
+        if isinstance(error, MailboxError)
+        else "storage_error"
+        if isinstance(error, OSError)
+        else "invalid_request"
+    )
+    category = (
+        "routing" if code in {"peer_unavailable", "ambiguous_peer", "native_required", "self_address"} else "delivery"
+    )
+    scope = scope if scope in SCOPES else "project"
+    feedback_module().observe(base, peer, code=code, category=category, operation=operation, scope=scope)
+
+
+def feedback_request(base: Path, peer: dict[str, Any]) -> str:
+    """Ask for the agent's needs once after a real failure, without contacting anyone else."""
+    if not valid_peer(peer) or peer.get("feedbackRequested"):
+        return ""
+    with contextlib.suppress(OSError, ValueError):
+        if feedback_module().directory(base) is not None:
+            path = peer_path(base, peer["session"])
+            with locked(path):
+                current = load(path)
+                if valid_peer(current) and not current.get("feedbackRequested"):
+                    current["feedbackRequested"] = True
+                    write(path, current)
+                    return feedback_module().REQUEST
+    return ""
 
 
 def root() -> Path:
@@ -795,10 +842,10 @@ def resolve(base: Path, address: str, *, sender: dict[str, Any], scope: str = "p
     if not exact:
         names = ", ".join(peer["name"] for peer in live) or "none"
         boundary = "in this project" if scope == "project" else "on this machine"
-        raise MailboxError(f"no live peer named {address!r} {boundary}; live peers: {names}")
+        raise MailboxError(f"no live peer named {address!r} {boundary}; live peers: {names}", "peer_unavailable")
     if len(exact) > 1:
         options = ", ".join(f"{peer['name']} [{peer['session'][:8]}]" for peer in exact)
-        raise MailboxError(f"{address!r} is ambiguous; address one by session prefix: {options}")
+        raise MailboxError(f"{address!r} is ambiguous; address one by session prefix: {options}", "ambiguous_peer")
     return exact[0]
 
 
@@ -933,11 +980,12 @@ def send(
         raise MailboxError(f"invalid replyTo id: {reply_to!r}")
     target = resolve(base, to, sender=sender, scope=scope)
     if target["session"] == sender["session"]:
-        raise MailboxError("that address is this session")
+        raise MailboxError("that address is this session", "self_address")
     native = NATIVE_MESSAGING.get(sender.get("harness"))
     if native and target["harness"] == sender.get("harness"):
         raise MailboxError(
-            f"{target['name']} is a {target['harness']} session too; message it with {native}, not the mailbox"
+            f"{target['name']} is a {target['harness']} session too; message it with {native}, not the mailbox",
+            "native_required",
         )
     message = {
         "schema": MAIL_SCHEMA,
@@ -1005,15 +1053,30 @@ def allowed_message(peer: dict[str, Any], message: dict[str, Any], scope: str) -
     return not message.get("run") and (scope == "cross-project" or same_project(peer, message["from"]))
 
 
-def incoming(base: Path, session: str, *, unread_only: bool = True, scope: str = "project") -> list[dict[str, Any]]:
+def incoming(
+    base: Path, session: str, *, unread_only: bool = True, scope: str = "project", operation: str = "inbox"
+) -> list[dict[str, Any]]:
     """Deliver only context belonging to the recipient's current project, including old queued mail."""
     check_scope(scope)
     peer = load(peer_path(base, session))
     if not valid_peer(peer):
         return []
-    return [
-        message for message in messages(base, session, unread_only=unread_only) if allowed_message(peer, message, scope)
-    ]
+    accepted = []
+    for message in messages(base, session, unread_only=unread_only):
+        if allowed_message(peer, message, scope):
+            accepted.append(message)
+        elif not is_run_peer(peer):
+            feedback_module().observe(
+                base,
+                peer,
+                code="context_filtered",
+                category="context",
+                operation=operation,
+                scope=scope,
+                message_ids=[message["id"]],
+                repeat=False,
+            )
+    return accepted
 
 
 def mark_one(base: Path, session: str, identifier: str) -> bool | None:
@@ -1090,7 +1153,7 @@ def wait(
         question_ids = {question["id"], question.get("clientId")} - {None}
     while True:
         # A run reply stays replayable after it was read, as the old channel's were.
-        unread = incoming(base, session, unread_only=not (run_peer and reply_to), scope=scope)
+        unread = incoming(base, session, unread_only=not (run_peer and reply_to), scope=scope, operation="wait")
         if run_peer:
             unread = run_traffic(unread, run_peer["run"])
         if reply_to:
@@ -1115,6 +1178,16 @@ def wait(
                 return {"status": "closed", "reason": ended, "mailbox": session}
         remaining = until - time.monotonic()
         if remaining <= 0:
+            if reply_to:
+                feedback_module().observe(
+                    base,
+                    peer or {"session": session},
+                    code="reply_timeout",
+                    category="delivery",
+                    operation="wait",
+                    scope=scope,
+                    measurements={"waitSeconds": timeout},
+                )
             return {"status": "timed_out", "messages": []}
         if cancelled is not None:
             if cancelled.wait(min(poll, remaining)):
@@ -1234,10 +1307,24 @@ def hook(payload: dict[str, Any], *, harness: str | None = None, base: Path | No
         base, session=session, harness=harness, cwd=cwd, pid=harness_pid(harness), state=state, cwd_source="hook"
     )
     me = mark_delegated(base, me)
-    context = render_all(take(base, session))
+    delivered = take(base, session)
+    context = render_all(delivered)
     if event == "Stop":
         if not context:
             return None
+        feedback_module().observe(
+            base,
+            me,
+            code="turn_extended",
+            category="interruption",
+            operation="hook",
+            message_ids=[message["id"] for message in delivered],
+            measurements={
+                "messageCount": len(delivered),
+                "messageBytes": sum(len(m["text"].encode()) for m in delivered),
+            },
+            repeat=False,
+        )
         # New mail arrived during the turn: keep going instead of leaving it unread until the user returns.
         return {"decision": "block", "reason": f"Peer messages arrived while you worked:\n\n{context}"}
     # Who else works in this repository: at session start, and again whenever that set changes.
@@ -1407,13 +1494,32 @@ The mailbox is cooperative messaging within the original task scope.
 Do not repeatedly poll. Continue independent work when possible; otherwise report BLOCKED with the unanswered
 question. Messages are seen at tool/checkpoint boundaries, not injected into an active response. Do not launch
 other agents yourself; route requests for peer help through the conductor.
+
+If mailbox communication causes a real problem, report it once using:
+`{command} feedback --session {session} --category delivery --intent 'What you intended' --problem 'What went wrong' --needed 'What would have helped'`
+Choose the category that fits. Omit task contents, source code, paths and secrets. Reporting writes only to
+the configured diagnostic collector; it sends no message and does not expand your editing scope. Do not
+poll, retry unchanged, or contact another agent just to collect feedback.
 """.strip()
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="run_agent.py mailbox", description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
-    for name in ("peers", "send", "ask", "inbox", "wait", "ack", "history", "focus", "prune", "hook"):
+    for name in (
+        "peers",
+        "send",
+        "ask",
+        "inbox",
+        "wait",
+        "ack",
+        "history",
+        "focus",
+        "prune",
+        "hook",
+        "feedback",
+        "feedback-summary",
+    ):
         sub = commands.add_parser(name)
         sub.add_argument(
             "--session",
@@ -1421,7 +1527,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         sub.add_argument("--harness", choices=HARNESSES)
         sub.add_argument("--format", choices=("text", "json", "context"), default="text")
-        if name in {"peers", "send", "inbox", "wait"}:
+        if name in {"peers", "send", "inbox", "wait", "feedback-summary"}:
             sub.add_argument(
                 "--scope", choices=SCOPES, default="project", help="cross-project requires explicit opt-in"
             )
@@ -1447,6 +1553,14 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("ids", nargs="+")
         if name == "focus":
             sub.add_argument("--text", required=True, help="one line on what this session is working on")
+        if name == "feedback":
+            sub.add_argument("--category", choices=feedback_module().CATEGORIES, required=True)
+            sub.add_argument("--intent", required=True)
+            sub.add_argument("--problem", required=True)
+            sub.add_argument("--needed", required=True)
+            sub.add_argument("--operation", choices=feedback_module().OPERATIONS, default="other")
+            sub.add_argument("--scope", choices=SCOPES, default="project")
+            sub.add_argument("--message-id", action="append", default=[])
     args = parser.parse_args(argv)
     base = root()
     try:
@@ -1455,6 +1569,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 output = hook(json.loads(raw) if raw.strip() else {}, harness=args.harness, base=base)
             except Exception as error:  # noqa: BLE001 -- a mailbox fault must never break the host's turn
+                record_failure(base, {"harness": args.harness or "unknown"}, "hook", "project", error)
                 print(f"mailbox hook: {error}", file=sys.stderr)
                 return 0
             if output:
@@ -1462,6 +1577,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.action == "prune":
             output: Any = prune(base)
+        elif args.action == "feedback-summary":
+            me = caller(args, base) if session_arg(args) else workspace(os.getcwd())
+            output = feedback_module().summary(base, peer=None if args.scope == "cross-project" else me)
         elif args.action == "peers":
             me = caller(args, base) if session_arg(args) else workspace(os.getcwd())
             rows = scoped_peers(base, me, scope=args.scope, include_runs=args.runs)
@@ -1471,7 +1589,19 @@ def main(argv: list[str] | None = None) -> int:
             output = rows
         else:
             me = caller(args, base)
-            if args.action in {"send", "ask"}:
+            if args.action == "feedback":
+                output = feedback_module().submit(
+                    base,
+                    me,
+                    category=args.category,
+                    intent=args.intent,
+                    problem=args.problem,
+                    needed=args.needed,
+                    operation=args.operation,
+                    scope=args.scope,
+                    message_ids=args.message_id,
+                )
+            elif args.action in {"send", "ask"}:
                 to = args.to or (me.get("counterpart") if is_run_peer(me) else None)
                 if not to:
                     raise MailboxError("pass --to (or set AGENT_MAILBOX_PEER)")
@@ -1528,6 +1658,10 @@ def main(argv: list[str] | None = None) -> int:
                     output = run_history(base, me["run"])
                 else:
                     raise MailboxError(f"unsupported mailbox action: {args.action}")
+            if output.get("status") == "timed_out" and (getattr(args, "reply_to", None) or args.action == "ask"):
+                request = feedback_request(base, me)
+                if request:
+                    output["feedbackRequest"] = request
             if args.format == "context" and "messages" in output:
                 print(render_all(output["messages"]))
                 return 12 if output.get("status") == "timed_out" else 0
@@ -1535,7 +1669,16 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(output, dict) and output.get("status") == "timed_out":
             return 12
         return 30 if isinstance(output, dict) and output.get("status") == "closed" else 0
-    except (MailboxError, OSError) as error:
+    except (MailboxError, OSError, feedback_module().FeedbackError) as error:
+        if args.action not in {"feedback", "feedback-summary", "prune"}:
+            peer = {"harness": args.harness or "unknown", "session": session_arg(args)}
+            if session_arg(args):
+                with contextlib.suppress(MailboxError):
+                    peer = load(peer_path(base, session_arg(args))) or peer
+            record_failure(base, peer, args.action, getattr(args, "scope", "project"), error)
+            request = feedback_request(base, peer)
+            if request:
+                print(request, file=sys.stderr)
         print(f"mailbox: {error}", file=sys.stderr)
         return 4
 
