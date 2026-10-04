@@ -6,6 +6,8 @@
   and old threshold state leave it inactive. Disarming cancels pending requests;
   session end and reset clear the opt-in. Manual handoffs stay available.
 
-## 1.1.1
-
 - fix(bailout): let sessions run to the real usage limit so they resume
+
+## 1.1.0
+
+- Initial repository release baseline; no versioned changelog was recorded.
