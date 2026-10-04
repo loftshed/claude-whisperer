@@ -54,8 +54,10 @@ class MailboxTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.base = Path(self.temporary.name) / "mailbox-v1"
-        self.claude = self.peer("claude-session-1111", "claude", "/work/sender-ui")
-        self.codex = self.peer("codex-session-2222", "codex", "/work/sender-ui")
+        self.repository = Path(self.temporary.name) / "sender-ui"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.repository)], check=True)
+        self.claude = self.peer("claude-session-1111", "claude", str(self.repository))
+        self.codex = self.peer("codex-session-2222", "codex", str(self.repository))
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -79,11 +81,11 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(len(MAILBOX.messages(self.base, self.claude["session"], unread_only=False)), 2)
 
     def test_same_harness_with_native_messaging_is_refused(self):
-        other = self.peer("claude-session-7777", "claude", "/work/oss-ui")
+        other = self.peer("claude-session-7777", "claude", str(self.repository))
         with self.assertRaisesRegex(MAILBOX.MailboxError, "SendMessage"):
             MAILBOX.send(self.base, sender=self.claude, to=other["name"], text="hi")
         listing = MAILBOX.table(MAILBOX.peers(self.base), self.claude["session"], "claude")
-        self.assertIn("(same harness: use SendMessage)", listing)
+        self.assertIn("same harness: use SendMessage", listing)
         self.assertIn("(you)", listing)
 
     def test_refuses_unknown_self_oversize_and_ambiguous_addresses(self):
@@ -101,26 +103,26 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(sent["to"], twin["name"])
 
     def test_colon_and_underscore_sessions_keep_separate_files(self):
-        colon = self.peer("audit:worker", "codex", "/work/a")
+        colon = self.peer("audit:worker", "codex", str(self.repository))
         underscore = self.peer("audit_worker", "opencode", "/work/b")
         self.assertNotEqual(MAILBOX.peer_path(self.base, "audit:worker"), MAILBOX.peer_path(self.base, "audit_worker"))
         self.assertEqual(MAILBOX.load(MAILBOX.peer_path(self.base, colon["session"]))["harness"], "codex")
         self.assertEqual(MAILBOX.load(MAILBOX.peer_path(self.base, underscore["session"]))["harness"], "opencode")
 
     def test_a_colon_session_moves_from_its_legacy_file_names_when_it_registers(self):
-        peer = self.peer("audit:worker", "codex", "/work/a")
+        peer = self.peer("audit:worker", "codex", str(self.repository))
         legacy_peer = self.base / "peers" / "audit_worker.json"
         MAILBOX.peer_path(self.base, peer["session"]).rename(legacy_peer)
         sent = MAILBOX.send(self.base, sender=self.claude, to=peer["name"], text="kept")
         legacy_inbox = self.base / "inbox" / "audit_worker"
         MAILBOX.inbox_dir(self.base, peer["session"]).rename(legacy_inbox)
-        self.peer("audit:worker", "codex", "/work/a")
+        self.peer("audit:worker", "codex", str(self.repository))
         self.assertFalse(legacy_peer.exists())
-        self.assertEqual(MAILBOX.resolve(self.base, peer["name"])["session"], "audit:worker")
+        self.assertEqual(MAILBOX.resolve(self.base, peer["name"], sender=self.codex)["session"], "audit:worker")
         self.assertEqual([item["id"] for item in MAILBOX.messages(self.base, "audit:worker")], [sent["id"]])
 
     def test_sessions_differing_only_by_case_keep_separate_files(self):
-        upper = self.peer("AuditPeer", "codex", "/work/a")
+        upper = self.peer("AuditPeer", "codex", str(self.repository))
         lower = self.peer("auditpeer", "opencode", "/work/b")
         MAILBOX.send(self.base, sender=self.claude, to=upper["name"], text="for upper")
         self.assertEqual(MAILBOX.messages(self.base, "auditpeer"), [])
@@ -131,18 +133,18 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(MAILBOX.load(MAILBOX.peer_path(self.base, lower["session"]))["harness"], "opencode")
 
     def test_a_capitalised_session_moves_from_its_previous_file_name(self):
-        peer = self.peer("AuditPeer", "codex", "/work/a")
+        peer = self.peer("AuditPeer", "codex", str(self.repository))
         old = self.base / "peers" / "AuditPeer.json"
         MAILBOX.peer_path(self.base, "AuditPeer").rename(old)
-        self.peer("AuditPeer", "codex", "/work/a")
+        self.peer("AuditPeer", "codex", str(self.repository))
         self.assertFalse(old.exists())
-        self.assertEqual(MAILBOX.resolve(self.base, peer["name"])["session"], "AuditPeer")
+        self.assertEqual(MAILBOX.resolve(self.base, peer["name"], sender=self.codex)["session"], "AuditPeer")
 
     def test_a_malformed_legacy_message_does_not_stop_registration(self):
         legacy = self.base / "inbox" / "AuditPeer"
         legacy.mkdir(parents=True)
         (legacy / "x.json").write_text(json.dumps({"to": "not-an-object"}))
-        self.peer("AuditPeer", "codex", "/work/a")
+        self.peer("AuditPeer", "codex", str(self.repository))
 
     def test_a_non_object_peer_file_is_skipped(self):
         (self.base / "peers" / "broken.json").write_text("[1]", encoding="utf-8")
@@ -183,7 +185,9 @@ class MailboxTests(unittest.TestCase):
     def test_an_incomplete_peer_record_is_pruned_and_does_not_break_lookup(self):
         path = MAILBOX.peer_path(self.base, "codex-session-part")
         MAILBOX.write(path, {"schema": MAILBOX.PEER_SCHEMA, "session": "codex-session-part"})
-        self.assertEqual(MAILBOX.resolve(self.base, self.claude["name"])["session"], self.claude["session"])
+        self.assertEqual(
+            MAILBOX.resolve(self.base, self.claude["name"], sender=self.codex)["session"], self.claude["session"]
+        )
         self.assertFalse(path.exists())
 
     def test_a_malformed_message_is_skipped_and_left_unread(self):
@@ -265,7 +269,7 @@ class MailboxTests(unittest.TestCase):
             if target == path and not refreshed:
                 # The session's next hook refreshes the peer between the prune's read and its unlink.
                 refreshed.append(True)
-                self.peer(stale["session"], "codex", "/work/sender-ui")
+                self.peer(stale["session"], "codex", str(self.repository))
             return value
 
         with mock.patch.object(MAILBOX, "load", side_effect=refresh_after_read):
@@ -294,6 +298,185 @@ class MailboxTests(unittest.TestCase):
         with mock.patch.object(MAILBOX, "harness_pid", return_value=os.getpid()):
             return MAILBOX.hook(payload, harness=harness, base=self.base)
 
+    def set_remote(self, repository, url, name="origin"):
+        subprocess.run(["git", "-C", str(repository), "config", f"remote.{name}.url", url], check=True)
+
+    def test_clones_with_equivalent_remotes_can_discover_and_message_each_other(self):
+        self.set_remote(self.repository, "https://example.test/team/app.git")
+        me = self.peer(self.codex["session"], "codex", str(self.repository))
+        replica = self.git_checkout("replica")
+        for url in (
+            "git@example.test:team/app.git",
+            "ssh://git@EXAMPLE.test:22/team/app",
+            "https://example.test:443/team/app.git/",
+            "https://test-token@example.test/team/app.git",
+        ):
+            with self.subTest(url=url):
+                self.set_remote(replica, url)
+                other = self.peer("replica-session", "claude", str(replica))
+                listing = MAILBOX.table(MAILBOX.peers(self.base), me["session"], "codex")
+                self.assertIn(other["name"], listing)
+                self.assertIn("same project", listing)
+                MAILBOX.send(self.base, sender=me, to=other["name"], text="Which contract is current?")
+                self.assertEqual(
+                    [message["text"] for message in MAILBOX.take(self.base, other["session"])],
+                    ["Which contract is current?"],
+                )
+                self.assertNotIn("test-token", MAILBOX.peer_path(self.base, other["session"]).read_text())
+
+    def test_unrelated_remotes_are_hidden_and_cannot_be_addressed_by_name_id_or_prefix(self):
+        self.set_remote(self.repository, "https://example.test/team/app.git")
+        me = self.peer(self.codex["session"], "codex", str(self.repository))
+        elsewhere = self.git_checkout("elsewhere")
+        for url in (
+            "https://example.test/another-team/app.git",
+            "https://another.test/team/app.git",
+            "https://example.test/team/app-addon.git",
+            "ssh://git@example.test:2222/team/app.git",
+        ):
+            with self.subTest(url=url):
+                self.set_remote(elsewhere, url)
+                other = self.peer("foreign-session", "claude", str(elsewhere))
+                MAILBOX.set_focus(self.base, other["session"], "private unrelated task")
+                for format_name in ("text", "json"):
+                    listed = mailbox_cli(self.base, "peers", "--format", format_name, cwd=self.repository, check=True)
+                    self.assertIn(self.claude["session"][:8], listed.stdout)
+                    self.assertNotIn("foreign", listed.stdout)
+                    self.assertNotIn("private unrelated task", listed.stdout)
+                for address in (other["name"], other["session"], "foreign"):
+                    with self.assertRaisesRegex(MAILBOX.MailboxError, "no live peer.*in this project"):
+                        MAILBOX.send(self.base, sender=me, to=address, text="wrong project")
+                self.assertEqual(MAILBOX.messages(self.base, other["session"]), [])
+
+    def test_an_upstream_remote_connects_related_clones(self):
+        self.set_remote(self.repository, "https://example.test/team/app.git")
+        me = self.peer(self.codex["session"], "codex", str(self.repository))
+        fork = self.git_checkout("fork")
+        self.set_remote(fork, "https://example.test/person/app.git")
+        self.set_remote(fork, "git@example.test:team/app.git", name="upstream")
+        other = self.peer("fork-session", "claude", str(fork))
+        MAILBOX.send(self.base, sender=me, to=other["session"], text="Shared upstream")
+        self.assertEqual([m["text"] for m in MAILBOX.take(self.base, other["session"])], ["Shared upstream"])
+
+    def test_local_path_and_file_url_remotes_match(self):
+        shared = Path(self.temporary.name) / "shared.git"
+        self.set_remote(self.repository, "../shared.git")
+        me = self.peer(self.codex["session"], "codex", str(self.repository))
+        replica = self.git_checkout("replica")
+        self.set_remote(replica, shared.as_uri())
+        other = self.peer("local-replica", "claude", str(replica))
+        MAILBOX.send(self.base, sender=me, to=other["name"], text="Local project")
+        self.assertEqual([m["text"] for m in MAILBOX.take(self.base, other["session"])], ["Local project"])
+
+    def test_legacy_peers_and_messages_keep_same_project_delivery(self):
+        self.set_remote(self.repository, "https://example.test/team/app.git")
+        replica = self.git_checkout("legacy-replica")
+        self.set_remote(replica, "git@example.test:team/app.git")
+        other = self.peer("legacy-peer", "claude", str(replica))
+        path = MAILBOX.peer_path(self.base, other["session"])
+        old = MAILBOX.load(path)
+        old.pop("remotes")
+        MAILBOX.write(path, old)
+        me = self.peer(self.codex["session"], "codex", str(self.repository))
+        sent = MAILBOX.send(self.base, sender=me, to=other["name"], text="Older record")
+        mail_path = MAILBOX.inbox_dir(self.base, other["session"]) / f"{sent['id']}.json"
+        message = MAILBOX.load(mail_path)
+        for key in ("repo", "remotes"):
+            message["from"].pop(key, None)
+        MAILBOX.write(mail_path, message)
+        self.assertEqual([m["text"] for m in MAILBOX.take(self.base, other["session"])], ["Older record"])
+
+    def test_project_changes_keep_old_mail_out_of_inbox_wait_and_hooks(self):
+        MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text="Old project context")
+        new_repository = self.git_checkout("new-project")
+        new_peer = self.peer("new-project-peer", "codex", str(new_repository))
+        notice = self.hook(self.claude["session"], "claude", new_repository, "UserPromptSubmit")
+        self.assertIn(new_peer["name"], notice["hookSpecificOutput"]["additionalContext"])
+        self.assertNotIn("Old project context", notice["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(MAILBOX.wait(self.base, self.claude["session"], timeout=0.01)["status"], "timed_out")
+        self.assertIsNone(self.hook(self.claude["session"], "claude", new_repository, "Stop"))
+        MAILBOX.send(self.base, sender=new_peer, to=self.claude["session"], text="Current project context")
+        self.assertEqual(
+            [m["text"] for m in MAILBOX.take(self.base, self.claude["session"], mark=False)],
+            ["Current project context"],
+        )
+        delivered = self.hook(self.claude["session"], "claude", new_repository, "Stop")
+        self.assertIn("Current project context", delivered["reason"])
+        self.assertNotIn("Old project context", delivered["reason"])
+        self.assertEqual(
+            [m["text"] for m in MAILBOX.take(self.base, self.claude["session"], scope="cross-project")],
+            ["Old project context"],
+        )
+
+    def test_cross_project_cli_calls_are_explicit_and_do_not_change_defaults(self):
+        elsewhere = self.git_checkout("separate")
+        other = self.peer("cross-project-peer", "claude", str(elsewhere))
+        for format_name in ("text", "json"):
+            broad = mailbox_cli(
+                self.base, "peers", "--scope", "cross-project", "--format", format_name, cwd=self.repository, check=True
+            )
+            narrow = mailbox_cli(self.base, "peers", "--format", format_name, cwd=self.repository, check=True)
+            self.assertIn(other["name"], broad.stdout)
+            self.assertNotIn(other["name"], narrow.stdout)
+        args = (
+            "send",
+            "--session",
+            self.codex["session"],
+            "--harness",
+            "codex",
+            "--to",
+            other["session"],
+            "--text",
+            "Cross-project question",
+        )
+        refused = mailbox_cli(self.base, *args, cwd=self.repository)
+        self.assertEqual(refused.returncode, 4)
+        sent = mailbox_cli(self.base, *args, "--scope", "cross-project", cwd=self.repository, check=True)
+        self.assertEqual(json.loads(sent.stdout)["to"], other["name"])
+        self.assertIsNone(self.hook(other["session"], "claude", elsewhere, "Stop"))
+        read_args = ("inbox", "--session", other["session"], "--harness", "claude", "--format", "json")
+        narrow = mailbox_cli(self.base, *read_args, cwd=elsewhere, check=True)
+        self.assertEqual(json.loads(narrow.stdout), {"messages": []})
+        broad = mailbox_cli(self.base, *read_args, "--scope", "cross-project", "--peek", cwd=elsewhere, check=True)
+        self.assertEqual([m["text"] for m in json.loads(broad.stdout)["messages"]], ["Cross-project question"])
+        narrow = mailbox_cli(self.base, *read_args, cwd=elsewhere, check=True)
+        self.assertEqual(json.loads(narrow.stdout), {"messages": []})
+        waited = mailbox_cli(
+            self.base,
+            "wait",
+            "--session",
+            other["session"],
+            "--harness",
+            "claude",
+            "--scope",
+            "cross-project",
+            "--timeout",
+            "0.1",
+            cwd=elsewhere,
+            check=True,
+        )
+        self.assertEqual([m["text"] for m in json.loads(waited.stdout)["messages"]], ["Cross-project question"])
+
+    def test_outside_git_default_is_closed_and_cross_project_is_available(self):
+        outside = Path(self.temporary.name) / "plain"
+        outside.mkdir()
+        default = mailbox_cli(self.base, "peers", "--format", "json", cwd=outside, check=True)
+        self.assertEqual(json.loads(default.stdout), [])
+        explicit = mailbox_cli(
+            self.base, "peers", "--format", "json", "--scope", "cross-project", cwd=outside, check=True
+        )
+        self.assertEqual(
+            {p["session"] for p in json.loads(explicit.stdout)}, {"claude-session-1111", "codex-session-2222"}
+        )
+        me = self.peer("plain-session", "opencode", str(outside))
+        with self.assertRaisesRegex(MAILBOX.MailboxError, "in this project"):
+            MAILBOX.send(self.base, sender=me, to=self.claude["name"], text="Closed by default")
+        MAILBOX.send(self.base, sender=me, to=self.claude["name"], text="Explicit coordination", scope="cross-project")
+        self.assertEqual(
+            [m["text"] for m in MAILBOX.take(self.base, self.claude["session"], scope="cross-project")],
+            ["Explicit coordination"],
+        )
+
     def test_sessions_in_one_repository_are_told_about_each_other(self):
         repo = self.git_checkout("shared")
         worktree = Path(self.temporary.name) / "shared-feature"
@@ -308,6 +491,9 @@ class MailboxTests(unittest.TestCase):
         self.assertIn("rewriting the login form", notice)
         self.assertIn("on main, worktree", notice)
         self.assertNotIn("opencode", notice)
+        sender = MAILBOX.load(MAILBOX.peer_path(self.base, "codex-repo-1"))
+        MAILBOX.send(self.base, sender=sender, to="claude-repo-2", text="Sibling worktree")
+        self.assertEqual([m["text"] for m in MAILBOX.take(self.base, "claude-repo-2")], ["Sibling worktree"])
         # Nothing new on the next prompt; a newcomer is announced once.
         self.assertIsNone(self.hook("claude-repo-2", "claude", worktree, "UserPromptSubmit"))
         self.hook("gemini-repo-3", "gemini", repo, "SessionStart")
@@ -378,14 +564,15 @@ class MailboxTests(unittest.TestCase):
         self.assertIn("codex-cli-1"[:8], first)
         self.assertIn("same repository", first)
 
-    def test_cli_peers_outside_git_marks_no_repository(self):
+    def test_cli_peers_outside_git_keeps_the_hooked_project(self):
         repo = self.git_checkout("was-here")
         self.hook("codex-was-1", "codex", repo, "SessionStart")
         self.hook("claude-was-2", "claude", repo, "SessionStart")
         outside = Path(self.temporary.name) / "plain"
         outside.mkdir()
         result = mailbox_cli(self.base, "peers", "--session", "claude-was-2", "--harness", "claude", cwd=outside)
-        self.assertNotIn("same repository", result.stdout)
+        self.assertIn("same repository", result.stdout)
+        self.assertIn("codex-was-1"[:8], result.stdout)
 
     def test_a_cli_call_from_another_directory_keeps_the_hooked_directory(self):
         repo = self.git_checkout("hooked-repo")
@@ -464,15 +651,24 @@ class MailboxTests(unittest.TestCase):
         self.assertIn("native way of messaging", text)
 
     def test_hooks_register_deliver_and_block_stop_only_with_new_mail(self):
-        payload = {"session_id": "claude-session-5555", "cwd": "/work/oss-ui", "transcript_path": "/u/.claude/x.jsonl"}
+        payload = {
+            "session_id": "claude-session-5555",
+            "cwd": str(self.repository),
+            "transcript_path": "/u/.claude/x.jsonl",
+        }
         with mock.patch.object(MAILBOX, "harness_pid", return_value=os.getpid()):
-            self.assertIsNone(MAILBOX.hook({**payload, "hook_event_name": "SessionStart"}, base=self.base))
-            me = MAILBOX.resolve(self.base, "claude-session-5555")
+            self.assertIn(
+                "codex",
+                MAILBOX.hook({**payload, "hook_event_name": "SessionStart"}, base=self.base)["hookSpecificOutput"][
+                    "additionalContext"
+                ],
+            )
+            me = MAILBOX.resolve(self.base, "claude-session-5555", sender=self.codex)
             self.assertEqual((me["harness"], me["state"]), ("claude", "idle"))
             MAILBOX.send(self.base, sender=self.codex, to=me["name"], text="review my diff?")
             delivered = MAILBOX.hook({**payload, "hook_event_name": "UserPromptSubmit"}, base=self.base)
             self.assertIn("review my diff?", delivered["hookSpecificOutput"]["additionalContext"])
-            self.assertEqual(MAILBOX.resolve(self.base, me["name"])["state"], "busy")
+            self.assertEqual(MAILBOX.resolve(self.base, me["name"], sender=self.codex)["state"], "busy")
             self.assertIsNone(MAILBOX.hook({**payload, "hook_event_name": "Stop"}, base=self.base))
             MAILBOX.send(self.base, sender=self.codex, to=me["name"], text="also check tests")
             blocked = MAILBOX.hook({**payload, "hook_event_name": "Stop"}, base=self.base)
@@ -497,6 +693,7 @@ class RunMailboxTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.directory = Path(self.temporary.name)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.directory)], check=True)
         self.base = self.directory / "mailbox-v1"
         self.result_path = self.directory / "result.json"
         self.info = open_test_run(
@@ -528,15 +725,17 @@ class RunMailboxTests(unittest.TestCase):
         )
         self.assertEqual(worker_message["from"]["harness"], "claude")
         self.assertEqual(worker_message["to"]["session"], self.info["conductor"])
-        with self.assertRaisesRegex(MAILBOX.MailboxError, "only their counterpart"):
-            MAILBOX.send(
-                self.base,
-                sender=self.worker,
-                to=self.interactive["session"],
-                text="outside",
-                kind="update",
-                client_id="u1",
-            )
+        for scope in ("project", "cross-project"):
+            with self.subTest(scope=scope), self.assertRaisesRegex(MAILBOX.MailboxError, "only their counterpart"):
+                MAILBOX.send(
+                    self.base,
+                    sender=self.worker,
+                    to=self.interactive["session"],
+                    text="outside",
+                    kind="update",
+                    client_id="u1",
+                    scope=scope,
+                )
 
     def test_worker_asks_and_receives_exact_reply_from_another_process(self):
         environment = {
@@ -1069,7 +1268,9 @@ class RunMailboxTests(unittest.TestCase):
         self.assertFalse(MAILBOX.is_run_peer(MAILBOX.load(MAILBOX.peer_path(self.base, ordinary["session"]))))
 
     def test_mail_left_for_an_earlier_ordinary_session_is_not_run_traffic(self):
-        stale = MAILBOX.register(self.base, session="run-old-worker", harness="codex", cwd="/w", pid=os.getpid())
+        stale = MAILBOX.register(
+            self.base, session="run-old-worker", harness="codex", cwd=str(self.directory), pid=os.getpid()
+        )
         MAILBOX.send(self.base, sender=self.interactive | {"harness": "opencode"}, to=stale["name"], text="old")
         MAILBOX.unregister(self.base, stale["session"])
         self.open("old")
@@ -1174,7 +1375,9 @@ class RunMailboxTests(unittest.TestCase):
         self.assertEqual(first, RUNNER.foreground_run_name(self.directory / "a" / "out"))
 
     def test_run_ack_cannot_acknowledge_mail_outside_the_run(self):
-        stale = MAILBOX.register(self.base, session="run-ackrun-worker", harness="codex", cwd="/w", pid=os.getpid())
+        stale = MAILBOX.register(
+            self.base, session="run-ackrun-worker", harness="codex", cwd=str(self.directory), pid=os.getpid()
+        )
         sent = MAILBOX.send(self.base, sender=self.interactive | {"harness": "opencode"}, to=stale["name"], text="old")
         MAILBOX.unregister(self.base, stale["session"])
         info = self.open("ackrun")
@@ -1410,7 +1613,7 @@ class McpServerTests(unittest.TestCase):
         server = RUNNER.bundled_module("mailbox_mcp").Server(base=base, environ={})
         server.identify({"name": "codex-mcp-client"})
         me = server.me({"sessionId": "codex-queued"})
-        sender = MAILBOX.register(base, session="claude-queued", harness="claude", cwd="/w", pid=os.getpid())
+        sender = MAILBOX.register(base, session="claude-queued", harness="claude", cwd=os.getcwd(), pid=os.getpid())
         MAILBOX.send(base, sender=sender, to=me["session"], text="queued")
         cancelled = threading.Event()
         cancelled.set()
@@ -1423,7 +1626,7 @@ class McpServerTests(unittest.TestCase):
         server = module.Server(base=base, environ={})
         server.identify({"name": "codex-mcp-client"})
         me = server.me({"sessionId": "codex-late"})
-        sender = MAILBOX.register(base, session="claude-late", harness="claude", cwd="/w", pid=os.getpid())
+        sender = MAILBOX.register(base, session="claude-late", harness="claude", cwd=os.getcwd(), pid=os.getpid())
         MAILBOX.send(base, sender=sender, to=me["session"], text="queued")
         cancelled = threading.Event()
         original = module.mailbox.wait
@@ -1470,7 +1673,11 @@ class McpServerTests(unittest.TestCase):
 
     def test_arguments_that_are_not_an_object_change_nothing(self):
         claude = MAILBOX.register(
-            Path(self.temporary.name) / "mailbox-v1", session="claude-args", harness="claude", cwd="/w", pid=os.getpid()
+            Path(self.temporary.name) / "mailbox-v1",
+            session="claude-args",
+            harness="claude",
+            cwd=os.getcwd(),
+            pid=os.getpid(),
         )
         replies = self.exchange(
             "codex-mcp-client",
@@ -1496,7 +1703,7 @@ class McpServerTests(unittest.TestCase):
         server = RUNNER.bundled_module("mailbox_mcp").Server(base=base, environ={})
         server.identify({"name": "codex-mcp-client"})
         me = server.me({"sessionId": "codex-split"})
-        sender = MAILBOX.register(base, session="claude-split", harness="claude", cwd="/w", pid=os.getpid())
+        sender = MAILBOX.register(base, session="claude-split", harness="claude", cwd=os.getcwd(), pid=os.getpid())
         results = []
         threads = [
             threading.Thread(
@@ -1514,7 +1721,7 @@ class McpServerTests(unittest.TestCase):
 
     def test_arguments_of_the_wrong_type_are_a_tool_error_and_touch_nothing(self):
         base = Path(self.temporary.name) / "mailbox-v1"
-        claude = MAILBOX.register(base, session="claude-types", harness="claude", cwd="/w", pid=os.getpid())
+        claude = MAILBOX.register(base, session="claude-types", harness="claude", cwd=os.getcwd(), pid=os.getpid())
         replies = self.exchange(
             "codex-mcp-client",
             [
@@ -1545,6 +1752,100 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("no other agents", replies[1]["result"]["content"][0]["text"])
         base = Path(self.temporary.name) / "mailbox-v1"
         self.assertEqual(MAILBOX.load(MAILBOX.peer_path(base, "codex-focus"))["focus"], "fixing the parser")
+
+    def test_mcp_cross_project_coordination_requires_explicit_scope_on_each_call(self):
+        base = Path(self.temporary.name) / "mailbox-v1"
+        other_project = Path(self.temporary.name) / "other-project"
+        subprocess.run(["git", "init", "-q", str(other_project)], check=True)
+        local = MAILBOX.register(base, session="local-colleague", harness="claude", cwd=os.getcwd(), pid=os.getpid())
+        other = MAILBOX.register(
+            base,
+            session="other-colleague",
+            harness="claude",
+            cwd=str(other_project),
+            pid=os.getpid(),
+            cwd_source="hook",
+        )
+        MAILBOX.set_focus(base, other["session"], "Unrelated project context")
+        replies = self.exchange(
+            "codex-mcp-client",
+            [
+                self.call("peers", session="mode-caller"),
+                self.call("peers", {"scope": "cross-project"}, session="mode-caller"),
+                self.call("peers", session="mode-caller"),
+                self.call("send", {"to": other["name"], "text": "Contract question"}, session="mode-caller"),
+                self.call(
+                    "send",
+                    {"scope": "cross-project", "to": other["name"], "text": "Contract question"},
+                    session="mode-caller",
+                ),
+                self.call("send", {"to": local["name"], "text": "Local question"}, session="mode-caller"),
+            ],
+        )
+        for index in (1, 3):
+            text = replies[index]["result"]["content"][0]["text"]
+            self.assertIn(local["name"], text)
+            self.assertNotIn("Unrelated project context", text)
+        self.assertIn("Unrelated project context", replies[2]["result"]["content"][0]["text"])
+        self.assertTrue(replies[4]["result"]["isError"])
+        question = json.loads(replies[5]["result"]["content"][0]["text"])
+        self.assertEqual(question["to"], other["name"])
+        self.assertEqual(json.loads(replies[6]["result"]["content"][0]["text"])["to"], local["name"])
+        received = self.exchange(
+            "claude-code",
+            [
+                self.call("inbox", session=other["session"]),
+                self.call("inbox", {"scope": "cross-project", "markRead": False}, session=other["session"]),
+                self.call("inbox", session=other["session"]),
+                self.call("wait", {"scope": "cross-project", "timeoutSeconds": 0.1}, session=other["session"]),
+                self.call(
+                    "send",
+                    {
+                        "scope": "cross-project",
+                        "to": "mode-caller",
+                        "text": "Contract answer",
+                        "replyTo": question["id"],
+                    },
+                    session=other["session"],
+                ),
+            ],
+        )
+        received.sort(key=lambda reply: reply["id"])
+        self.assertEqual(received[1]["result"]["content"][0]["text"], "no unread peer messages")
+        self.assertIn("Contract question", received[2]["result"]["content"][0]["text"])
+        self.assertEqual(received[3]["result"]["content"][0]["text"], "no unread peer messages")
+        self.assertIn("Contract question", received[4]["result"]["content"][0]["text"])
+        waited = self.exchange(
+            "codex-mcp-client",
+            [
+                self.call("wait", {"timeoutSeconds": 0.01, "replyTo": question["id"]}, session="mode-caller"),
+                self.call(
+                    "wait",
+                    {"scope": "cross-project", "timeoutSeconds": 0.1, "replyTo": question["id"]},
+                    session="mode-caller",
+                ),
+            ],
+        )
+        waited.sort(key=lambda reply: reply["id"])
+        self.assertIn("timed_out", waited[1]["result"]["content"][0]["text"])
+        self.assertIn("Contract answer", waited[2]["result"]["content"][0]["text"])
+
+    def test_invalid_mcp_scope_is_rejected_before_registering_or_sending(self):
+        replies = self.exchange(
+            "codex-mcp-client",
+            [
+                self.call("peers", {"scope": "everything"}, session="invalid-scope"),
+                self.call("send", {"scope": "everything", "to": "someone", "text": "hi"}, session="invalid-scope"),
+                self.call("inbox", {"scope": "everything"}, session="invalid-scope"),
+                self.call("wait", {"scope": "everything"}, session="invalid-scope"),
+                self.call("peers", session="valid-scope"),
+            ],
+        )
+        for reply in replies[1:5]:
+            self.assertTrue(reply["result"]["isError"])
+            self.assertIn("scope must be one of", reply["result"]["content"][0]["text"])
+        base = Path(self.temporary.name) / "mailbox-v1"
+        self.assertEqual([peer["session"] for peer in MAILBOX.peers(base)], ["valid-scope"])
 
     def test_mcp_calls_keep_the_directory_the_hooks_recorded(self):
         base = Path(self.temporary.name) / "mailbox-v1"

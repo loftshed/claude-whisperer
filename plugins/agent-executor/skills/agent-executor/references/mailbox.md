@@ -1,6 +1,6 @@
 # Peer mailbox
 
-Agent sessions in different harnesses list each other and exchange messages through a local store,
+Agent sessions in different harnesses list each other and exchange messages within their project through a local store,
 `<agent-executor cache>/mailbox-v1/` (`peers/<session>.json`, `inbox/<session>/<id>.json`, with `:` in a
 session id written as `%3A`). Nothing leaves the machine.
 
@@ -14,22 +14,44 @@ store, including when both sessions use Claude Code. Harnesses known to have nat
 
 The MCP server (`scripts/mailbox_mcp.py`) and the CLI (`run_agent.py mailbox …`) share the names.
 
-| Tool    | Does                                                                                         |
-| ------- | -------------------------------------------------------------------------------------------- |
-| `peers` | Live sessions: name, harness, state (`idle`, `busy`, `waiting`), cwd. Dead ones are pruned.  |
-| `send`  | `to` (name, session id, or a unique prefix of 6+ characters), `text` (≤ 32 KiB), `replyTo?`. |
-| `inbox` | Unread messages, oldest first, marked read unless `markRead: false`.                         |
-| `wait`  | Blocks up to `timeoutSeconds` (max 600) for a message, or for the reply to `replyTo`.        |
-| `ack`   | Marks message ids read.                                                                      |
-| `focus` | One line on what this session is working on, shown to agents in the same repository.         |
+| Tool    | Does                                                                                                        |
+| ------- | ----------------------------------------------------------------------------------------------------------- |
+| `peers` | Live sessions in this project: name, harness, state (`idle`, `busy`, `waiting`), cwd. Dead ones are pruned. |
+| `send`  | `to` (name, session id, or a unique prefix of 6+ characters), `text` (≤ 32 KiB), `replyTo?`.                |
+| `inbox` | Unread messages, oldest first, marked read unless `markRead: false`.                                        |
+| `wait`  | Blocks up to `timeoutSeconds` (max 600) for a message, or for the reply to `replyTo`.                       |
+| `ack`   | Marks message ids read.                                                                                     |
+| `focus` | One line on what this session is working on, shown to agents in the same project.                           |
 
-## Who else is in this repository
+## Project scope and cross-project coordination
 
-Every peer record carries its git repository (one id for all worktrees), checkout and branch. At session
-start the Claude Code and Codex hooks list the other live sessions in the same repository, any harness, with
+`peers`, `send`, `inbox` and `wait` default to `scope: "project"`. Sessions match if they share a Git common
+directory or a normalized fetch remote. Separate clones and sibling worktrees can communicate; a matching
+directory name alone does not count. Remote identities ignore SSH versus HTTPS, login, and a trailing `.git`;
+only hashes are stored. Outside Git, the default exposes no other sessions. Old queued mail from another
+project stays unread and out of automatic context, including after a session changes projects.
+
+For coordination between interconnected repositories, such as different parts of the same application, explicitly use
+`scope: "cross-project"` on the needed MCP calls, or CLI `--scope cross-project`:
+
+```bash
+python3 scripts/run_agent.py mailbox peers --scope cross-project
+python3 scripts/run_agent.py mailbox send --scope cross-project --session MY_SESSION --to PEER --text 'Which API contract does the client consume?'
+python3 scripts/run_agent.py mailbox wait --scope cross-project --session MY_SESSION --reply-to MESSAGE_ID
+```
+
+The receiving agent must also use a cross-project `inbox` or `wait` call to read that message. Scope applies
+to one call only. Later calls default to `project`, and automatic hooks always stay within the current
+project. Run-scoped workers and conductors still communicate only with their counterpart in either mode.
+
+## Who else is in this project
+
+Every peer record carries its Git directory, remote identities, checkout and branch. At session
+start the Claude Code and Codex hooks list the other live sessions in the same project, any harness, with
 branch, state and declared `focus`, and repeat it on a later prompt only when that set changes. Hosts without
-hooks get the same rule from the MCP instructions: call `peers` first, where same-repository sessions come
-first. Agents set their own line with `focus` (CLI: `run_agent.py mailbox focus --text '...'`) and agree on a
+hooks get the same rule from the MCP instructions: call `peers` first, which lists only this project by
+default and puts same-repository sessions first. Agents set their own line with `focus`
+(CLI: `run_agent.py mailbox focus --text '...'`) and agree on a
 split before editing files another session is working on. A session launched by the runner is listed as a delegated run worker and gets
 no such notice itself: its conductor coordinates for it. When the last colleague leaves, the next prompt says so.
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Discovery, sending and incoming context default to the same project, including sibling worktrees and
+  clones sharing a Git remote. Explicit `scope: "cross-project"` or CLI `--scope cross-project` enables
+  coordination across projects for one call; automatic hooks stay within the project.
+- Claude Code and Codex hooks announce other live sessions in the project with branch and declared
+  focus at session start and when that set changes. `focus` lets each session say what it is working on.
+
 ## 0.17.0
 
 - Agents see who else works in the same repository: the Claude Code and Codex hooks list other live

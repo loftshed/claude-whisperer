@@ -1,4 +1,4 @@
-"""Machine-wide peer mailbox: agent sessions in any harness list each other and exchange messages.
+"""Project-scoped peer mailbox: agent sessions in any harness exchange messages within one project.
 
 Store: `<agent-executor cache>/mailbox-v1/`, local files only. `peers/<session>.json` is presence,
 `inbox/<session>/<id>.json` one message each. Ids sort in delivery order. No model or provider calls.
@@ -24,6 +24,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 PEER_SCHEMA = "agent-executor.peer.v1"
 MAIL_SCHEMA = "agent-executor.mail.v1"
@@ -40,11 +41,14 @@ MAX_AGE = dt.timedelta(days=7)
 UNKNOWN_PID_TTL = dt.timedelta(hours=2)
 HARNESSES = ("claude", "codex", "opencode", "gemini", "unknown")
 STATES = ("idle", "busy", "waiting")
+SCOPES = ("project", "cross-project")
 # The rule for every harness: a session messages peers of its own harness with that harness's native
 # tools whenever it has any, and uses the mailbox only to cross harnesses. Harnesses known to have native
 # messaging are listed here so the mailbox refuses same-harness traffic for them outright.
 NATIVE_MESSAGING = {"claude": "SendMessage (find the session with ListAgents)"}
 RULE = (
+    "Communicate within the same project by default, including worktrees and checkouts sharing a Git remote. "
+    "Use scope cross-project explicitly only when the task needs coordination with another project. "
     "Within your own harness, use its native way of messaging other agents whenever it has one (Claude Code: "
     "SendMessage and ListAgents). Use the peer mailbox only to reach a session of a different harness."
 )
@@ -550,8 +554,41 @@ def migrate_legacy_session(base: Path, session: str) -> None:
             legacy_inbox.rmdir()
 
 
-def workspace(cwd: str) -> dict[str, str]:
-    """The repository a directory belongs to (one id for all its worktrees), its checkout and branch."""
+def remote_identity(url: str, checkout: str) -> str | None:
+    """Hash a remote's host and full path, without transport, login, or URL credentials."""
+    if not url:
+        return None
+    if "://" not in url:
+        scp = re.fullmatch(r"(?:[^/@:\s]+@)?([^/:\s]+):(.+)", url)
+        if scp:
+            url = f"ssh://{scp[1]}/{scp[2]}"
+        else:
+            identity = str((Path(checkout) / Path(url).expanduser()).resolve())
+            return hashlib.sha256(f"file:{identity}".encode()).hexdigest()
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme == "file" and parsed.hostname in {None, "", "localhost"}:
+            identity = str(Path(unquote(parsed.path)).expanduser().resolve())
+            return hashlib.sha256(f"file:{identity}".encode()).hexdigest()
+        if parsed.scheme not in {"ssh", "git", "http", "https"} or not parsed.hostname:
+            return None
+        port = parsed.port
+        default = {"ssh": 22, "git": 9418, "http": 80, "https": 443}[parsed.scheme]
+        host = parsed.hostname.lower()
+        if port is not None and port != default:
+            host += f":{port}"
+        path = unquote(parsed.path).strip("/")
+        if path.endswith(".git"):
+            path = path[:-4]
+        if not path:
+            return None
+    except ValueError:
+        return None
+    return hashlib.sha256(f"remote:{host}/{path}".encode()).hexdigest()
+
+
+def workspace(cwd: str) -> dict[str, Any]:
+    """Git directory, checkout, branch and normalized remote identities for this project."""
     if not cwd or not Path(cwd).is_dir():
         return {}
     try:
@@ -569,21 +606,72 @@ def workspace(cwd: str) -> dict[str, str]:
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return {}
-    return {"repo": lines[0], "checkout": lines[1], "branch": branch or "(detached)"}
+    remotes = set()
+    try:
+        configured = subprocess.run(
+            ["git", "-C", cwd, "config", "--null", "--get-regexp", r"^remote\..*\.url$"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        for entry in configured.stdout.split("\0"):
+            _, separator, url = entry.partition("\n")
+            identity = remote_identity(url, lines[1]) if separator else None
+            if identity:
+                remotes.add(identity)
+    except (OSError, subprocess.SubprocessError):
+        pass  # the common Git directory still identifies sibling worktrees
+    return {
+        "repo": str(Path(lines[0]).resolve()),
+        "checkout": str(Path(lines[1]).resolve()),
+        "branch": branch or "(detached)",
+        "remotes": sorted(remotes),
+    }
+
+
+def project(peer: dict[str, Any]) -> dict[str, Any]:
+    """Older presence and message records acquire remote identity from their recorded directory."""
+    if isinstance(peer.get("remotes"), list):
+        return peer
+    cwd = peer.get("cwd")
+    return workspace(cwd) if isinstance(cwd, str) else {}
+
+
+def same_project(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left, right = project(left), project(right)
+    if left.get("repo") and left.get("repo") == right.get("repo"):
+        return True
+    left_remotes = {value for value in left.get("remotes", []) if isinstance(value, str)}
+    right_remotes = {value for value in right.get("remotes", []) if isinstance(value, str)}
+    return bool(left_remotes & right_remotes)
+
+
+def check_scope(scope: str) -> None:
+    if scope not in SCOPES:
+        raise MailboxError("scope must be project or cross-project")
+
+
+def scoped_peers(
+    base: Path, me: dict[str, Any], *, scope: str = "project", include_runs: bool = False
+) -> list[dict[str, Any]]:
+    check_scope(scope)
+    return [
+        peer
+        for peer in peers(base, include_runs=include_runs)
+        if scope == "cross-project" or peer["session"] == me.get("session") or same_project(me, peer)
+    ]
 
 
 def colleagues(base: Path, me: dict[str, Any]) -> list[dict[str, Any]]:
-    """Other live sessions, any harness, working in the same repository (any of its worktrees)."""
-    if not me.get("repo"):
-        return []
-    return [peer for peer in peers(base) if peer.get("repo") == me["repo"] and peer["session"] != me["session"]]
+    """Other live sessions in this project, including worktrees and separate clones."""
+    return [peer for peer in scoped_peers(base, me) if peer["session"] != me["session"]]
 
 
 def describe_colleagues(rows: list[dict[str, Any]], me: dict[str, Any]) -> str:
     if not rows:
         return ""
     lines = [
-        "Other agent sessions are working in this repository right now. Before you edit, make sure you are not "
+        "Other agent sessions are working in this project right now. Before you edit, make sure you are not "
         "about to change the same files or branch as one of them; if your work overlaps, agree on a split first "
         f"({RULE}). Say what you are working on with the peer mailbox `focus` tool so they can see it too."
     ]
@@ -598,7 +686,7 @@ def describe_colleagues(rows: list[dict[str, Any]], me: dict[str, Any]) -> str:
 
 
 def set_focus(base: Path, session: str, text: str) -> dict[str, Any]:
-    """One line on what this session is working on, shown to every agent in the same repository."""
+    """One line on what this session is working on, shown to every agent in the same project."""
     peer = load(peer_path(base, session))
     if valid_peer(peer) and not is_run_peer(peer):
         peer = annotate(base, session, focus=" ".join(text.split())[:200])
@@ -644,7 +732,7 @@ def register(
         if cwd_source:
             peer["cwdSource"] = cwd_source
         if not is_run_peer(peer):
-            for key in ("repo", "checkout", "branch"):
+            for key in ("repo", "checkout", "branch", "remotes"):
                 peer.pop(key, None)
             peer.update(workspace(peer["cwd"]))
         if pid and (pid != previous_pid or not peer.get("pidBirth")):
@@ -698,15 +786,16 @@ def peers(base: Path, *, prune_dead: bool = True, include_runs: bool = False) ->
     return sorted(found, key=lambda peer: (str(peer.get("name")), str(peer.get("startedAt"))))
 
 
-def resolve(base: Path, address: str) -> dict[str, Any]:
+def resolve(base: Path, address: str, *, sender: dict[str, Any], scope: str = "project") -> dict[str, Any]:
     """A name, a session id, or a unique session-id prefix of at least six characters."""
-    live = peers(base)
+    live = scoped_peers(base, sender, scope=scope)
     exact = [peer for peer in live if address in (peer["name"], peer["session"])]
     if not exact and len(address) >= 6:
         exact = [peer for peer in live if peer["session"].startswith(address)]
     if not exact:
         names = ", ".join(peer["name"] for peer in live) or "none"
-        raise MailboxError(f"no live peer named {address!r}; live peers: {names}")
+        boundary = "in this project" if scope == "project" else "on this machine"
+        raise MailboxError(f"no live peer named {address!r} {boundary}; live peers: {names}")
     if len(exact) > 1:
         options = ", ".join(f"{peer['name']} [{peer['session'][:8]}]" for peer in exact)
         raise MailboxError(f"{address!r} is ambiguous; address one by session prefix: {options}")
@@ -714,7 +803,9 @@ def resolve(base: Path, address: str) -> dict[str, Any]:
 
 
 def sender_address(peer: dict[str, Any]) -> dict[str, Any]:
-    return {key: peer.get(key) for key in ("session", "name", "harness", "cwd")}
+    address = {key: peer.get(key) for key in ("session", "name", "harness", "cwd")}
+    address.update({key: value for key, value in project(peer).items() if key in {"repo", "remotes"}})
+    return address
 
 
 def message_id() -> str:
@@ -821,7 +912,9 @@ def send(
     reply_to: str | None = None,
     kind: str | None = None,
     client_id: str | None = None,
+    scope: str = "project",
 ) -> dict[str, Any]:
+    check_scope(scope)
     if is_run_peer(sender):
         return run_send(
             base,
@@ -838,7 +931,7 @@ def send(
         raise MailboxError(f"message is over {MAX_BYTES // 1024} KiB; send a path to a file instead")
     if reply_to is not None and not re.fullmatch(MESSAGE_ID, reply_to):
         raise MailboxError(f"invalid replyTo id: {reply_to!r}")
-    target = resolve(base, to)
+    target = resolve(base, to, sender=sender, scope=scope)
     if target["session"] == sender["session"]:
         raise MailboxError("that address is this session")
     native = NATIVE_MESSAGING.get(sender.get("harness"))
@@ -855,6 +948,7 @@ def send(
         "replyTo": reply_to,
         "sentAt": stamp(),
         "readAt": None,
+        "scope": scope,
     }
     write(inbox_dir(base, target["session"]) / f"{message['id']}.json", message)
     return {"id": message["id"], "to": target["name"], "toState": target["state"], "toHarness": target["harness"]}
@@ -905,6 +999,23 @@ def messages(base: Path, session: str, *, unread_only: bool = True) -> list[dict
     return found
 
 
+def allowed_message(peer: dict[str, Any], message: dict[str, Any], scope: str) -> bool:
+    if is_run_peer(peer):
+        return message.get("run") == peer["run"]
+    return not message.get("run") and (scope == "cross-project" or same_project(peer, message["from"]))
+
+
+def incoming(base: Path, session: str, *, unread_only: bool = True, scope: str = "project") -> list[dict[str, Any]]:
+    """Deliver only context belonging to the recipient's current project, including old queued mail."""
+    check_scope(scope)
+    peer = load(peer_path(base, session))
+    if not valid_peer(peer):
+        return []
+    return [
+        message for message in messages(base, session, unread_only=unread_only) if allowed_message(peer, message, scope)
+    ]
+
+
 def mark_one(base: Path, session: str, identifier: str) -> bool | None:
     """Mark a message read under its lock: True if this call did, False if it already was, None if absent."""
     path = inbox_dir(base, session) / f"{identifier}.json"
@@ -928,21 +1039,29 @@ def mark_read(base: Path, session: str, ids: list[str]) -> list[str]:
     return list(ids)
 
 
-def claim(base: Path, session: str, found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def claim(base: Path, session: str, found: list[dict[str, Any]], *, scope: str = "project") -> list[dict[str, Any]]:
     """Mark messages read and keep only those this call was first to mark, so each reader gets its own."""
-    return [message for message in found if mark_one(base, session, message["id"])]
+    check_scope(scope)
+    peer = load(peer_path(base, session))
+    if not valid_peer(peer):
+        return []
+    return [
+        message for message in found if allowed_message(peer, message, scope) and mark_one(base, session, message["id"])
+    ]
 
 
-def take(base: Path, session: str, *, mark: bool = True, limit: int = 20) -> list[dict[str, Any]]:
+def take(
+    base: Path, session: str, *, mark: bool = True, limit: int = 20, scope: str = "project"
+) -> list[dict[str, Any]]:
     if not mark:
-        return messages(base, session)[:limit]
+        return incoming(base, session, scope=scope)[:limit]
     taken: list[dict[str, Any]] = []
     while len(taken) < limit:  # every pass claims a message, here or in a competing reader, so this ends
         # Re-read after each claim: a concurrent reader may have taken part of the last snapshot.
-        unread = messages(base, session)[: limit - len(taken)]
+        unread = incoming(base, session, scope=scope)[: limit - len(taken)]
         if not unread:
             break
-        taken += claim(base, session, unread)
+        taken += claim(base, session, unread, scope=scope)
     return taken
 
 
@@ -955,7 +1074,9 @@ def wait(
     mark: bool = True,
     poll: float = 0.25,
     cancelled: threading.Event | None = None,
+    scope: str = "project",
 ) -> dict[str, Any]:
+    check_scope(scope)
     if not math.isfinite(timeout) or timeout <= 0:
         raise MailboxError("timeout must be a finite number of seconds greater than zero")
     until = time.monotonic() + timeout
@@ -969,7 +1090,7 @@ def wait(
         question_ids = {question["id"], question.get("clientId")} - {None}
     while True:
         # A run reply stays replayable after it was read, as the old channel's were.
-        unread = messages(base, session, unread_only=not (run_peer and reply_to))
+        unread = incoming(base, session, unread_only=not (run_peer and reply_to), scope=scope)
         if run_peer:
             unread = run_traffic(unread, run_peer["run"])
         if reply_to:
@@ -981,7 +1102,7 @@ def wait(
         if unread:
             unread = unread[:20]
             if mark and not run_peer:
-                unread = claim(base, session, unread)
+                unread = claim(base, session, unread, scope=scope)
                 if not unread:
                     continue  # another reader took them first; keep waiting
             result = {"status": "messages", "messages": unread}
@@ -1125,7 +1246,7 @@ def hook(payload: dict[str, Any], *, harness: str | None = None, base: Path | No
     if event == "SessionStart" or seen != me.get("seenColleagues", []):
         notice = describe_colleagues(others, me)
         if not notice and me.get("seenColleagues") and not me.get("delegatedRun"):
-            notice = "The other agent sessions in this repository have ended; none is working here now."
+            notice = "The other agent sessions in this project have ended; none is working here now."
         if notice:
             context = f"{notice}\n\n{context}" if context else notice
         annotate(base, session, seenColleagues=seen)
@@ -1210,14 +1331,25 @@ def refresh(
 
 
 def table(
-    rows: list[dict[str, Any]], session: str | None, harness: str | None = None, here: dict[str, Any] | None = None
+    rows: list[dict[str, Any]],
+    session: str | None,
+    harness: str | None = None,
+    here: dict[str, Any] | None = None,
+    *,
+    scope: str = "project",
 ) -> str:
-    if not rows:
-        return "no live peers"
+    check_scope(scope)
     own = next((peer for peer in rows if peer["session"] == session), None)
     # The CLI passes where it runs (outside git: no repository at all); the MCP server passes nothing.
     mine = here if here is not None else own or {}
-    # Sessions in the caller's repository come first: they are the ones that can collide with its edits.
+    rows = [
+        peer
+        for peer in rows
+        if scope == "cross-project" or peer["session"] == mine.get("session") or same_project(mine, peer)
+    ]
+    if not rows:
+        return "no live peers in this project" if scope == "project" else "no live peers on this machine"
+    # Sessions in the caller's local repository come first: they can collide with its edits.
     rows = sorted(rows, key=lambda peer: not (mine.get("repo") and peer.get("repo") == mine.get("repo")))
     lines = []
     native = NATIVE_MESSAGING.get(harness or "")
@@ -1228,6 +1360,10 @@ def table(
         else:
             if mine.get("repo") and peer.get("repo") == mine["repo"]:
                 marks.append("same repository")
+            elif same_project(mine, peer):
+                marks.append("same project")
+            else:
+                marks.append("other project")
             if peer.get("delegatedRun"):
                 marks.append("delegated run worker")
             if harness and peer["harness"] == harness:
@@ -1285,6 +1421,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         sub.add_argument("--harness", choices=HARNESSES)
         sub.add_argument("--format", choices=("text", "json", "context"), default="text")
+        if name in {"peers", "send", "inbox", "wait"}:
+            sub.add_argument(
+                "--scope", choices=SCOPES, default="project", help="cross-project requires explicit opt-in"
+            )
         if name == "peers":
             sub.add_argument("--runs", action="store_true", help="include run-scoped worker/conductor sessions")
         if name == "send":
@@ -1323,10 +1463,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "prune":
             output: Any = prune(base)
         elif args.action == "peers":
-            rows = peers(base, include_runs=args.runs)
+            me = caller(args, base) if session_arg(args) else workspace(os.getcwd())
+            rows = scoped_peers(base, me, scope=args.scope, include_runs=args.runs)
             if args.format != "json":
-                # Mark and sort against the caller's current repository, registered or not.
-                print(table(rows, session_arg(args), args.harness or detect_harness(), here=workspace(os.getcwd())))
+                print(table(rows, session_arg(args), args.harness or detect_harness(), here=me, scope=args.scope))
                 return 0
             output = rows
         else:
@@ -1347,6 +1487,7 @@ def main(argv: list[str] | None = None) -> int:
                     reply_to=getattr(args, "reply_to", None),
                     kind="question" if args.action == "ask" else args.kind,
                     client_id=args.id,
+                    scope=getattr(args, "scope", "project"),
                 )
                 if args.action == "ask":
                     output = wait(base, me["session"], timeout=args.timeout, reply_to=args.id)
@@ -1354,12 +1495,19 @@ def main(argv: list[str] | None = None) -> int:
                 output = {
                     "messages": run_inbox(base, me["run"], me["role"])
                     if is_run_peer(me)
-                    else take(base, me["session"], mark=not args.peek)
+                    else take(base, me["session"], mark=not args.peek, scope=args.scope)
                 }
             elif args.action == "wait":
                 register(base, session=me["session"], harness=me["harness"], cwd=me["cwd"], state="waiting")
                 try:
-                    output = wait(base, me["session"], timeout=args.timeout, reply_to=args.reply_to, mark=not args.peek)
+                    output = wait(
+                        base,
+                        me["session"],
+                        timeout=args.timeout,
+                        reply_to=args.reply_to,
+                        mark=not args.peek,
+                        scope=args.scope,
+                    )
                 finally:
                     if not is_run_peer(me):
                         annotate(base, me["session"], state="busy")  # not if the session ended meanwhile
