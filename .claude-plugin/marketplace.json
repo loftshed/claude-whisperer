@@ -13,6 +13,11 @@
       "name": "ai-usage",
       "source": "./plugins/ai-usage",
       "description": "Remaining quota across Claude Code profiles, Codex and Antigravity, and where to spend it: MCP server, skill, CLI/TUI, macOS menu bar app."
+    },
+    {
+      "name": "bailout",
+      "source": "./plugins/bailout",
+      "description": "Explicitly arm automatic usage handoffs per session, or write a manual checkpoint or handoff."
     }
   ],
   "metadata": {

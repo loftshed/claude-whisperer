@@ -1,0 +1,312 @@
+#!/usr/bin/env node
+// Command line face of the bailout skill.
+//
+//   paths [session] [--cwd DIR] [--json]   where this session's handoff files go
+//   arm [session] [--cwd DIR]               opt in this session and directory
+//   disarm [session]                        cancel automatic requests
+//   status [session]                        usage, thresholds and stage
+//   recover [session]                       write a recovery snapshot now
+//   reset [session]                         forget this session's bailout state
+//   simulate --session ID --percent N       drive the sampler with a fake reading
+//
+// `paths` works with no telemetry at all, so a manual bailout never depends on
+// the status line being installed.
+
+import { spawnSync } from "node:child_process";
+import { readFileSync, realpathSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  armSession,
+  bailoutHome,
+  disarmSession,
+  effectiveThresholds,
+  fileExists,
+  handoffDir,
+  handoffPath,
+  isStale,
+  loadConfig,
+  newState,
+  nowSeconds,
+  readJson,
+  readState,
+  sessionArming,
+  sessionStatePath,
+  writeJsonAtomic,
+} from "./lib.mjs";
+import { writeRecovery } from "./recovery.mjs";
+
+const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+function parseArgs(argv) {
+  const positional = [];
+  const flags = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg.startsWith("--")) {
+      const key = arg.slice(2);
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith("--")) {
+        flags[key] = true;
+      } else {
+        flags[key] = next;
+        i += 1;
+      }
+    } else {
+      positional.push(arg);
+    }
+  }
+  return { positional, flags };
+}
+
+function resolveSession(positional, flags) {
+  return positional[0] || flags.session || process.env.CLAUDE_SESSION_ID || "manual";
+}
+
+function resolveState(sessionId, flags) {
+  const state = readState(sessionId) || newState(sessionId);
+  state.sessionId = sessionId;
+  state.cwd = flags.cwd || state.cwd || process.cwd();
+  return state;
+}
+
+function explicitSession(positional, flags) {
+  const sessionId = positional[0] || flags.session || process.env.CLAUDE_SESSION_ID;
+  if (typeof sessionId !== "string" || !sessionId.trim()) {
+    throw new Error("arm/disarm needs a session ID or CLAUDE_SESSION_ID; no session was changed");
+  }
+  return sessionId;
+}
+
+function cmdArm(positional, flags) {
+  if (loadConfig().enabled !== true) {
+    throw new Error("bailout is disabled in config; enable it before arming a session");
+  }
+  const sessionId = explicitSession(positional, flags);
+  const cwd = realpathSync(flags.cwd || process.cwd());
+  if (!sessionArming(sessionId, cwd)) {
+    disarmSession(sessionId);
+    const fresh = newState(sessionId);
+    fresh.cwd = cwd;
+    writeJsonAtomic(sessionStatePath(sessionId), fresh);
+    armSession(sessionId, cwd);
+  }
+  process.stdout.write(
+    `armed ${sessionId} for ${cwd}; monitoring starts with the next status line sample\n`,
+  );
+}
+
+function cmdDisarm(positional, flags) {
+  const sessionId = explicitSession(positional, flags);
+  disarmSession(sessionId);
+  const fresh = newState(sessionId);
+  fresh.cwd = flags.cwd || process.cwd();
+  writeJsonAtomic(sessionStatePath(sessionId), fresh);
+  process.stdout.write(`disarmed ${sessionId}; pending automatic requests cancelled\n`);
+}
+
+function cmdPaths(positional, flags) {
+  const sessionId = resolveSession(positional, flags);
+  const state = resolveState(sessionId, flags);
+  const result = {
+    session: sessionId,
+    cwd: state.cwd,
+    directory: handoffDir(state.cwd, sessionId),
+    checkpoint: handoffPath(state.cwd, sessionId, "checkpoint"),
+    handoff: handoffPath(state.cwd, sessionId, "bailout"),
+    recovery: handoffPath(state.cwd, sessionId, "recovery"),
+  };
+  if (flags.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(
+    [
+      `checkpoint: ${result.checkpoint}`,
+      `handoff:    ${result.handoff}`,
+      `recovery:   ${result.recovery}`,
+      "",
+    ].join("\n"),
+  );
+}
+
+// The sampler swallows its own stderr, so a broken install shows up as usage
+// that never updates rather than as an error. These checks make that visible.
+function installProblems() {
+  const receipt = readJson(path.join(bailoutHome(), "install-receipt.json"));
+  if (!receipt || !receipt.installedAt)
+    return ["not installed (automatic triggering is off; /bailout still works)"];
+
+  const problems = [];
+  const samplerPath = receipt.sampler?.path;
+  if (!samplerPath || !fileExists(samplerPath)) {
+    problems.push(`status line script is missing: ${samplerPath || "unknown"}`);
+    return problems;
+  }
+  let body;
+  try {
+    body = readFileSync(samplerPath, "utf8");
+  } catch {
+    problems.push(`status line script cannot be read: ${samplerPath}`);
+    return problems;
+  }
+  const line = body.split("\n").find((l) => l.includes("hooks.mjs") && l.includes("statusline"));
+  if (!line) {
+    problems.push(`the sampler block is no longer in ${samplerPath} (something rewrote it)`);
+    return problems;
+  }
+  const quotedArguments = line.match(/"([^"]+)"/g) || [];
+  for (const quoted of quotedArguments) {
+    const filePath = quoted.slice(1, -1);
+    if (filePath.startsWith("/") && !fileExists(filePath)) {
+      problems.push(`the sampler references a path that no longer exists: ${filePath}`);
+    }
+  }
+  return problems;
+}
+
+function usageText(used, stale, config) {
+  if (typeof used !== "number") {
+    return "unknown (no five-hour reading; rate_limits needs a Pro or Max subscription and one API response)";
+  }
+  if (stale) {
+    return `unknown (last sample ${used}% is stale, older than ${config.staleAfterSeconds}s)`;
+  }
+  return `${used}% of the five-hour allowance consumed`;
+}
+
+function cmdStatus(positional, flags) {
+  const config = loadConfig();
+  const sessionId = resolveSession(positional, flags);
+  const state = readState(sessionId);
+  const problems = installProblems();
+  const lines = [
+    `session:    ${sessionId}`,
+    `arming:     ${sessionArming(sessionId, flags.cwd || process.cwd()) ? "armed" : "disarmed"}`,
+    `enabled:    ${config.enabled === true ? "yes" : "no (config)"}`,
+    `install:    ${problems.length > 0 ? "PROBLEM" : "ok"}`,
+  ];
+  for (const problem of problems) lines.push(`  - ${problem}`);
+  if (problems.length > 0)
+    lines.push("  fix with: node ~/.claude/skills/bailout/scripts/install.mjs");
+
+  if (!state) {
+    lines.push(
+      "usage:      unknown (no sample recorded for this session)",
+      "",
+      "No status line sample has reached the bailout state file. Either the status",
+      "line hook is not installed, or this session has not had an API response yet.",
+      "Manual bailout still works: run the /bailout skill.",
+      "",
+    );
+    process.stdout.write(lines.join("\n"));
+    return;
+  }
+
+  const thresholds = state.thresholds || effectiveThresholds(config, state.modelId);
+  const stale = isStale(state, config);
+  const used = state.usage?.usedPercentage;
+
+  // Distinguish "the sampler never ran" from "it ran but the payload carried no
+  // reading". Only the first means the status line is not wired into this
+  // session, which is the normal state until Claude Code is restarted after
+  // installing.
+  if (!state.usage && !state.usageUnavailableAt) {
+    lines.push(
+      "sampler:    has not run in this session",
+      "  The status line feeds the sampler, and a session loads it at startup.",
+      "  Restart Claude Code if this session predates the install.",
+    );
+  } else if (!state.usage) {
+    lines.push("sampler:    running, but the payload carried no five-hour reading");
+  }
+  lines.push(`model:      ${state.modelDisplay || state.modelId || "unknown"}`);
+  lines.push(`usage:      ${usageText(used, stale, config)}`);
+  lines.push(
+    `thresholds: checkpoint ${thresholds.checkpoint}%, bailout ${thresholds.bailout}% (model margin ${thresholds.margin})`,
+  );
+  lines.push(`stage:      ${state.stage}`);
+  if (state.window?.resetsAt) {
+    lines.push(`window:     resets at ${new Date(state.window.resetsAt * 1000).toISOString()}`);
+  }
+  const handoffs = Object.entries(state.handoffs || {});
+  for (const [kind, filePath] of handoffs) {
+    lines.push(`${kind}: ${filePath}${fileExists(filePath) ? "" : " (missing)"}`);
+  }
+  lines.push("");
+  process.stdout.write(lines.join("\n"));
+}
+
+function cmdRecover(positional, flags) {
+  const config = loadConfig();
+  const sessionId = resolveSession(positional, flags);
+  const state = resolveState(sessionId, flags);
+  const filePath = writeRecovery(state, config, "recovery was requested explicitly");
+  state.handoffs = { ...state.handoffs, recovery: filePath };
+  writeJsonAtomic(sessionStatePath(sessionId), state);
+  process.stdout.write(`${filePath}\n`);
+}
+
+function cmdReset(positional, flags) {
+  const sessionId = resolveSession(positional, flags);
+  disarmSession(sessionId);
+  const fresh = newState(sessionId);
+  fresh.cwd = flags.cwd || process.cwd();
+  writeJsonAtomic(sessionStatePath(sessionId), fresh);
+  process.stdout.write(`reset ${sessionStatePath(sessionId)}\n`);
+}
+
+// Drives the real sampler with a synthetic reading so thresholds can be
+// exercised without spending any of the actual allowance. Point BAILOUT_HOME at
+// a scratch directory before using it.
+function cmdSimulate(positional, flags) {
+  const sessionId = resolveSession(positional, flags);
+  const percent = Number(flags.percent);
+  if (Number.isNaN(percent)) {
+    process.stderr.write("simulate needs --percent <number>\n");
+    process.exitCode = 1;
+    return;
+  }
+  const payload = {
+    session_id: sessionId,
+    cwd: flags.cwd || process.cwd(),
+    model: { id: flags.model || "claude-opus-5", display_name: flags.model || "Opus" },
+    rate_limits: {
+      five_hour: {
+        used_percentage: percent,
+        resets_at: Number(flags.resets) || nowSeconds() + 3600,
+      },
+    },
+  };
+  spawnSync(process.execPath, [path.join(SCRIPTS_DIR, "hooks.mjs"), "statusline"], {
+    input: JSON.stringify(payload),
+    stdio: ["pipe", "inherit", "inherit"],
+  });
+  cmdStatus([sessionId], flags);
+}
+
+const COMMANDS = {
+  arm: cmdArm,
+  disarm: cmdDisarm,
+  paths: cmdPaths,
+  status: cmdStatus,
+  recover: cmdRecover,
+  reset: cmdReset,
+  simulate: cmdSimulate,
+};
+
+const { positional, flags } = parseArgs(process.argv.slice(2));
+const command = COMMANDS[positional.shift()];
+if (!command) {
+  process.stdout.write(
+    "usage: bailout.mjs <arm|disarm|paths|status|recover|reset|simulate> [session] [--cwd DIR] [--json]\n",
+  );
+  process.exit(1);
+}
+try {
+  command(positional, flags);
+} catch (error) {
+  process.stderr.write(`bailout: ${error.message}\n`);
+  process.exitCode = 1;
+}
