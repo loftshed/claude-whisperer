@@ -1,0 +1,13 @@
+{
+  "KPackageStructure": "Plasma/Applet",
+  "KPlugin": {
+    "Id": "com.loftshed.aiusage",
+    "Name": "AI Usage",
+    "Description": "Remaining Claude, Codex and Antigravity quota",
+    "Icon": "office-chart-bar",
+    "Category": "System Information",
+    "License": "MIT",
+    "Authors": [{ "Name": "loftshed" }]
+  },
+  "X-Plasma-API-Minimum-Version": "6.0"
+}

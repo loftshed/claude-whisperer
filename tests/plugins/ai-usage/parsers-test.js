@@ -74,10 +74,12 @@ test("parseClaudeUsage reads an exhausted work profile with an unstarted session
   expect(new Date(byId.week.resetsAt).toISOString()).toBe("2026-09-26T00:59:00.000Z");
 });
 
-test("parseClaudeUsage rejects API-billing output", () => {
+test("parseClaudeUsage does not infer billing from a session cost summary", () => {
   expect(() =>
     parseClaudeUsage("Total cost:            $0.0000\nTotal duration (API):  0s"),
-  ).toThrow(/API billing/);
+  ).toThrow(
+    "Claude returned session costs instead of quota windows; subscription usage is unavailable (this does not establish API billing)",
+  );
 });
 
 test("parseCodexRateLimits reads app-server rate limits", () => {

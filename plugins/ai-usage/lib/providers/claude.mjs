@@ -75,7 +75,7 @@ export function parseClaudeUsage(text, now = Date.now()) {
   if (windows.length === 0) {
     if (/total cost/i.test(text))
       throw new Error(
-        "this profile is on API billing, not a subscription: no quota windows to report",
+        "Claude returned session costs instead of quota windows; subscription usage is unavailable (this does not establish API billing)",
       );
     throw new Error(`unrecognised /usage output: ${text.slice(0, 160)}`);
   }

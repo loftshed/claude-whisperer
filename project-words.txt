@@ -23,5 +23,7 @@ unstarted
 xcrun
 xhigh
 xpzf
+aiusage
+plasmoid
 cwds
 urandom

@@ -92,6 +92,22 @@ The menu bar app runs the provider CLIs, and macOS charges whatever they touch t
 
 ## Commands
 
+### Linux desktop widget
+
+On KDE Plasma 6, install the panel/desktop widget after installing the CLI:
+
+```sh
+sh plugins/ai-usage/linux/install.sh
+```
+
+Open **Add Widgets**, search for **AI Usage**, and place it on your panel or desktop.
+It works under Wayland and X11, refreshes every two minutes using the shared cache,
+and opens a popup with quota bars, reset times, credit balances and a refresh button.
+Previous widget installations are moved to backups. The existing menu bar app is macOS-only.
+
+Claude's session cost summary is not proof of API billing. If `/usage` returns costs
+instead of quota windows, the widget reports usage as unavailable rather than guessing.
+
 ```text
 ai-usage [show]            table of every window plus where to spend next
 ai-usage watch             live view (r = refresh now, q = quit)
