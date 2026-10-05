@@ -80,6 +80,11 @@ For an authorized executor worker, pass its usual engine permission arguments af
 Claude `--permission-mode bypassPermissions` or Antigravity `--dangerously-skip-permissions`.
 This applies to that process only; default headless permission prompts can deny the mailbox read.
 
+For live wake verification, keep the Codex test conversation in the existing project directory;
+store evidence separately. Archive any persistent verification conversation in a `finally` block,
+including failed checks. Normal wakes must reuse the recipient's existing thread. The model-free
+messaging check uses an ephemeral thread and does not create a new project.
+
 ## Project scope and cross-project coordination
 
 `peers`, `send`, `inbox` and `wait` default to `scope: "project"`. Sessions match if they share a Git common

@@ -155,9 +155,7 @@ def check() -> dict[str, Any]:
                 # this isolated store instead of relying on the app-server's inherited environment.
                 overrides["mcp_servers.peer-mailbox.env.AGENT_EXECUTOR_HOME"] = str(evidence)
                 overrides.update({f"plugins.{key}.enabled": False for key in installed.get("plugins", {})})
-                thread = native.request(
-                    "thread/start", {"cwd": str(scripts.parent), "ephemeral": True, "config": overrides}
-                )
+                thread = native.request("thread/start", {"cwd": os.getcwd(), "ephemeral": True, "config": overrides})
                 sessions[harness] = thread["thread"]["id"]
                 continue
             client = RpcClient([sys.executable, "-B", str(scripts / "mailbox_mcp.py")], env)
