@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Support MCP `2026-07-28` discovery and per-request identity while retaining legacy clients.
+  Add output schemas, complete annotations, enforced input bounds and paginated mailbox reads.
+  Keep message bodies once in default Markdown output, shorten repeated guidance, cache modern
+  tool discovery, and bound pending waits. Add protocol, response-budget and read-only evaluations.
+
 - Add persistent Claude and Gemini/Antigravity wake adapters with `run_agent.py listen`.
   Queue mailbox notifications between completed turns in one conversation, preserve project scope,
   and keep quiet delivery and unread mail intact.

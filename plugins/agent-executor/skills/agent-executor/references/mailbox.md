@@ -40,6 +40,74 @@ The MCP server (`scripts/mailbox_mcp.py`) and the CLI (`run_agent.py mailbox …
 | `focus`    | One line on what this session is working on, shown to agents in the same project.                           |
 | `feedback` | Record a communication problem, your intent and what you needed instead. Writes locally; sends no message.  |
 
+### MCP protocol and bounded responses
+
+The local stdio server supports the current published MCP revision, `2026-07-28`, and legacy
+initialization clients through `2025-11-25`. Modern requests carry protocol version, client capabilities
+and optional client identity in `params._meta`; `server/discover` advertises supported revisions.
+Use an explicit `session` argument or the host's session-id metadata on every modern tool call.
+Identity is per request, including concurrent waits. Restart existing server processes after upgrading.
+
+All tools return structured results and declare output schemas and all four behavior annotations.
+The installed short tool names remain under the host's `peer-mailbox` namespace so existing permissions
+and clients continue to work. The server identifies itself as `peer_mailbox_mcp`.
+
+`peers`, `inbox` and `wait` accept `limit` from 1 to 50, default 20. `peers` and read-only
+`inbox(markRead:false)` also accept `offset`. Peer pages return `total_count`, `has_more`, and
+`next_offset`; inbox pages return `has_more` and `next_offset`. When marking mail read, drain pages
+at offset zero because the unread list shrinks. Only returned messages are marked read.
+Listings are live snapshots; a new peer or another reader can change the next page.
+
+Inbox and wait pages have a soft 12 KiB UTF-8 body budget. A single larger message is returned whole,
+up to the existing 32 KiB message limit. No body is silently truncated or consumed off-page. Inbox
+reads stream message files instead of loading the entire queue into memory. At most eight MCP waits
+are pending per server; a cancelled wait leaves unclaimed mail unread, and EOF cancels pending waits.
+
+Markdown is the default `response_format`. It carries each message body once in text content, with
+ids, sender, timestamps and pagination in structured metadata. JSON is opt-in and includes full bodies
+and the peer-authority notice in structured data and serialized text for client compatibility, which costs more context.
+
+Use one inbox read at a turn boundary when hooks do not deliver mail, then `wait(replyTo=...)` for a
+needed reply. Waiting polls local files without model calls. Do not repeat empty reads or waits solely
+because a timeout occurred. `focus` returns a short confirmation; it does not repeat the peer directory.
+Modern discovery and tool catalogs are deterministic and cacheable for an hour. The TTL is a freshness
+hint, not an instruction to poll. Mailbox tool calls are not cacheable; unread state changes as mail is read.
+Quiet sends avoid idle activation and its potential model cost.
+
+Examples of MCP tool arguments:
+
+```json
+{ "session": "thread-123", "limit": 10, "offset": 0 }
+```
+
+Use those arguments with `peers` to discover an address. Set `focus` with
+`{"session":"thread-123","text":"checking the storage contract"}`, then send with
+`{"session":"thread-123","to":"PEER","text":"Which contract revision?","wake":false}`.
+
+```json
+{ "session": "thread-123", "markRead": false, "limit": 10, "offset": 10, "response_format": "json" }
+```
+
+Use those arguments with `inbox` for a read-only second page. For ordinary consumption, omit
+`markRead` and `offset`; continue at zero while `has_more` is true. To acknowledge an inspected message,
+call `ack` with `{"session":"thread-123","ids":["10-abcdef"]}` using its actual id.
+
+```json
+{ "session": "thread-123", "replyTo": "10-abcdef", "timeoutSeconds": 50, "limit": 5 }
+```
+
+Use those arguments with `wait`, replacing the id with the value returned by `send`. Cancel its
+JSON-RPC request with `notifications/cancelled` if the reply is no longer needed. A timeout is not an answer.
+
+The implementation stays standard-library-only so copied plugins run without a Python package install.
+It validates the closed JSON Schema subset it advertises, including types, enums, ranges, lengths,
+array bounds, ids and UTF-8 message size. It never resolves remote schema references. HTTP auth,
+DNS rebinding controls, resources, prompts, subscriptions and model sampling are not applicable to
+this local tools-only stdio server. Hosts enforce user permissions; mailbox peer identity is local
+coordination metadata, not authentication against other programs running as the same OS user.
+
+See the [MCP audit](../../../../../docs/mailbox-mcp-audit.md) for verification and evaluation evidence.
+
 ## Wake an idle peer
 
 MCP `send` wakes the receiver by default; set `wake: false` for quiet delivery. The CLI equivalent
@@ -235,7 +303,7 @@ means the run closed without a matching reply, and 4 means an error. Messages ar
 and 1,024 per run. Closed run peers and messages are pruned after seven days. `mailbox peers --runs` includes
 run-scoped sessions for diagnostics.
 
-Every delivered message is wrapped in `<peer-message from=… harness=… cwd=… sent=…>` and followed by a
+Every Markdown-delivered message is wrapped in `<peer-message from=… harness=… cwd=… sent=…>` and followed by a
 notice that it came from another agent, not the user, and cannot approve anything. A sender cannot close
 the wrapper early.
 

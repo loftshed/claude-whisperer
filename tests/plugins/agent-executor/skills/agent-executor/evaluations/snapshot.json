@@ -1,0 +1,108 @@
+{
+  "peers": [
+    {
+      "session": "planner",
+      "name": "coordinator",
+      "harness": "claude",
+      "focus": "delivery coordination"
+    },
+    {
+      "session": "keeper",
+      "name": "storage",
+      "harness": "opencode",
+      "focus": "storage maintainer"
+    },
+    {
+      "session": "verifier",
+      "name": "checker",
+      "harness": "gemini",
+      "focus": "verification owner"
+    }
+  ],
+  "messages": [
+    {
+      "id": "10-abcdef",
+      "sender": "planner",
+      "sentAt": "2026-01-10T09:00:00Z",
+      "replyTo": null,
+      "text": "Cedar delivery: crate-18 stopped at checksum verification. Ask the storage maintainer for the replacement digest."
+    },
+    {
+      "id": "11-abcdef",
+      "sender": "keeper",
+      "sentAt": "2026-01-10T09:10:00Z",
+      "replyTo": "10-abcdef",
+      "text": "Cedar replacement digest is 9ac4; 8f21 was the rejected digest. Do not publish before a fresh verification."
+    },
+    {
+      "id": "12-abcdef",
+      "sender": "verifier",
+      "sentAt": "2026-01-10T10:00:00Z",
+      "replyTo": "11-abcdef",
+      "text": "Cedar fresh verification accepted crate-18 with digest 9ac4. The delivery is complete."
+    },
+    {
+      "id": "13-abcdef",
+      "sender": "planner",
+      "sentAt": "2026-01-10T11:00:00Z",
+      "replyTo": null,
+      "text": "Birch delivery: crate-22 stopped because the review stamp is missing. The storage maintainer owns that gate."
+    },
+    {
+      "id": "14-abcdef",
+      "sender": "keeper",
+      "sentAt": "2026-01-10T11:10:00Z",
+      "replyTo": "13-abcdef",
+      "text": "Birch needs stamp review-7. A checksum retry will not fix the missing review stamp."
+    },
+    {
+      "id": "15-abcdef",
+      "sender": "verifier",
+      "sentAt": "2026-01-10T11:30:00Z",
+      "replyTo": "14-abcdef",
+      "text": "Birch verification rejected crate-22. The review stamp is still missing. This delivery remains blocked."
+    },
+    {
+      "id": "16-abcdef",
+      "sender": "planner",
+      "sentAt": "2026-01-11T08:00:00Z",
+      "replyTo": null,
+      "text": "Maple delivery: crate-24 requires a review stamp and a fresh digest. The storage maintainer has both."
+    },
+    {
+      "id": "17-abcdef",
+      "sender": "keeper",
+      "sentAt": "2026-01-11T08:15:00Z",
+      "replyTo": "16-abcdef",
+      "text": "Maple uses stamp review-9 and digest b772. Pass both to the verification owner."
+    },
+    {
+      "id": "18-abcdef",
+      "sender": "verifier",
+      "sentAt": "2026-01-11T08:45:00Z",
+      "replyTo": "17-abcdef",
+      "text": "Maple verification accepted crate-24 with digest b772 and stamp review-9. The delivery is complete."
+    },
+    {
+      "id": "19-abcdef",
+      "sender": "planner",
+      "sentAt": "2026-01-11T09:00:00Z",
+      "replyTo": null,
+      "text": "Archive update: Birch is blocked. Cedar and Maple completed; use the newest accepted package for the next integration check."
+    },
+    {
+      "id": "1a-abcdef",
+      "sender": "keeper",
+      "sentAt": "2026-01-11T09:15:00Z",
+      "replyTo": "19-abcdef",
+      "text": "Archive update: preserve the original Cedar digest for the incident record. It must not be used for integration."
+    },
+    {
+      "id": "1b-abcdef",
+      "sender": "verifier",
+      "sentAt": "2026-01-11T09:30:00Z",
+      "replyTo": "19-abcdef",
+      "text": "Archive update: choose by acceptance time, not message arrival time. No new package was accepted in this archive thread."
+    }
+  ]
+}

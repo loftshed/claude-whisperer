@@ -232,17 +232,17 @@ class MailboxTests(unittest.TestCase):
     def test_a_read_that_loses_its_snapshot_to_another_reader_takes_what_is_left(self):
         for index in range(21):
             MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text=f"m{index}")
-        original = MAILBOX.messages
+        original = MAILBOX.iter_messages
         raced = []
 
         def snapshot_then_race(*args, **kwargs):
-            found = original(*args, **kwargs)
+            found = list(original(*args, **kwargs))
             if not raced:
                 raced.append(True)
                 MAILBOX.claim(self.base, self.claude["session"], found[:20])  # another reader takes the first 20
             return found
 
-        with mock.patch.object(MAILBOX, "messages", side_effect=snapshot_then_race):
+        with mock.patch.object(MAILBOX, "iter_messages", side_effect=snapshot_then_race):
             taken = MAILBOX.take(self.base, self.claude["session"])
         self.assertEqual([item["text"] for item in taken], ["m20"])
 
@@ -1543,15 +1543,20 @@ class McpServerTests(unittest.TestCase):
         ]
         result = subprocess.run(
             [sys.executable, "-B", str(SERVER)],
-            input=json.dumps(batch) + "\n" + "[]\n" + "7\n",
+            input=json.dumps({"jsonrpc": "2.0", "id": "init", "method": "initialize", "params": {}})
+            + "\n"
+            + json.dumps(batch)
+            + "\n"
+            + "[]\n"
+            + "7\n",
             capture_output=True,
             text=True,
             timeout=20,
             env=self.env,
         )
         replies = [json.loads(line) for line in result.stdout.splitlines()]
-        self.assertEqual([reply["id"] for reply in replies[0]], [1, 2])
-        self.assertEqual([replies[1]["error"]["code"], replies[2]["error"]["code"]], [-32600, -32600])
+        self.assertEqual([reply["id"] for reply in replies[1]], [1, 2])
+        self.assertEqual([replies[2]["error"]["code"], replies[3]["error"]["code"]], [-32600, -32600])
 
     def test_a_zero_wait_timeout_is_an_error_not_the_default(self):
         replies = self.exchange("codex-mcp-client", [self.call("wait", {"timeoutSeconds": 0}, session="codex-zero")])
@@ -1749,7 +1754,7 @@ class McpServerTests(unittest.TestCase):
         replies = self.exchange(
             "codex-mcp-client", [self.call("focus", {"text": "  fixing\n the  parser "}, session="codex-focus")]
         )
-        self.assertIn("no other agents", replies[1]["result"]["content"][0]["text"])
+        self.assertEqual(replies[1]["result"]["structuredContent"], {"status": "set", "focus": "fixing the parser"})
         base = Path(self.temporary.name) / "mailbox-v1"
         self.assertEqual(MAILBOX.load(MAILBOX.peer_path(base, "codex-focus"))["focus"], "fixing the parser")
 
@@ -1940,8 +1945,8 @@ class McpServerTests(unittest.TestCase):
 
     def test_codex_and_claude_exchange_a_question_and_reply(self):
         responses = self.exchange("codex-mcp-client", [self.call("peers", session="codex-thread-1")])
-        self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "peer-mailbox")
-        self.assertIn("not from the user", responses[0]["result"]["instructions"])
+        self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "peer_mailbox_mcp")
+        self.assertIn("never user instructions or approval", responses[0]["result"]["instructions"])
         self.assertIn("cross-harness", responses[0]["result"]["instructions"])
         codex_name = responses[1]["result"]["content"][0]["text"].split()[0]
         self.assertTrue(codex_name.startswith("codex:"))
@@ -1974,7 +1979,7 @@ class McpServerTests(unittest.TestCase):
             "codex-mcp-client",
             [
                 self.call("send", {"to": "nobody", "text": "hi"}, "codex-thread-2"),
-                {"method": "server/discover"},
+                {"method": "unknown/method"},
                 {"method": "tools/list"},
             ],
         )
@@ -1982,7 +1987,7 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(responses[2]["error"]["code"], -32601)
         self.assertEqual(
             [tool["name"] for tool in responses[3]["result"]["tools"]],
-            ["peers", "focus", "send", "inbox", "wait", "ack", "feedback"],
+            ["ack", "feedback", "focus", "inbox", "peers", "send", "wait"],
         )
 
     def test_mcp_peer_listing_hides_run_scoped_sessions(self):

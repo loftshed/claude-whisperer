@@ -160,7 +160,14 @@ class MailboxFeedbackTests(unittest.TestCase):
 
     def test_mcp_feedback_is_available_and_is_not_delivered_as_a_peer_message(self):
         server = SERVER.Server(base=self.base, environ={})
-        server.identify({"name": "codex-mcp-client"})
+        server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": "init",
+                "method": "initialize",
+                "params": {"clientInfo": {"name": "codex-mcp-client"}, "protocolVersion": "2025-11-25"},
+            }
+        )
         request = test_mailbox.McpServerTests.call(
             "feedback",
             {
@@ -213,7 +220,14 @@ class MailboxFeedbackTests(unittest.TestCase):
 
     def test_failed_mcp_sends_record_only_codes_and_request_feedback_once(self):
         server = SERVER.Server(base=self.base, environ={})
-        server.identify({"name": "codex-mcp-client"})
+        server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": "init",
+                "method": "initialize",
+                "params": {"clientInfo": {"name": "codex-mcp-client"}, "protocolVersion": "2025-11-25"},
+            }
+        )
         request = test_mailbox.McpServerTests.call(
             "send", {"to": "private-unavailable-peer", "text": "confidential task body"}, session=self.peer["session"]
         )

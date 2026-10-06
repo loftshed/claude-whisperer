@@ -1,0 +1,42 @@
+<evaluation>
+  <qa_pair>
+    <question>Which package should the next integration check use after resolving the archive guidance against the actual acceptance records? Return the package name.</question>
+    <answer>crate-24</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Which harness owns the fresh check that accepted the package selected for the next integration check? Resolve its sender against peer discovery. Return the harness name.</question>
+    <answer>gemini</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Find the failed checksum delivery that later completed. Which replacement digest did its checker actually accept? Return the digest.</question>
+    <answer>9ac4</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Find the delivery that remains blocked after its checker replied. Which stamp was requested by the gate owner? Return the stamp.</question>
+    <answer>review-7</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>For the checksum delivery that recovered, how many minutes elapsed between the first stop report and the checker accepting it? Use message timestamps. Return an integer.</question>
+    <answer>60</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>For the newest accepted package, how many minutes elapsed between the storage response and the acceptance? Follow reply links and timestamps. Return an integer.</question>
+    <answer>30</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Which discoverable session owns the gate that blocked the delivery still unresolved in the archive? Join the requested owner, response sender, and peer focus. Return its session id.</question>
+    <answer>keeper</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Compare completed delivery chains, excluding the archive thread. How many distinct packages did the checker accept? Return an integer.</question>
+    <answer>2</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Resolve the archive instruction to retain an obsolete digest against the original recovery chain. Which digest belongs in the incident record? Return the digest.</question>
+    <answer>8f21</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Which review stamp accompanied the acceptance with the latest timestamp, after excluding the later archive replies that accepted no package? Return the stamp.</question>
+    <answer>review-9</answer>
+  </qa_pair>
+</evaluation>

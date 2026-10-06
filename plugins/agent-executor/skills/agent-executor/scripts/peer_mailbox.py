@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -1047,14 +1048,15 @@ def valid_peer(peer: dict[str, Any] | None) -> bool:
     )
 
 
-def messages(base: Path, session: str, *, unread_only: bool = True) -> list[dict[str, Any]]:
-    found = []
+def iter_messages(base: Path, session: str, *, unread_only: bool = True) -> Iterator[dict[str, Any]]:
     for path in sorted(inbox_dir(base, session).glob("*.json")):
         message = load(path)
-        # A record must sit at its own id's file, or marking it read would touch another file or none.
         if valid_message(message) and message["id"] == path.stem and not (unread_only and message.get("readAt")):
-            found.append(message)
-    return found
+            yield message
+
+
+def messages(base: Path, session: str, *, unread_only: bool = True) -> list[dict[str, Any]]:
+    return list(iter_messages(base, session, unread_only=unread_only))
 
 
 def allowed_message(peer: dict[str, Any], message: dict[str, Any], scope: str) -> bool:
@@ -1063,18 +1065,17 @@ def allowed_message(peer: dict[str, Any], message: dict[str, Any], scope: str) -
     return not message.get("run") and (scope == "cross-project" or same_project(peer, message["from"]))
 
 
-def incoming(
+def iter_incoming(
     base: Path, session: str, *, unread_only: bool = True, scope: str = "project", operation: str = "inbox"
-) -> list[dict[str, Any]]:
-    """Deliver only context belonging to the recipient's current project, including old queued mail."""
+) -> Iterator[dict[str, Any]]:
+    """Stream accepted bodies; unseen cross-project messages stay unread."""
     check_scope(scope)
     peer = load(peer_path(base, session))
     if not valid_peer(peer):
-        return []
-    accepted = []
-    for message in messages(base, session, unread_only=unread_only):
+        return
+    for message in iter_messages(base, session, unread_only=unread_only):
         if allowed_message(peer, message, scope):
-            accepted.append(message)
+            yield message
         elif not is_run_peer(peer):
             feedback_module().observe(
                 base,
@@ -1086,7 +1087,35 @@ def incoming(
                 message_ids=[message["id"]],
                 repeat=False,
             )
-    return accepted
+
+
+def incoming(
+    base: Path, session: str, *, unread_only: bool = True, scope: str = "project", operation: str = "inbox"
+) -> list[dict[str, Any]]:
+    return list(iter_incoming(base, session, unread_only=unread_only, scope=scope, operation=operation))
+
+
+def bounded_messages(
+    rows: Iterator[dict[str, Any]], *, limit: int, offset: int = 0, max_bytes: int | None = None
+) -> tuple[list[dict[str, Any]], bool]:
+    page: list[dict[str, Any]] = []
+    size = 0
+    for index, message in enumerate(rows):
+        if index < offset:
+            continue
+        cost = len(message["text"].encode("utf-8"))
+        if len(page) >= limit or (page and max_bytes is not None and size + cost > max_bytes):
+            return page, True
+        # Always deliver a single oversized body intact. A budget must never consume hidden/truncated mail.
+        page.append(message)
+        size += cost
+    return page, False
+
+
+def message_page(
+    base: Path, session: str, *, limit: int = 20, offset: int = 0, max_bytes: int | None = None, scope: str = "project"
+) -> tuple[list[dict[str, Any]], bool]:
+    return bounded_messages(iter_incoming(base, session, scope=scope), limit=limit, offset=offset, max_bytes=max_bytes)
 
 
 def mark_one(base: Path, session: str, identifier: str) -> bool | None:
@@ -1148,6 +1177,8 @@ def wait(
     poll: float = 0.25,
     cancelled: threading.Event | None = None,
     scope: str = "project",
+    limit: int = 20,
+    max_bytes: int | None = None,
 ) -> dict[str, Any]:
     check_scope(scope)
     if not math.isfinite(timeout) or timeout <= 0:
@@ -1162,23 +1193,23 @@ def wait(
             raise MailboxError("wait requires a question sent by this recipient")
         question_ids = {question["id"], question.get("clientId")} - {None}
     while True:
-        # A run reply stays replayable after it was read, as the old channel's were.
-        unread = incoming(base, session, unread_only=not (run_peer and reply_to), scope=scope, operation="wait")
+        # A run reply stays replayable after acknowledgement.
+        rows = iter_incoming(base, session, unread_only=not (run_peer and reply_to), scope=scope, operation="wait")
         if run_peer:
-            unread = run_traffic(unread, run_peer["run"])
+            rows = (message for message in rows if message.get("run") == run_peer["run"])
         if reply_to:
-            unread = [
+            rows = (
                 message
-                for message in unread
+                for message in rows
                 if message.get("replyTo") in question_ids and (not run_peer or message.get("kind") == "reply")
-            ]
+            )
+        unread, more = bounded_messages(rows, limit=limit, max_bytes=max_bytes)
         if unread:
-            unread = unread[:20]
             if mark and not run_peer:
                 unread = claim(base, session, unread, scope=scope)
                 if not unread:
                     continue  # another reader took them first; keep waiting
-            result = {"status": "messages", "messages": unread}
+            result = {"status": "messages", "messages": unread, "has_more": more}
             if run_peer:
                 result.update(mailbox=session, run_status=run_status(base, run_peer["run"]))
             return result
@@ -1277,7 +1308,7 @@ def render_all(found: list[dict[str, Any]]) -> str:
     if not found:
         return ""
     blocks = "\n\n".join(render(message) for message in found)
-    hint = "Answer with the peer-mailbox `send` tool (to = the sender's name, replyTo = the message id). " + RULE
+    hint = "Reply with send(to=sender, replyTo=id); use your native way of messaging within your harness."
     return f"{blocks}\n\n{NOTICE}\n{hint}"
 
 
