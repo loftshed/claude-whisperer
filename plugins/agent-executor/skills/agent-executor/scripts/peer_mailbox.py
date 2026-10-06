@@ -962,6 +962,7 @@ def send(
     client_id: str | None = None,
     scope: str = "project",
     wake: bool = False,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     check_scope(scope)
     if is_run_peer(sender):
@@ -989,9 +990,32 @@ def send(
             f"{target['name']} is a {target['harness']} session too; message it with {native}, not the mailbox",
             "native_required",
         )
+
+    msg_id = message_id()
+    journal_path = None
+
+    if idempotency_key is not None:
+        if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+            raise MailboxError("idempotencyKey must be a non-empty string")
+        journal_dir = base / "journal" / session_key(sender["session"])
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(f"{idempotency_key}".encode()).hexdigest()
+        journal_path = journal_dir / f"send-{digest}.json"
+
+        if journal_path.exists():
+            entry = load(journal_path)
+            if entry and entry.get("payload") != text:
+                raise MailboxError("Idempotency-Key used with different payload")
+            if entry and entry.get("response"):
+                return entry["response"]
+            if entry and entry.get("msg_id"):
+                msg_id = entry["msg_id"]
+        else:
+            write(journal_path, {"payload": text, "msg_id": msg_id, "pending": True})
+
     message = {
         "schema": MAIL_SCHEMA,
-        "id": message_id(),
+        "id": msg_id,
         "from": sender_address(sender),
         "to": {"session": target["session"], "name": target["name"]},
         "text": text,
@@ -1000,16 +1024,29 @@ def send(
         "readAt": None,
         "scope": scope,
     }
-    write(inbox_dir(base, target["session"]) / f"{message['id']}.json", message)
-    result = {"id": message["id"], "to": target["name"], "toState": target["state"], "toHarness": target["harness"]}
-    if wake:
+
+    inbox_file = inbox_dir(base, target["session"]) / f"{msg_id}.json"
+    already_delivered = inbox_file.exists()
+
+    if not already_delivered:
+        write(inbox_file, message)
+
+    result = {"id": msg_id, "to": target["name"], "toState": target["state"], "toHarness": target["harness"]}
+
+    if wake and not already_delivered:
         import mailbox_wake
 
         result["wake"] = (
-            mailbox_wake.wake(target, message["id"], base=base)
+            mailbox_wake.wake(target, msg_id, base=base)
             if scope == "project"
             else {"status": "queued", "reason": "cross-project mail requires the recipient's explicit inbox opt-in"}
         )
+    elif wake and already_delivered:
+        result["wake"] = {"status": "recovered", "reason": "message was already delivered before crash"}
+
+    if journal_path is not None:
+        write(journal_path, {"payload": text, "msg_id": msg_id, "response": result})
+
     return result
 
 

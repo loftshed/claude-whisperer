@@ -50,6 +50,21 @@ SCOPE_INPUT = {
 
 TOOLS = [
     {
+        "name": "register",
+        "description": "Register or refresh hookless caller identity. Returns the session to pass on subsequent calls.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cwd": {"type": "string"},
+                "harness": {"type": "string", "enum": list(mailbox.HARNESSES)},
+                "session": {"type": "string"},
+                "pid": {"type": "integer"},
+            },
+            "required": ["cwd", "harness"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "peers",
         "description": "List live project peers, own session first, then same repository. Includes name, session, harness, state, branch and focus; use name or session for send.",
         "inputSchema": {"type": "object", "properties": {"scope": SCOPE_INPUT}, "additionalProperties": False},
@@ -82,6 +97,10 @@ TOOLS = [
                     "type": "boolean",
                     "description": "Wake an idle receiver when supported (default true); never interrupt busy work.",
                 },
+                "idempotencyKey": {
+                    "type": "string",
+                    "description": "Required for idempotent HTTP replay. Exclude metadata.",
+                },
             },
             "required": ["to", "text"],
             "additionalProperties": False,
@@ -94,7 +113,10 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "scope": SCOPE_INPUT,
-                "markRead": {"type": "boolean", "description": "Mark them read (default true)."},
+                "markRead": {
+                    "type": "boolean",
+                    "description": "Mark them read (default true for stdio, false for HTTP).",
+                },
             },
             "additionalProperties": False,
         },
@@ -108,6 +130,10 @@ TOOLS = [
                 "scope": SCOPE_INPUT,
                 "timeoutSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": WAIT_MAX},
                 "replyTo": {"type": "string", "description": "Only return the reply to this sent message id."},
+                "markRead": {
+                    "type": "boolean",
+                    "description": "Mark them read (default true for stdio, false for HTTP).",
+                },
             },
             "additionalProperties": False,
         },
@@ -195,6 +221,7 @@ MAIL_OUTPUT = object_schema(
     ["status", "messages", "has_more", "next_offset"],
 )
 OUTPUTS = {
+    "register": object_schema({"session": {"type": "string"}}, ["session"]),
     "peers": object_schema(
         {
             "peers": {
@@ -281,7 +308,7 @@ class ToolResponse:
 def valid_id(value: Any) -> bool:
     # Older clients used numeric ids, including fractions; modern requests require integers.
     return (
-        isinstance(value, (str, int, float))
+        isinstance(value, str | int | float)
         and not isinstance(value, bool)
         and (not isinstance(value, float) or math.isfinite(value))
     )
@@ -313,7 +340,7 @@ def value_problem(value: Any, schema: dict[str, Any], key: str) -> str | None:
             )
         if "pattern" in schema and not re.fullmatch(schema["pattern"], value):
             return f"{key} must be a valid message id returned by send or inbox"
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if isinstance(value, int | float) and not isinstance(value, bool):
         if value < schema.get("minimum", -math.inf) or value > schema.get("maximum", math.inf):
             return f"{key} is outside the allowed range"
         if "exclusiveMinimum" in schema and value <= schema["exclusiveMinimum"]:
@@ -393,9 +420,10 @@ HARNESS_BY_CLIENT = {"claude-code": "claude", "codex-mcp-client": "codex", "open
 
 
 class Server:
-    def __init__(self, base: Path | None = None, environ: dict[str, str] | None = None):
+    def __init__(self, base: Path | None = None, environ: dict[str, str] | None = None, stdio: bool = True):
         self.base = base or mailbox.root()
         self.environ = os.environ if environ is None else environ
+        self.stdio = stdio
         self.harness = "unknown"
         self.legacy_version: str | None = None
         self.pid: int | None = None
@@ -403,6 +431,8 @@ class Server:
         self.commit = threading.Lock()
 
     def identify(self, client: dict[str, Any]) -> None:
+        if not self.stdio:
+            return
         name = str(client.get("name") or "").lower()
         self.harness = (
             HARNESS_BY_CLIENT.get(name)
@@ -411,22 +441,49 @@ class Server:
         )
         self.pid = mailbox.harness_pid(self.harness) if self.harness != "unknown" else os.getppid()
 
-    def session(self, meta: dict[str, Any]) -> str:
-        if self.environ.get("AGENT_MAILBOX_LISTENER_SESSION"):
+    def session(self, meta: dict[str, Any]) -> str | None:
+        if self.stdio and self.environ.get("AGENT_MAILBOX_LISTENER_SESSION"):
             return self.environ["AGENT_MAILBOX_LISTENER_SESSION"]
-        # Codex sends sessionId (or threadId); OpenCode sends its own namespaced key.
         for key in ("sessionId", "threadId", "ai.opencode/sessionID"):
             if isinstance(meta.get(key), str) and meta[key]:
                 return meta[key]
-        if self.environ.get("CLAUDE_CODE_SESSION_ID"):
-            return self.environ["CLAUDE_CODE_SESSION_ID"]
-        seed = f"{self.harness}:{self.pid or os.getppid()}:{os.getcwd()}"
-        return f"{self.harness}-{hashlib.sha1(seed.encode()).hexdigest()[:16]}"
+        if self.stdio:
+            if self.environ.get("CLAUDE_CODE_SESSION_ID"):
+                return self.environ["CLAUDE_CODE_SESSION_ID"]
+            seed = f"{self.harness}:{self.pid or os.getppid()}:{os.getcwd()}"
+            return f"{self.harness}-{hashlib.sha1(seed.encode()).hexdigest()[:16]}"
+        return None
 
     def me(self, meta: dict[str, Any], state: str = "busy") -> dict[str, Any]:
         session = self.session(meta)
+        if not session:
+            raise mailbox.MailboxError(
+                "unknown caller: call the 'register' tool or provide a session identifier in request metadata"
+            )
+
+        if self.stdio:
+            return mailbox.refresh(
+                self.base,
+                session=session,
+                harness=self.harness,
+                cwd=os.getcwd(),
+                pid=self.pid,
+                source="mcp",
+                state=state,
+            )
+
+        peer = mailbox.load(mailbox.peer_path(self.base, session))
+        if not peer or not peer.get("cwd") or not peer.get("harness"):
+            raise mailbox.MailboxError("unknown caller: call the 'register' tool first to establish identity")
+
         return mailbox.refresh(
-            self.base, session=session, harness=self.harness, cwd=os.getcwd(), pid=self.pid, source="mcp", state=state
+            self.base,
+            session=session,
+            harness=peer["harness"],
+            cwd=peer["cwd"],
+            pid=peer.get("pid"),
+            source="mcp",
+            state=state,
         )
 
     def execute(
@@ -436,6 +493,17 @@ class Server:
         meta: dict[str, Any],
         cancelled: threading.Event | None = None,
     ) -> ToolResponse | None:
+        if name == "register":
+            session = arguments.get("session") or self.session(meta)
+            peer = mailbox.register(
+                self.base,
+                session=session,
+                harness=arguments["harness"],
+                cwd=arguments["cwd"],
+                pid=arguments.get("pid") or self.pid,
+            )
+            return ToolResponse(f"registered as {session}", {"session": session})
+
         meta = {**meta, **({"sessionId": arguments["session"]} if "session" in arguments else {})}
         me = self.me(meta)
         scope = arguments.get("scope", "project")
@@ -472,6 +540,9 @@ class Server:
                 },
             )
         if name == "send":
+            key = arguments.get("idempotencyKey")
+            if not self.stdio and not key:
+                raise mailbox.MailboxError("idempotencyKey argument is required for HTTP send")
             sent = mailbox.send(
                 self.base,
                 sender=me,
@@ -480,13 +551,14 @@ class Server:
                 reply_to=arguments.get("replyTo"),
                 scope=scope,
                 wake=arguments.get("wake", True),
+                idempotency_key=key,
             )
             return ToolResponse(json.dumps(sent, separators=(",", ":")), sent)
         if name == "inbox":
             found, more = mailbox.message_page(
                 self.base, me["session"], scope=scope, limit=limit, offset=offset, max_bytes=PAGE_BYTES
             )
-            mark = arguments.get("markRead", True)
+            mark = arguments.get("markRead", self.stdio)
             if mark:
                 found = mailbox.claim(self.base, me["session"], found, scope=scope)
             return mail_response(
@@ -526,9 +598,13 @@ class Server:
                                     response += "\n" + prompt
                             return mail_response([], status="timed_out", text=response)
                         # Once claimed, the reply is always sent, even if a cancellation arrives meanwhile.
-                        claimed = mailbox.claim(self.base, me["session"], result["messages"], scope=scope)
-                    if claimed:
-                        return mail_response(claimed, more=result.get("has_more", False), include_text=include_text)
+                        mark = arguments.get("markRead", self.stdio)
+                        if mark:
+                            found = mailbox.claim(self.base, me["session"], result["messages"], scope=scope)
+                        else:
+                            found = result["messages"]
+                    if found:
+                        return mail_response(found, more=result.get("has_more", False), include_text=include_text)
                     # A concurrent wait claimed this mail first; keep waiting for the rest of the timeout.
             finally:
                 # Only a record that still exists: the session may have ended while it waited.
@@ -599,7 +675,7 @@ class Server:
                     request["id"], -32602, "modern requests require clientCapabilities and object clientInfo"
                 )
             # Never inherit identity from initialize or another modern request, including concurrent waits.
-            caller = Server(base=self.base, environ={})
+            caller = Server(base=self.base, environ={}, stdio=self.stdio)
             caller.commit = self.commit
             caller.identify(client)
         if not modern and self.legacy_version is None and method in {"tools/list", "tools/call"}:
@@ -660,7 +736,7 @@ class Server:
                 try:
                     response = caller.execute(params["name"], arguments, meta, cancelled)
                 except (mailbox.MailboxError, OSError, KeyError, TypeError, ValueError) as error:
-                    if isinstance(error, (mailbox.MailboxError, mailbox.feedback_module().FeedbackError)):
+                    if isinstance(error, mailbox.MailboxError | mailbox.feedback_module().FeedbackError):
                         problem = str(error)
                     elif isinstance(error, OSError):
                         problem = "local storage operation failed; check mailbox/collector permissions and retry"
