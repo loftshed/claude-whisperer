@@ -81,7 +81,7 @@ class InstallMailboxTests(unittest.TestCase):
             {edit["keyPath"] for edit in edits},
             {
                 f"mcp_servers.peer-mailbox.tools.{tool}.approval_mode"
-                for tool in ["peers", "inbox", "wait", "ack", "focus"]
+                for tool in ["peers", "inbox", "wait", "ack", "focus", "register", "feedback"]
             },
         )
         self.assertTrue(all(edit["value"] == "approve" for edit in edits))
@@ -95,7 +95,7 @@ class InstallMailboxTests(unittest.TestCase):
         self.assertIn("mailbox configuration could not be read", status["claude"]["issues"])
         self.assertIn("mailbox turn hooks missing or unreadable", status["claude"]["issues"])
 
-    def test_diagnostics_accept_native_opencode_nested_configuration(self):
+    def test_diagnostics_require_direct_opencode_configuration(self):
         from unittest.mock import patch
 
         config = self.base / ".config/opencode/opencode.jsonc"
@@ -117,6 +117,12 @@ class InstallMailboxTests(unittest.TestCase):
             )
         )
         with patch.dict("os.environ", {"XDG_CONFIG_HOME": str(self.base / ".config")}):
+            status = installer.configuration_status(self.base, {"opencode"})["opencode"]
+            self.assertFalse(status["configured"])
+            self.assertIn("legacy OpenCode nested MCP map; rerun messaging repair", status["issues"])
+            entries = json.loads(config.read_text())["mcp"]["servers"]
+            entries["peer-mailbox"].update(type="local", timeout=660000)
+            config.write_text(json.dumps({"mcp": entries}))
             self.assertTrue(installer.configuration_status(self.base, {"opencode"})["opencode"]["configured"])
 
     def test_dry_run_leaves_settings_intact_then_real_install_adds_delivery(self):

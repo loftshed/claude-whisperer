@@ -182,8 +182,11 @@ def locked(path: Path):
         os.close(descriptor)
 
 
+SESSION_ID = r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}"
+
+
 def session_key(session: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", session):
+    if not re.fullmatch(SESSION_ID, session):
         raise MailboxError(f"invalid session id: {session!r}")
     # "%" and "~" are not allowed in a session id, so the mapping stays one-to-one. Ids with capitals
     # carry a hash, so ids differing only by case keep apart on a case-insensitive filesystem.
@@ -951,6 +954,56 @@ def run_send(
     return payload
 
 
+def expire_send_operation(
+    base: Path, operation: Path, entry: dict[str, Any], moment: dt.datetime | None = None
+) -> bool:
+    moment = moment or now()
+    if entry.get("schema") == "agent-executor.send-operation.expired.v1":
+        return True
+    message = entry.get("message")
+    if entry.get("schema") != "agent-executor.send-operation.v1" or not valid_message(message):
+        return False
+    if moment - parse_stamp(message["sentAt"]) <= MAX_AGE:
+        return False
+    payload = entry.get("payload")
+    caller = payload.get("caller") if isinstance(payload, dict) else None
+    session = caller.get("session") if isinstance(caller, dict) else None
+    if not isinstance(session, str) or not re.fullmatch(SESSION_ID, session):
+        return False
+    # Expired keys cannot recreate pruned messages. Active callers retain a small body-free tombstone.
+    peer = load(peer_path(base, session))
+    if valid_peer(peer) and is_live(peer):
+        write(
+            operation,
+            {
+                "schema": "agent-executor.send-operation.expired.v1",
+                "session": session,
+                "expiredAt": stamp(moment),
+                "messageId": message["id"],
+            },
+        )
+    else:
+        operation.unlink(missing_ok=True)
+    return True
+
+
+def prune_send_journals(base: Path) -> None:
+    for operation in (base / "journal").glob("*/*.json"):
+        with locked(operation):
+            entry = load(operation)
+            if not entry:
+                continue
+            if entry.get("schema") == "agent-executor.send-operation.expired.v1":
+                session = entry.get("session")
+                if not isinstance(session, str) or not re.fullmatch(SESSION_ID, session):
+                    continue
+                peer = load(peer_path(base, session))
+                if not valid_peer(peer) or not is_live(peer):
+                    operation.unlink(missing_ok=True)
+            else:
+                expire_send_operation(base, operation, entry)
+
+
 def send(
     base: Path,
     *,
@@ -972,7 +1025,7 @@ def send(
             to=to,
             text=text,
             kind=kind,
-            client_id=client_id,
+            client_id=client_id or idempotency_key,
             reply_to=reply_to,
         )
     if not text.strip():
@@ -981,7 +1034,48 @@ def send(
         raise MailboxError(f"message is over {MAX_BYTES // 1024} KiB; send a path to a file instead")
     if reply_to is not None and not re.fullmatch(MESSAGE_ID, reply_to):
         raise MailboxError(f"invalid replyTo id: {reply_to!r}")
-    target = resolve(base, to, sender=sender, scope=scope)
+    if idempotency_key is not None and (
+        not isinstance(idempotency_key, str) or not re.fullmatch(CLIENT_ID, idempotency_key)
+    ):
+        raise MailboxError("idempotencyKey must be 1-80 letters, digits, underscores or hyphens")
+    if idempotency_key:
+        previous_path = (
+            base
+            / "journal"
+            / session_key(sender["session"])
+            / (hashlib.sha256(idempotency_key.encode()).hexdigest() + ".json")
+        )
+        if previous_path.exists():
+            with locked(previous_path):
+                previous = load(previous_path)
+                if previous and expire_send_operation(base, previous_path, previous):
+                    raise MailboxError(
+                        "idempotencyKey replay window expired after seven days; do not retry the old delivery"
+                    )
+    try:
+        target = resolve(base, to, sender=sender, scope=scope)
+    except MailboxError as failure:
+        if not idempotency_key or failure.code != "peer_unavailable":
+            raise
+        operation = (
+            base
+            / "journal"
+            / session_key(sender["session"])
+            / (hashlib.sha256(idempotency_key.encode()).hexdigest() + ".json")
+        )
+        entry = load(operation)
+        snapshot = entry.get("target") if entry else None
+        if not isinstance(snapshot, dict):
+            raise
+        address = to.strip()
+        matches = address in {snapshot.get("session"), snapshot.get("name")} or (
+            len(address) >= 6 and snapshot.get("session", "").startswith(address)
+        )
+        if not matches or (scope == "project" and not same_project(sender, snapshot)):
+            raise
+        # A committed operation remains replayable when its recipient has since left.
+        # The full caller/delivery fingerprint is checked again under the operation lock below.
+        target = snapshot
     if target["session"] == sender["session"]:
         raise MailboxError("that address is this session", "self_address")
     native = NATIVE_MESSAGING.get(sender.get("harness"))
@@ -991,31 +1085,9 @@ def send(
             "native_required",
         )
 
-    msg_id = message_id()
-    journal_path = None
-
-    if idempotency_key is not None:
-        if not isinstance(idempotency_key, str) or not idempotency_key.strip():
-            raise MailboxError("idempotencyKey must be a non-empty string")
-        journal_dir = base / "journal" / session_key(sender["session"])
-        journal_dir.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha256(f"{idempotency_key}".encode()).hexdigest()
-        journal_path = journal_dir / f"send-{digest}.json"
-
-        if journal_path.exists():
-            entry = load(journal_path)
-            if entry and entry.get("payload") != text:
-                raise MailboxError("Idempotency-Key used with different payload")
-            if entry and entry.get("response"):
-                return entry["response"]
-            if entry and entry.get("msg_id"):
-                msg_id = entry["msg_id"]
-        else:
-            write(journal_path, {"payload": text, "msg_id": msg_id, "pending": True})
-
     message = {
         "schema": MAIL_SCHEMA,
-        "id": msg_id,
+        "id": message_id(),
         "from": sender_address(sender),
         "to": {"session": target["session"], "name": target["name"]},
         "text": text,
@@ -1024,30 +1096,91 @@ def send(
         "readAt": None,
         "scope": scope,
     }
+    if idempotency_key is None:
+        write(inbox_dir(base, target["session"]) / f"{message['id']}.json", message)
+        result = delivery_result(message, target)
+        if wake:
+            result["wake"] = delivery_wake(base, target, message["id"], scope)
+        return result
+    if not isinstance(idempotency_key, str) or not re.fullmatch(CLIENT_ID, idempotency_key):
+        raise MailboxError("idempotencyKey must be 1-80 letters, digits, underscores or hyphens")
+    payload = {
+        "to": target["session"],
+        "text": text,
+        "replyTo": reply_to,
+        "scope": scope,
+        "wake": wake,
+        "caller": {key: sender.get(key) for key in ("session", "harness", "cwd", "repo", "remotes", "run")},
+    }
+    operation = (
+        base
+        / "journal"
+        / session_key(sender["session"])
+        / (hashlib.sha256(idempotency_key.encode()).hexdigest() + ".json")
+    )
+    with locked(operation):
+        entry = load(operation)
+        if operation.exists() and entry is None:
+            raise MailboxError("send recovery journal is unreadable; inspect storage before retrying")
+        if entry:
+            if expire_send_operation(base, operation, entry):
+                raise MailboxError(
+                    "idempotencyKey replay window expired after seven days; do not retry the old delivery"
+                )
+            if entry.get("schema") != "agent-executor.send-operation.v1" or entry.get("payload") != payload:
+                raise MailboxError("idempotencyKey was already used for different delivery or caller context")
+            if entry.get("response"):
+                return entry["response"]
+            if not valid_message(entry.get("message")):
+                raise MailboxError("send recovery journal is invalid; inspect storage before retrying")
+            message = entry["message"]
+        else:
+            entry = {
+                "schema": "agent-executor.send-operation.v1",
+                "payload": payload,
+                "message": message,
+                "wakeAttempted": False,
+                "target": target,
+            }
+            # Allocate and fsync the operation/message identity before any delivery or external activation.
+            write(operation, entry)
+        path = inbox_dir(base, target["session"]) / f"{message['id']}.json"
+        stored = load(path)
+        if path.exists():
+            if not valid_message(stored) or any(
+                stored.get(key) != value for key, value in message.items() if key != "readAt"
+            ):
+                raise MailboxError(
+                    "send recovery conflicts with the persisted delivery; inspect storage before retrying"
+                )
+        else:
+            write(path, message)
+        result = delivery_result(message, target)
+        if wake:
+            if entry.get("wakeAttempted"):
+                result["wake"] = {
+                    "status": "uncertain",
+                    "reason": "delivery recovered; previous activation outcome is unknown and is not retried",
+                }
+            else:
+                entry["wakeAttempted"] = True
+                write(operation, entry)
+                result["wake"] = delivery_wake(base, target, message["id"], scope)
+        entry["response"] = result
+        write(operation, entry)
+        return result
 
-    inbox_file = inbox_dir(base, target["session"]) / f"{msg_id}.json"
-    already_delivered = inbox_file.exists()
 
-    if not already_delivered:
-        write(inbox_file, message)
+def delivery_result(message: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    return {"id": message["id"], "to": target["name"], "toState": target["state"], "toHarness": target["harness"]}
 
-    result = {"id": msg_id, "to": target["name"], "toState": target["state"], "toHarness": target["harness"]}
 
-    if wake and not already_delivered:
-        import mailbox_wake
+def delivery_wake(base: Path, target: dict[str, Any], identifier: str, scope: str) -> dict[str, Any]:
+    if scope != "project":
+        return {"status": "queued", "reason": "cross-project mail requires the recipient's explicit inbox opt-in"}
+    import mailbox_wake
 
-        result["wake"] = (
-            mailbox_wake.wake(target, msg_id, base=base)
-            if scope == "project"
-            else {"status": "queued", "reason": "cross-project mail requires the recipient's explicit inbox opt-in"}
-        )
-    elif wake and already_delivered:
-        result["wake"] = {"status": "recovered", "reason": "message was already delivered before crash"}
-
-    if journal_path is not None:
-        write(journal_path, {"payload": text, "msg_id": msg_id, "response": result})
-
-    return result
+    return mailbox_wake.wake(target, identifier, base=base)
 
 
 def valid_stamp(value: Any) -> bool:
@@ -1321,6 +1454,7 @@ def prune(base: Path) -> dict[str, int]:
         if expired:
             path.unlink(missing_ok=True)
             removed["messages"] += 1
+    prune_send_journals(base)
     return removed
 
 
@@ -1385,8 +1519,36 @@ def hook(payload: dict[str, Any], *, harness: str | None = None, base: Path | No
         base, session=session, harness=harness, cwd=cwd, pid=harness_pid(harness), state=state, cwd_source="hook"
     )
     me = mark_delegated(base, me)
+    identity_hint = ""
+    availability_hint = ""
+    import mailbox_daemon
+
+    try:
+        http_mode = mailbox_daemon.get_mode(base) == "http"
+        if http_mode and event != "Stop":
+            live = mailbox_daemon.ensure_running(base, startup_timeout=0.5)
+            stale = live.get("runtimeRevision") != mailbox_daemon.runtime_revision()
+            issue = "HTTP mailbox is running old code; use mailbox daemon restart after upgrade." if stale else ""
+            if issue != me.get("httpAvailabilityIssue", ""):
+                availability_hint = issue
+                annotate(base, session, httpAvailabilityIssue=issue)
+        if (
+            http_mode
+            and event in {"SessionStart", "UserPromptSubmit"}
+            and (event == "SessionStart" or not me.get("httpIdentityAnnounced"))
+        ):
+            identity_hint = f"HTTP peer mailbox session: {session}. Pass this session on tool calls; ack received mail and reuse send idempotencyKey only for identical retries."
+            annotate(base, session, httpIdentityAnnounced=True)
+    except (MailboxError, OSError, ValueError):
+        issue = "HTTP mailbox is unavailable; queued mail is delivered locally. Use mailbox daemon start or repair before HTTP tools."
+        if issue != me.get("httpAvailabilityIssue", ""):
+            availability_hint = issue
+            annotate(base, session, httpAvailabilityIssue=issue)
     delivered = take(base, session)
     context = render_all(delivered)
+    hint = "\n".join(value for value in (identity_hint, availability_hint) if value)
+    if hint:
+        context = hint + ("\n\n" + context if context else "")
     if event == "Stop":
         if not context:
             return None
@@ -1582,6 +1744,11 @@ poll, retry unchanged, or contact another agent just to collect feedback.
 
 
 def main(argv: list[str] | None = None) -> int:
+    supplied = sys.argv[1:] if argv is None else argv
+    if supplied and supplied[0] == "daemon":
+        import mailbox_daemon
+
+        return mailbox_daemon.main(supplied[1:])
     parser = argparse.ArgumentParser(prog="run_agent.py mailbox", description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
     for name in (
@@ -1642,6 +1809,7 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--message-id", action="append", default=[])
     args = parser.parse_args(argv)
     base = root()
+
     try:
         if args.action == "hook":
             raw = sys.stdin.read()

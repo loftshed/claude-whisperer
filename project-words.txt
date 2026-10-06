@@ -27,3 +27,4 @@ aiusage
 plasmoid
 cwds
 urandom
+RDWR

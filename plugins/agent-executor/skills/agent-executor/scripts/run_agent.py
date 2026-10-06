@@ -3950,12 +3950,17 @@ def doctor_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--trust-codex-hooks", action="store_true", help="with --repair-messaging, trust only the four mailbox hooks"
     )
+    parser.add_argument(
+        "--stdio-messaging", action="store_true", help="with --repair-messaging, restore stdio registration"
+    )
     args = parser.parse_args(argv)
     messaging_check = None
     if args.trust_codex_hooks and not args.repair_messaging:
         parser.error("--trust-codex-hooks requires --repair-messaging")
     if args.repair_messaging:
-        bundled_module("install_mailbox").install(trust_codex_hooks=args.trust_codex_hooks)
+        bundled_module("install_mailbox").install(trust_codex_hooks=args.trust_codex_hooks, stdio=args.stdio_messaging)
+    elif args.stdio_messaging:
+        parser.error("--stdio-messaging requires --repair-messaging")
     elif args.check_messaging:
         messaging_check = bundled_module("check_mailbox").check()
     hosts = [host for host, keys in HOST_MARKERS.items() if any(os.environ.get(key) for key in keys)]

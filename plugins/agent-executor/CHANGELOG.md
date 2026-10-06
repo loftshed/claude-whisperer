@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add one authenticated loopback HTTP mailbox daemon with stable lifecycle commands and endpoint.
+  Bind callers explicitly, keep HTTP mail unread until acknowledgement, and recover keyed sends
+  without duplicate delivery or activation. Install protected HTTP configuration for all four hosts,
+  preserve unrelated settings/comments, and provide explicit stdio rollback. Add crash, concurrency,
+  transport, installation, native Codex and read-only evaluation checks.
+
 - Support MCP `2026-07-28` discovery and per-request identity while retaining legacy clients.
   Add output schemas, complete annotations, enforced input bounds and paginated mailbox reads.
   Keep message bodies once in default Markdown output, shorten repeated guidance, cache modern

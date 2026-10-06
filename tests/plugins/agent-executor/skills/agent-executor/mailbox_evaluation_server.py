@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -68,3 +70,39 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def evaluation_answers(peers, messages):
+    by_id = {message["id"]: message for message in messages}
+    accepted = sorted((m for m in messages if "verification accepted" in m["text"]), key=lambda m: m["sentAt"])
+    blocked = next(m for m in messages if "verification rejected" in m["text"])
+    latest = accepted[-1]
+    first = accepted[0]
+    latest_parent = by_id[latest["replyTo"]]
+    first_parent = by_id[first["replyTo"]]
+    first_root = by_id[first_parent["replyTo"]]
+    blocked_parent = by_id[blocked["replyTo"]]
+
+    def minutes(earlier, later):
+        return str(
+            int(
+                (
+                    dt.datetime.fromisoformat(later["sentAt"]) - dt.datetime.fromisoformat(earlier["sentAt"])
+                ).total_seconds()
+                / 60
+            )
+        )
+
+    answers = [
+        re.search(r"accepted (crate-\d+)", latest["text"])[1],
+        next(p["harness"] for p in peers if p["name"] == latest["from"]),
+        re.search(r"digest ([a-f0-9]+)", first["text"])[1],
+        re.search(r"stamp (review-\d+)", blocked_parent["text"])[1],
+        minutes(first_root, first),
+        minutes(latest_parent, latest),
+        next(p["session"] for p in peers if p["name"] == blocked_parent["from"] and p["focus"] == "storage maintainer"),
+        str(len({re.search(r"accepted (crate-\d+)", m["text"])[1] for m in accepted})),
+        re.search(r"([a-f0-9]+) was the rejected digest", first_parent["text"])[1],
+        re.search(r"stamp (review-\d+)", latest["text"])[1],
+    ]
+    return answers

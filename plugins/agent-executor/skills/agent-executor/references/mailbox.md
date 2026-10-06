@@ -1,6 +1,6 @@
 # Peer mailbox
 
-Agent sessions in different harnesses list each other and exchange messages within their project through a local store,
+Agent sessions use one authenticated loopback HTTP daemon to list peers and exchange messages within their project. The durable store is
 `<agent-executor cache>/mailbox-v1/` (`peers/<session>.json`, `inbox/<session>/<id>.json`, with `:` in a
 session id written as `%3A`). Nothing leaves the machine.
 
@@ -28,24 +28,25 @@ store, including when both sessions use Claude Code. Harnesses known to have nat
 
 ## Tools
 
-The MCP server (`scripts/mailbox_mcp.py`) and the CLI (`run_agent.py mailbox …`) share the names.
+The normal server is `scripts/mailbox_daemon.py`. `scripts/mailbox_mcp.py` remains a stdio fallback; the CLI is `run_agent.py mailbox …`.
 
-| Tool       | Does                                                                                                        |
-| ---------- | ----------------------------------------------------------------------------------------------------------- |
-| `peers`    | Live sessions in this project: name, harness, state (`idle`, `busy`, `waiting`), cwd. Dead ones are pruned. |
-| `send`     | `to` (name, session id, or a unique prefix of 6+ characters), `text` (≤ 32 KiB), `replyTo?`.                |
-| `inbox`    | Unread messages, oldest first, marked read unless `markRead: false`.                                        |
-| `wait`     | Blocks up to `timeoutSeconds` (max 600) for a message, or for the reply to `replyTo`.                       |
-| `ack`      | Marks message ids read.                                                                                     |
-| `focus`    | One line on what this session is working on, shown to agents in the same project.                           |
-| `feedback` | Record a communication problem, your intent and what you needed instead. Writes locally; sends no message.  |
+| Tool       | Does                                                                                                             |
+| ---------- | ---------------------------------------------------------------------------------------------------------------- |
+| `register` | Hookless HTTP callers register their absolute `cwd`, `harness`, optional native `pid`; returns a `session`.      |
+| `peers`    | Live sessions in this project: name, harness, state (`idle`, `busy`, `waiting`), cwd. Dead ones are pruned.      |
+| `send`     | `to`, `text` (≤ 32 KiB), `replyTo?`; HTTP requires a stable `idempotencyKey` for retries.                        |
+| `inbox`    | Unread messages, oldest first. HTTP keeps them unread until `ack`; stdio/CLI mark returned mail read by default. |
+| `wait`     | Blocks up to `timeoutSeconds` (max 600) for a message, or for the reply to `replyTo`.                            |
+| `ack`      | Marks message ids read.                                                                                          |
+| `focus`    | One line on what this session is working on, shown to agents in the same project.                                |
+| `feedback` | Record a communication problem, your intent and what you needed instead. Writes locally; sends no message.       |
 
 ### MCP protocol and bounded responses
 
-The local stdio server supports the current published MCP revision, `2026-07-28`, and legacy
+The HTTP daemon and stdio fallback support published MCP `2026-07-28` and legacy
 initialization clients through `2025-11-25`. Modern requests carry protocol version, client capabilities
 and optional client identity in `params._meta`; `server/discover` advertises supported revisions.
-Use an explicit `session` argument or the host's session-id metadata on every modern tool call.
+Use an explicit `session` argument or the host's session-id metadata on tool calls. A hookless caller first uses `register(cwd,harness,pid?)`, then retains the returned session.
 Identity is per request, including concurrent waits. Restart existing server processes after upgrading.
 
 All tools return structured results and declare output schemas and all four behavior annotations.
@@ -54,14 +55,12 @@ and clients continue to work. The server identifies itself as `peer_mailbox_mcp`
 
 `peers`, `inbox` and `wait` accept `limit` from 1 to 50, default 20. `peers` and read-only
 `inbox(markRead:false)` also accept `offset`. Peer pages return `total_count`, `has_more`, and
-`next_offset`; inbox pages return `has_more` and `next_offset`. When marking mail read, drain pages
-at offset zero because the unread list shrinks. Only returned messages are marked read.
+`next_offset`; inbox pages return `has_more` and `next_offset`. After acknowledging a page, continue at offset zero because the unread list shrinks. HTTP retrieval never consumes mail; only explicit acknowledgement does. Stdio consumption retains its original behavior.
 Listings are live snapshots; a new peer or another reader can change the next page.
 
 Inbox and wait pages have a soft 12 KiB UTF-8 body budget. A single larger message is returned whole,
 up to the existing 32 KiB message limit. No body is silently truncated or consumed off-page. Inbox
-reads stream message files instead of loading the entire queue into memory. At most eight MCP waits
-are pending per server; a cancelled wait leaves unclaimed mail unread, and EOF cancels pending waits.
+reads stream message files instead of loading the entire queue into memory. The HTTP service allows 32 pending waits globally and four per caller, with 64 connections and a 256 KiB request-body limit. Stdio permits eight pending waits. Disconnect/EOF cancellation leaves unacknowledged mail intact.
 
 Markdown is the default `response_format`. It carries each message body once in text content, with
 ids, sender, timestamps and pagination in structured metadata. JSON is opt-in and includes full bodies
@@ -82,28 +81,24 @@ Examples of MCP tool arguments:
 
 Use those arguments with `peers` to discover an address. Set `focus` with
 `{"session":"thread-123","text":"checking the storage contract"}`, then send with
-`{"session":"thread-123","to":"PEER","text":"Which contract revision?","wake":false}`.
+`{"session":"thread-123","to":"PEER","text":"Which contract revision?","wake":false,"idempotencyKey":"contract-question-1"}`.
 
 ```json
 { "session": "thread-123", "markRead": false, "limit": 10, "offset": 10, "response_format": "json" }
 ```
 
-Use those arguments with `inbox` for a read-only second page. For ordinary consumption, omit
-`markRead` and `offset`; continue at zero while `has_more` is true. To acknowledge an inspected message,
+Use those arguments with `inbox` for a read-only second page. For HTTP, read a page and acknowledge its ids after receipt; continue at zero while `has_more` is true. For read-only exploration, retain `offset` and leave mail unread. To acknowledge an inspected message,
 call `ack` with `{"session":"thread-123","ids":["10-abcdef"]}` using its actual id.
 
 ```json
 { "session": "thread-123", "replyTo": "10-abcdef", "timeoutSeconds": 50, "limit": 5 }
 ```
 
-Use those arguments with `wait`, replacing the id with the value returned by `send`. Cancel its
-JSON-RPC request with `notifications/cancelled` if the reply is no longer needed. A timeout is not an answer.
+Use those arguments with `wait`, replacing the id with the value returned by `send`. For HTTP, close its response connection when the reply is no longer needed. Stdio uses `notifications/cancelled`. A timeout is not an answer.
 
 The implementation stays standard-library-only so copied plugins run without a Python package install.
 It validates the closed JSON Schema subset it advertises, including types, enums, ranges, lengths,
-array bounds, ids and UTF-8 message size. It never resolves remote schema references. HTTP auth,
-DNS rebinding controls, resources, prompts, subscriptions and model sampling are not applicable to
-this local tools-only stdio server. Hosts enforce user permissions; mailbox peer identity is local
+array bounds, ids and UTF-8 message size. It never resolves remote schema references. The daemon validates local bearer credentials, HTTP Origin and mirrored method/name/version headers. Resources, prompts, subscriptions and model sampling are unused. Stdio exposes no HTTP endpoint. Hosts enforce user permissions; mailbox peer identity is local
 coordination metadata, not authentication against other programs running as the same OS user.
 
 See the [MCP audit](../../../../../docs/mailbox-mcp-audit.md) for verification and evaluation evidence.
@@ -309,34 +304,68 @@ the wrapper early.
 
 ## Identity
 
-| Host        | Session id                                    | Harness from                           |
-| ----------- | --------------------------------------------- | -------------------------------------- |
-| Claude Code | `CLAUDE_CODE_SESSION_ID` in the server's env  | `clientInfo.name` = `claude-code`      |
-| Codex       | `_meta.sessionId` on every `tools/call`       | `clientInfo.name` = `codex-mcp-client` |
-| OpenCode    | `_meta["ai.opencode/sessionID"]` on each call | `clientInfo.name` = `opencode`         |
-| Others      | hash of harness, harness pid and cwd          | `clientInfo.name`                      |
+| Host        | Session id                                                   | Harness from                           |
+| ----------- | ------------------------------------------------------------ | -------------------------------------- |
+| Claude Code | Native hook session; stdio also has `CLAUDE_CODE_SESSION_ID` | `clientInfo.name` = `claude-code`      |
+| Codex       | `_meta.sessionId` on every `tools/call`                      | `clientInfo.name` = `codex-mcp-client` |
+| OpenCode    | `_meta["ai.opencode/sessionID"]` on each call                | `clientInfo.name` = `opencode`         |
+| Others      | HTTP `register` result; stdio launch identity                | `clientInfo.name`                      |
 
 Presence ends with the harness process (its pid is recorded); a peer without a pid expires two hours
 after it was last seen. Messages are pruned after seven days (`mailbox prune`).
 
 ## Install
 
-Each harness needs the MCP server; Claude Code and Codex also take the turn hooks, which register the
-session, deliver mail at each prompt, keep a turn going when mail arrived during it (`Stop`), and remove
-the session at `SessionEnd`.
+The mailbox uses a local HTTP daemon to provide a persistent endpoint and coordinate messages.
+Each harness configures the daemon as an HTTP MCP server; Claude Code and Codex also take turn hooks.
+
+Start or check the daemon directly:
 
 ```sh
-claude mcp add --scope user peer-mailbox -- python3 ~/.agents/skills/agent-executor/scripts/mailbox_mcp.py
-codex mcp add peer-mailbox -- python3 ~/.agents/skills/agent-executor/scripts/mailbox_mcp.py
-agy mcp add peer-mailbox python3 ~/.agents/skills/agent-executor/scripts/mailbox_mcp.py
+python3 ~/.agents/skills/agent-executor/scripts/run_agent.py mailbox daemon start
+python3 ~/.agents/skills/agent-executor/scripts/run_agent.py mailbox daemon status
+python3 ~/.agents/skills/agent-executor/scripts/run_agent.py mailbox daemon restart
+python3 ~/.agents/skills/agent-executor/scripts/run_agent.py mailbox daemon stop
 ```
 
-- Codex: add `tool_timeout_sec = 660` under `[mcp_servers.peer-mailbox]` in `~/.codex/config.toml`, or
-  `wait` is cut off at Codex's 60-second default. Codex tools appear as `mcp__peer-mailbox__send` and so on.
-- Hooks: in `~/.claude/settings.json` and `~/.codex/hooks.json` (same format), one command hook each for
-  `SessionStart`, `UserPromptSubmit`, `Stop` and `SessionEnd`:
-  `python3 ~/.agents/skills/agent-executor/scripts/peer_mailbox.py hook --harness claude` (or `codex`).
-- OpenCode: a `local` entry under `mcp` in `~/.config/opencode/opencode.jsonc`.
+To configure the HTTP MCP integration for all supported CLIs (Claude, Codex, Antigravity, OpenCode):
+
+```sh
+python3 ~/.agents/skills/agent-executor/scripts/install_mailbox.py
+```
+
+The installer configures:
+
+- Claude: `mcpServers` in `~/.claude.json` using an `http` transport.
+- Codex: `[mcp_servers.peer-mailbox]` in `~/.codex/config.toml` with `tool_timeout_sec = 660`.
+- Antigravity: `mcpServers` in `~/.gemini/config/mcp_config.json`.
+- OpenCode: `mcp` in `~/.config/opencode/opencode.jsonc`.
+- Hooks: `~/.claude/settings.json` and `~/.codex/hooks.json` are updated with the `hook` command.
+
+If needed, you can rollback to the legacy Python subprocess (stdio) mode by running:
+
+```sh
+python3 ~/.agents/skills/agent-executor/scripts/install_mailbox.py --stdio
+```
+
+Rollback changes client registrations. Use `mailbox daemon stop` explicitly when the shared service is no longer needed.
+
+Hookless HTTP clients call the MCP `register` tool once with, for example,
+`{"cwd":"/absolute/project","harness":"gemini"}`. Keep its returned session in subsequent calls.
+Native hooks announce their own session at session start/resume and deduplicate subsequent prompt hints. A hookless caller with a native PID reuses a single matching registration; ambiguous matches require its explicit session. Re-register when a hookless
+conversation changes projects. The daemon never guesses a caller from its own cwd or PID.
+
+A restart keeps the endpoint and local credentials stable, drains in-flight work within a bounded grace period, and cancels waits without consuming mail. Runtime dependencies are copied to a private immutable bundle. Explicit repair restarts stale code; ordinary hooks only report it. On macOS installation also queues daemon startup at login; other POSIX systems can use the start CLI or a service manager. Legacy HTTP clients must re-initialize
+an expired transport session; modern requests carry their own metadata. A host may still need a
+catalog refresh when tool definitions change. Existing stdio sessions must reconnect after installation.
+The installer preserves unrelated JSONC/TOML settings/comments and protects credential-bearing files
+and backups. To restore stdio through the doctor, use `doctor --repair-messaging --stdio-messaging`.
+
+HTTP send keys are scoped to the caller and full delivery intent. Full recovery entries have a seven-day replay window. Prune/startup removes expired bodies and keeps body-free tombstones for active callers; an expired pending operation cannot resurrect pruned mail. Do not reuse a key for another message. Recovery reports an unknown previous activation as `uncertain` and never retries it. A persisted or queued message does not prove another model ran
+or answered. No lifecycle/health/readiness command starts a model turn.
+
+See the [daemon qualification](../../../../../docs/mailbox-daemon-qualification.md) for measured
+resource/context costs and the scope of native-client and synthetic evaluation evidence.
 
 ## Troubleshooting
 

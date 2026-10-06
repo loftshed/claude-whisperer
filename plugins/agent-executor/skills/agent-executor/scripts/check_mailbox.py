@@ -105,6 +105,11 @@ def check() -> dict[str, Any]:
     missing = {name: row["issues"] for name, row in configuration.items() if not row["configured"]}
     if missing:
         raise RuntimeError(f"messaging needs setup: {missing}; run doctor --repair-messaging")
+    import mailbox_daemon
+    import peer_mailbox
+
+    if mailbox_daemon.get_mode(peer_mailbox.root()) == "http":
+        return check_http()
     scripts = Path(__file__).resolve().parent
     # Retain evidence; never prune the user's real peer store or send to their active sessions.
     evidence = Path.home() / ".cache/agent-executor/checks" / f"mailbox-{uuid.uuid4().hex}"
@@ -224,6 +229,146 @@ def main() -> int:
         return 1
     print(json.dumps(report, indent=2))
     return 0
+
+
+def check_http() -> dict[str, Any]:
+    """Qualify one disposable HTTP service with four host identities and optional native Codex."""
+    import http.client
+    import urllib.parse
+
+    import mailbox_daemon
+    import peer_mailbox
+
+    evidence = Path.home() / ".cache/agent-executor/checks" / ("mailbox-http-" + uuid.uuid4().hex)
+    evidence.mkdir(parents=True, mode=0o700)
+    base = evidence / "mailbox-v1"
+    state = mailbox_daemon.ensure_running(base)
+    token = mailbox_daemon.read_token(base)
+    parsed = urllib.parse.urlparse(state["url"])
+    sessions = {name: "check-" + name + "-" + uuid.uuid4().hex for name in ("claude", "codex", "opencode", "gemini")}
+    names = {"claude": "claude-code", "codex": "codex-mcp-client", "opencode": "opencode", "gemini": "antigravity"}
+    native = None
+    native_thread = None
+    counter = 0
+    exchanges = []
+
+    def call(harness: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        nonlocal counter
+        counter += 1
+        args = {"session": sessions[harness], **arguments}
+        if harness == "codex" and native:
+            result = native.request(
+                "mcpServer/tool/call",
+                {"threadId": native_thread, "server": "mailbox-http-check", "tool": tool, "arguments": args},
+            )
+        else:
+            params = {
+                "name": tool,
+                "arguments": args,
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/clientInfo": {"name": names[harness], "version": "1"},
+                },
+            }
+            connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
+            try:
+                connection.request(
+                    "POST",
+                    "/mcp",
+                    json.dumps({"jsonrpc": "2.0", "id": counter, "method": "tools/call", "params": params}),
+                    {
+                        "Authorization": "Bearer " + token,
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/event-stream",
+                        "MCP-Protocol-Version": "2026-07-28",
+                        "Mcp-Method": "tools/call",
+                        "Mcp-Name": tool,
+                    },
+                )
+                response = connection.getresponse()
+                value = json.loads(response.read())
+                if response.status != 200 or "error" in value:
+                    raise RuntimeError("isolated HTTP transport check failed; inspect local compatibility")
+                result = value["result"]
+            finally:
+                connection.close()
+        if result.get("isError"):
+            raise RuntimeError("isolated HTTP tool check failed; inspect caller identity/configuration")
+        return result
+
+    try:
+        if shutil.which("codex"):
+            env = {**os.environ, "AGENT_EXECUTOR_HOME": str(evidence), "AGENT_MAILBOX_CHECK_AUTH": "Bearer " + token}
+            native = RpcClient(["codex", "app-server", "--stdio"], env)
+            initialize_codex(native)
+            installed_path = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "config.toml"
+            installed = tomllib.loads(installed_path.read_text()) if installed_path.exists() else {}
+            overrides = {f"mcp_servers.{key}.enabled": False for key in installed.get("mcp_servers", {})}
+            overrides.update({f"plugins.{key}.enabled": False for key in installed.get("plugins", {})})
+            overrides["hooks.enabled"] = False
+            overrides["mcp_servers.mailbox-http-check"] = {
+                "url": state["url"],
+                "env_http_headers": {"Authorization": "AGENT_MAILBOX_CHECK_AUTH"},
+                "tools": {
+                    tool: {"approval_mode": "approve"}
+                    for tool in ("register", "peers", "focus", "send", "inbox", "wait", "ack", "feedback")
+                },
+            }
+            native_thread = native.request(
+                "thread/start", {"cwd": os.getcwd(), "ephemeral": True, "config": overrides}
+            )["thread"]["id"]
+            sessions["codex"] = native_thread
+        for harness in sessions:
+            call(harness, "register", {"cwd": os.getcwd(), "harness": harness})
+            call(harness, "peers", {})
+        for sender in sessions:
+            for receiver in sessions:
+                if sender == receiver:
+                    continue
+                label = "check-" + uuid.uuid4().hex
+                sent = call(
+                    sender, "send", {"to": sessions[receiver], "text": label, "wake": False, "idempotencyKey": label}
+                )["structuredContent"]
+                incoming = call(receiver, "inbox", {})
+                if label not in result_text(incoming) or "<peer-message" not in result_text(incoming):
+                    raise RuntimeError("isolated HTTP delivery missing")
+                identifiers = [message["id"] for message in incoming["structuredContent"]["messages"]]
+                call(receiver, "ack", {"ids": identifiers})
+                if call(receiver, "inbox", {})["structuredContent"]["messages"]:
+                    raise RuntimeError("acknowledged HTTP mail was delivered again")
+                call(
+                    receiver,
+                    "send",
+                    {
+                        "to": sessions[sender],
+                        "text": "reply-" + label,
+                        "replyTo": sent["id"],
+                        "wake": False,
+                        "idempotencyKey": "reply-" + label,
+                    },
+                )
+                response = call(sender, "wait", {"replyTo": sent["id"], "timeoutSeconds": 2})
+                if "reply-" + label not in result_text(response):
+                    raise RuntimeError("isolated HTTP reply missing")
+                call(sender, "ack", {"ids": [message["id"] for message in response["structuredContent"]["messages"]]})
+                exchanges.append({"sender": sender, "receiver": receiver, "message_id": sent["id"]})
+        report = {
+            "transport": "http",
+            "daemon_pid": state["pid"],
+            "round_trips": exchanges,
+            "evidence": str(evidence),
+            "native_codex": bool(native),
+            "model_generation_calls": 0,
+        }
+        (evidence / "result.json").write_text(json.dumps(report, indent=2) + "\n")
+        return report
+    finally:
+        if native:
+            native.close()  # ephemeral thread lives only in this disposable app-server process
+        for session in sessions.values():
+            peer_mailbox.unregister(base, session)
+        mailbox_daemon.stop_service(base)
 
 
 if __name__ == "__main__":

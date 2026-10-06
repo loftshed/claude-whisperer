@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -14,6 +12,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
 
+import mailbox_evaluation_server
 import test_mailbox
 
 MAILBOX = test_mailbox.MAILBOX
@@ -102,7 +101,8 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual((first["ttlMs"], first["cacheScope"]), (3600000, "public"))
         self.assertEqual(
-            [t["name"] for t in first["tools"]], ["ack", "feedback", "focus", "inbox", "peers", "register", "send", "wait"]
+            [t["name"] for t in first["tools"]],
+            ["ack", "feedback", "focus", "inbox", "peers", "register", "send", "wait"],
         )
         for tool in first["tools"]:
             self.assertEqual(
@@ -272,42 +272,7 @@ class ContractTests(unittest.TestCase):
                 if not response["has_more"]:
                     break
                 offset = response["next_offset"]
-        by_id = {message["id"]: message for message in messages}
-        accepted = sorted((m for m in messages if "verification accepted" in m["text"]), key=lambda m: m["sentAt"])
-        blocked = next(m for m in messages if "verification rejected" in m["text"])
-        latest = accepted[-1]
-        first = accepted[0]
-        latest_parent = by_id[latest["replyTo"]]
-        first_parent = by_id[first["replyTo"]]
-        first_root = by_id[first_parent["replyTo"]]
-        blocked_parent = by_id[blocked["replyTo"]]
-
-        def minutes(earlier, later):
-            return str(
-                int(
-                    (
-                        dt.datetime.fromisoformat(later["sentAt"]) - dt.datetime.fromisoformat(earlier["sentAt"])
-                    ).total_seconds()
-                    / 60
-                )
-            )
-
-        answers = [
-            re.search(r"accepted (crate-\d+)", latest["text"])[1],
-            next(p["harness"] for p in peers if p["name"] == latest["from"]),
-            re.search(r"digest ([a-f0-9]+)", first["text"])[1],
-            re.search(r"stamp (review-\d+)", blocked_parent["text"])[1],
-            minutes(first_root, first),
-            minutes(latest_parent, latest),
-            next(
-                p["session"]
-                for p in peers
-                if p["name"] == blocked_parent["from"] and p["focus"] == "storage maintainer"
-            ),
-            str(len({re.search(r"accepted (crate-\d+)", m["text"])[1] for m in accepted})),
-            re.search(r"([a-f0-9]+) was the rejected digest", first_parent["text"])[1],
-            re.search(r"stamp (review-\d+)", latest["text"])[1],
-        ]
+        answers = mailbox_evaluation_server.evaluation_answers(peers, messages)
         evaluation = ET.parse(Path(__file__).parent / "evaluations/evaluation.xml")
         self.assertEqual(answers, [pair.findtext("answer") for pair in evaluation.findall("qa_pair")])
         reread = self.tool(
