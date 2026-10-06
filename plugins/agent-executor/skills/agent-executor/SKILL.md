@@ -19,7 +19,7 @@ the installed CLIs, the routes in effect, and stale skill copies.
 Before using cross-harness messages on an unfamiliar install, run
 `python3 <skill-directory>/scripts/run_agent.py doctor --check-messaging`. If setup is missing or
 stale, repair it yourself with `doctor --repair-messaging`, then repeat the check. This creates the
-skill hub if needed, registers the local mailbox, installs turn hooks, and permits only its six local
+skill hub if needed, registers the shared local HTTP mailbox, installs turn hooks, and permits only its eight local
 Codex tools; it preserves unrelated settings and backs up changed files. Do not leave these routine
 repairs for the user to ask another agent to perform.
 
@@ -217,7 +217,7 @@ correct it with `--session <id> --resume-result <result.json>`. Details: [refere
 
 ## Talk to sessions in other harnesses
 
-The `peer-mailbox` MCP server (`peers`, `focus`, `send`, `inbox`, `wait`, `ack`, `feedback`; CLI: `run_agent.py mailbox`)
+The `peer-mailbox` MCP server (`register`, `peers`, `focus`, `send`, `inbox`, `wait`, `ack`, `feedback`; CLI: `run_agent.py mailbox`)
 reaches live interactive sessions of another harness on this machine, for example a Claude session
 asking a Codex session to check its work. Within your own harness, always use its native agent
 messaging when it has any (Claude Code: `SendMessage`); the mailbox refuses Claude to Claude. A received

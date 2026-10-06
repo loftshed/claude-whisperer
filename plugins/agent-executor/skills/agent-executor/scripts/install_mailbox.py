@@ -400,7 +400,7 @@ def trust_codex(script: Path, codex: Path, *, dry_run: bool = False) -> None:
 
 
 def codex_tool_edits(server: dict) -> list[dict]:
-    """Permit the six local mailbox operations without changing other tool policy."""
+    """Permit the local mailbox operations without changing other tool policy."""
     return [
         {
             "keyPath": f"mcp_servers.peer-mailbox.tools.{tool}.approval_mode",
@@ -418,13 +418,13 @@ def permit_codex_tools(config: Path, *, dry_run: bool = False) -> None:
     if not edits:
         return
     if dry_run:
-        print("would permit only the six local Codex mailbox tools")
+        print(f"would permit only the {len(TOOLS)} local Codex mailbox tools")
         return
     backup(config)
     with RpcClient(["codex", "app-server", "--stdio"]) as client:
         initialize_codex(client)
         client.request("config/batchWrite", {"edits": edits, "reloadUserConfig": True})
-    print("✓ scoped permission for six local Codex mailbox tools")
+    print(f"✓ scoped permission for {len(TOOLS)} local Codex mailbox tools")
 
 
 def install_login_startup(home: Path, base: Path, script: Path, *, stdio: bool, dry_run: bool) -> None:
