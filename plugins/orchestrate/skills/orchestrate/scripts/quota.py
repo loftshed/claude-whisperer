@@ -1,6 +1,6 @@
-"""Live subscription quota per executor route, read from ai-usage at decision time. Nothing is stored.
+"""Live subscription quota per executor route, read from monitor at decision time. Nothing is stored.
 
-ai-usage (claude-whisperer/plugins/ai-usage) reports each account's rate-limit windows and ranks its
+monitor (claude-whisperer/plugins/monitor) reports each account's rate-limit windows and ranks its
 pools. This module maps an engine and model onto the pool that pays for it, so the conductor can see
 whether a route can take a run now and the runner can refuse to launch into an exhausted one.
 
@@ -20,27 +20,27 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-SCHEMA_PREFIX = "ai-usage.snapshot."
+SCHEMA_PREFIX = "monitor.snapshot."
 LOW_USABLE_PCT = 10
 EXIT_QUOTA_EXHAUSTED = 15
 OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
 LOW_CREDIT_USD = 1
 
 
-def ai_usage_command() -> str | None:
-    override = os.environ.get("AI_USAGE_BIN")
+def monitor_command() -> str | None:
+    override = os.environ.get("MONITOR_BIN")
     if override:
         return override
-    found = shutil.which("ai-usage")
+    found = shutil.which("monitor")
     if found:
         return found
-    fallback = Path.home() / ".local" / "bin" / "ai-usage"
+    fallback = Path.home() / ".local" / "bin" / "monitor"
     return str(fallback) if os.access(fallback, os.X_OK) else None
 
 
 def snapshot(timeout: float = 60) -> dict[str, Any] | None:
-    """Current ai-usage view, or None when ai-usage is missing or fails. Unknown quota is never zero."""
-    command = ai_usage_command()
+    """Current monitor view, or None when monitor is missing or fails. Unknown quota is never zero."""
+    command = monitor_command()
     if not command:
         return None
     try:
@@ -64,7 +64,7 @@ def snapshot(timeout: float = 60) -> dict[str, Any] | None:
 
 
 def route_for(engine: str, model: str) -> tuple[str, str | None] | None:
-    """(ai-usage provider, pool id) that pays for a run, or None for metered/unmonitored engines."""
+    """(monitor provider, pool id) that pays for a run, or None for metered/unmonitored engines."""
     lowered = model.lower()
     if engine == "codex":
         return "codex", None
@@ -80,13 +80,13 @@ def route_for(engine: str, model: str) -> tuple[str, str | None] | None:
 
 
 def pool_lanes(engine: str, model: str, view: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every account's lane for this route, best first (ai-usage ranks lanes)."""
+    """Every account's lane for this route, best first (monitor ranks lanes)."""
     route = route_for(engine, model)
     if route is None:
         return []
     provider, pool = route
     accounts = {account["id"]: account for account in view.get("accounts", [])}
-    # An "error" lane means ai-usage has no data for that account at all: unknown, not empty.
+    # An "error" lane means monitor has no data for that account at all: unknown, not empty.
     lanes = [
         lane
         for lane in view.get("lanes", [])
@@ -158,7 +158,7 @@ def check(
     if route_for(engine, model) is None:
         return {"status": "not_applicable", "detail": f"{engine} bills per request; no subscription window to check"}
     if view is None:
-        return {"status": "unknown", "detail": "ai-usage is not installed or did not answer"}
+        return {"status": "unknown", "detail": "monitor is not installed or did not answer"}
     lanes = pool_lanes(engine, model, view)
     if not lanes:
         provider = route_for(engine, model)[0]
@@ -168,7 +168,7 @@ def check(
             for lane in view.get("lanes", [])
             if lane.get("status") == "error" and providers.get(lane.get("accountId")) == provider
         ]
-        detail = failed[0].get("advice") if failed else f"ai-usage has no pool for {engine} {model}"
+        detail = failed[0].get("advice") if failed else f"monitor has no pool for {engine} {model}"
         return {"status": "unknown", "detail": detail}
     lane = _match_claude_lane(lanes, claude_config_dir) if engine == "claude" else lanes[0]
     return {"status": assess(lane), **summary(lane)}
@@ -334,7 +334,7 @@ def access_records(
                         "engine": engine,
                         "available": True,
                         "observed_at": observed_at,
-                        "source": "ai-usage:unknown",
+                        "source": "monitor:unknown",
                         "billing_mode": "unknown",
                         "quota": None,
                     }
@@ -355,7 +355,7 @@ def access_records(
                         "engine": engine,
                         "available": status != "blocked",
                         "observed_at": observed_at,
-                        "source": f"ai-usage:{lane['accountId']}",
+                        "source": f"monitor:{lane['accountId']}",
                         "billing_mode": billing_mode,
                         "quota": {"status": status, **summary(lane)},
                     }

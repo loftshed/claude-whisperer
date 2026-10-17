@@ -201,7 +201,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--ignore-quota",
         action="store_true",
-        help="Launch even when ai-usage reports the route's subscription quota as exhausted",
+        help="Launch even when monitor reports the route's subscription quota as exhausted",
     )
     parser.add_argument(
         "--variant",
@@ -3201,7 +3201,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
         "clis": clis,
         "routes_config": str(routes_module().config_path()),
         "routes": routes_module().load_routes(),
-        "ai_usage": quota.ai_usage_command(),
+        "monitor": quota.monitor_command(),
         "cache_dir": str(default_agent_cache_dir()),
         "skill_installs": installs,
         "stale_copies": [loc for loc, info in installs.items() if not info["same_as_this"]],
@@ -3212,14 +3212,14 @@ def doctor_main(argv: list[str] | None = None) -> int:
     if args.format == "json":
         print(json.dumps(report, indent=2))
         return 0
-    print(f"agent-executor {RUNNER_VERSION} at {skill_dir}")
+    print(f"orchestrate {RUNNER_VERSION} at {skill_dir}")
     print(f"host: {', '.join(report['host'])}")
     for engine, info in clis.items():
         print(
             f"  {engine:<9} {info['executable'] or 'not installed'}{'  ' + info['version'] if info['version'] else ''}"
         )
     print(f"routes: {report['routes_config']} ({len(report['routes'])} roles; run `routes` for detail)")
-    print(f"quota source: {report['ai_usage'] or 'ai-usage not installed (quota unknown, runs not blocked)'}")
+    print(f"quota source: {report['monitor'] or 'monitor not installed (quota unknown, runs not blocked)'}")
     print(f"cache: {report['cache_dir']}")
     if messaging_check is not None:
         print(f"mailbox check: {len(messaging_check['round_trips'])} message/reply round trips passed")
@@ -3237,7 +3237,7 @@ def doctor_main(argv: list[str] | None = None) -> int:
 def quota_gate(engine: str, model: str, *, ignore: bool, claude_config_dir: Path | str | None = None) -> None:
     """Refuse to launch into an exhausted subscription pool and warn when little is usable now.
 
-    Quota is read live from ai-usage and never stored. Missing ai-usage means unknown quota, which
+    Quota is read live from monitor and never stored. Missing monitor means unknown quota, which
     does not block a run. A pool whose included allowance is used up but that has a credit balance
     (Codex) is not exhausted: the run goes ahead, metered against the balance, and says so.
     """
@@ -3267,7 +3267,7 @@ def quota_gate(engine: str, model: str, *, ignore: bool, claude_config_dir: Path
 def quota_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog=f"{Path(__file__).name} quota",
-        description="Live subscription quota for each executor route, read from ai-usage. Nothing is stored.",
+        description="Live subscription quota for each executor route, read from monitor. Nothing is stored.",
     )
     parser.add_argument("--format", choices=("text", "json"), default="text")
     args = parser.parse_args(argv)
@@ -3278,7 +3278,7 @@ def quota_main(argv: list[str] | None = None) -> int:
         print(
             json.dumps(
                 {
-                    "source": "ai-usage" if view else None,
+                    "source": "monitor" if view else None,
                     "generated_at": view.get("generatedAt") if view else None,
                     "routes": rows,
                 },
@@ -3287,7 +3287,7 @@ def quota_main(argv: list[str] | None = None) -> int:
         )
         return 0
     if view is None:
-        print("ai-usage is not installed or did not answer: quota unknown, runs are not blocked.")
+        print("monitor is not installed or did not answer: quota unknown, runs are not blocked.")
     for row in rows:
         head = f"{row['engine']:<21} {row['models']:<21}"
         if row["engine"] == "opencode" or row["status"] in ("not_applicable", "unknown"):

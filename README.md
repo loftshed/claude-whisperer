@@ -4,7 +4,7 @@ Private personal plugin marketplace and versioned skill backup.
 
 | Plugin                                                | Version | What it does                                                                                                                               |
 | ----------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`ai-usage`](plugins/ai-usage/README.md)              | 0.11.0  | Remaining quota across Claude Code profiles, Codex and Antigravity, and where to spend it: MCP server, skill, CLI/TUI, macOS menu bar app. |
+| [`monitor`](plugins/monitor/README.md)                | 0.11.0  | Remaining quota across Claude Code profiles, Codex and Antigravity, and where to spend it: MCP server, skill, CLI/TUI, macOS menu bar app. |
 | [`bailout`](plugins/bailout/skills/bailout/README.md) | 1.2.0   | Manual handoffs and automatic usage checkpoints that stay inactive until you explicitly arm the session.                                   |
 | `orchestrate`                                         | 0.20.0  | Bounded agent execution, consultation, evidence, and audit across Codex, Antigravity, Claude Code and OpenCode.                            |
 
@@ -13,10 +13,10 @@ orchestrate adds a native `claude` engine, keeps hosted models off OpenRouter, r
 ```text
 /plugin marketplace add loftshed/claude-whisperer
 /plugin install orchestrate@claude-whisperer
-/plugin install ai-usage@claude-whisperer
+/plugin install monitor@claude-whisperer
 ```
 
-ai-usage also has a CLI, a menu bar app and MCP registrations for Codex and agy, installed from a checkout: see [its README](plugins/ai-usage/README.md#install).
+monitor also has a CLI, a menu bar app and MCP registrations for Codex and agy, installed from a checkout: see [its README](plugins/monitor/README.md#install).
 
 ## Development
 

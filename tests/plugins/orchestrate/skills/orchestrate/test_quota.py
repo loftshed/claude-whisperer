@@ -55,9 +55,9 @@ CODEX_ON_CREDITS = lane(
 
 
 def view() -> dict:
-    """Shape of `ai-usage json` (schema ai-usage.snapshot.v1), lanes ranked best first."""
+    """Shape of `monitor json` (schema monitor.snapshot.v1), lanes ranked best first."""
     return {
-        "schema": "ai-usage.snapshot.v1",
+        "schema": "monitor.snapshot.v1",
         "generatedAt": "2026-09-25T17:00:00.000Z",
         "accounts": [
             {"id": "claude-work", "provider": "claude", "billing": "work"},
@@ -152,7 +152,7 @@ class CheckTests(unittest.TestCase):
         self.assertEqual((record["available"], record["billing_mode"]), (True, "credits"))
         self.assertEqual(record["quota"]["status"], "credits")
 
-    def test_an_account_ai_usage_could_not_read_is_unknown_not_low(self) -> None:
+    def test_an_account_monitor_could_not_read_is_unknown_not_low(self) -> None:
         failed = view()
         failed["lanes"][4] = {
             "label": "Codex · ChatGPT",
@@ -170,7 +170,7 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(result, {"status": "unknown", "detail": "no data: codex app-server exited 1"})
         registry = {"profiles": [{"id": "luna", "model_ids": ["gpt-5.6-luna"], "roles": ["implementation"]}]}
         [record] = QUOTA.access_records(failed, registry)
-        self.assertEqual((record["available"], record["source"]), (True, "ai-usage:unknown"))
+        self.assertEqual((record["available"], record["source"]), (True, "monitor:unknown"))
 
     def test_claude_config_dir_selects_matching_account_pool(self) -> None:
         current = view()
@@ -225,29 +225,29 @@ class RecommendTests(unittest.TestCase):
         # Gemini has 6% usable (low): Codex on credits can finish a task, so it comes first.
         self.assertEqual(
             self.recommend(current),
-            [("gpt-5.6-luna", "ai-usage:codex"), ("gemini-3.8-flash-medium", "ai-usage:antigravity")],
+            [("gpt-5.6-luna", "monitor:codex"), ("gemini-3.8-flash-medium", "monitor:antigravity")],
         )
         current["lanes"][3] = lane("antigravity", "gemini", "Antigravity · Gemini", usable=60, surplus=2)
         # Free quota with room goes first: it is lost at the rollover, credits are not.
         self.assertEqual(
             self.recommend(current),
-            [("gemini-3.8-flash-medium", "ai-usage:antigravity"), ("gpt-5.6-luna", "ai-usage:codex")],
+            [("gemini-3.8-flash-medium", "monitor:antigravity"), ("gpt-5.6-luna", "monitor:codex")],
         )
 
     def test_live_access_drops_blocked_pools_and_personal_quota_by_default(self) -> None:
         # Codex has room; Gemini is low (6% usable), so it ranks after despite more unused capacity.
         self.assertEqual(
-            self.recommend(), [("gpt-5.6-luna", "ai-usage:codex"), ("gemini-3.8-flash-medium", "ai-usage:antigravity")]
+            self.recommend(), [("gpt-5.6-luna", "monitor:codex"), ("gemini-3.8-flash-medium", "monitor:antigravity")]
         )
 
     def test_personal_quota_joins_when_authorized_and_ranks_by_unused_capacity(self) -> None:
         self.assertEqual(
-            self.recommend(personal_quota_authorized=True)[0], ("claude-sonnet-5", "ai-usage:claude-personal")
+            self.recommend(personal_quota_authorized=True)[0], ("claude-sonnet-5", "monitor:claude-personal")
         )
 
-    def test_without_ai_usage_access_is_unknown_not_zero(self) -> None:
+    def test_without_monitor_access_is_unknown_not_zero(self) -> None:
         records = QUOTA.access_records(None, self.registry)
-        self.assertTrue(all(record["available"] and record["source"] == "ai-usage:unknown" for record in records))
+        self.assertTrue(all(record["available"] and record["source"] == "monitor:unknown" for record in records))
 
 
 class OpenRouterCreditTests(unittest.TestCase):
@@ -289,19 +289,19 @@ class OpenRouterCreditTests(unittest.TestCase):
 
 
 class RunnerGateTests(unittest.TestCase):
-    def fake_ai_usage(self, directory: str, payload: dict) -> str:
-        script = Path(directory) / "ai-usage"
+    def fake_monitor(self, directory: str, payload: dict) -> str:
+        script = Path(directory) / "monitor"
         script.write_text(f"#!/bin/sh\ncat <<'EOF'\n{json.dumps(payload)}\nEOF\n")
         script.chmod(0o755)
         return str(script)
 
-    def test_snapshot_reads_ai_usage_and_rejects_unknown_schemas(self) -> None:
+    def test_snapshot_reads_monitor_and_rejects_unknown_schemas(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            with mock.patch.dict(os.environ, {"AI_USAGE_BIN": self.fake_ai_usage(directory, view())}):
-                self.assertEqual(QUOTA.snapshot()["schema"], "ai-usage.snapshot.v1")
-            with mock.patch.dict(os.environ, {"AI_USAGE_BIN": self.fake_ai_usage(directory, {"schema": "other"})}):
+            with mock.patch.dict(os.environ, {"MONITOR_BIN": self.fake_monitor(directory, view())}):
+                self.assertEqual(QUOTA.snapshot()["schema"], "monitor.snapshot.v1")
+            with mock.patch.dict(os.environ, {"MONITOR_BIN": self.fake_monitor(directory, {"schema": "other"})}):
                 self.assertIsNone(QUOTA.snapshot())
-        with mock.patch.dict(os.environ, {"AI_USAGE_BIN": "/nonexistent/ai-usage"}):
+        with mock.patch.dict(os.environ, {"MONITOR_BIN": "/nonexistent/monitor"}):
             self.assertIsNone(QUOTA.snapshot())
 
     def test_gate_refuses_an_exhausted_pool_with_exit_15_unless_ignored(self) -> None:
@@ -310,7 +310,7 @@ class RunnerGateTests(unittest.TestCase):
             "codex", "codex", "Codex · ChatGPT", status="blocked", usable=0, blocked_until="2026-09-29T14:45:00.000Z"
         )
         with tempfile.TemporaryDirectory() as directory:
-            with mock.patch.dict(os.environ, {"AI_USAGE_BIN": self.fake_ai_usage(directory, blocked)}):
+            with mock.patch.dict(os.environ, {"MONITOR_BIN": self.fake_monitor(directory, blocked)}):
                 with self.assertRaises(RUNNER.RunnerError) as caught:
                     RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=False)
                 self.assertEqual(caught.exception.exit_code, 15)
@@ -321,7 +321,7 @@ class RunnerGateTests(unittest.TestCase):
         current = view()
         current["lanes"][4] = CODEX_ON_CREDITS
         with tempfile.TemporaryDirectory() as directory:
-            with mock.patch.dict(os.environ, {"AI_USAGE_BIN": self.fake_ai_usage(directory, current)}):
+            with mock.patch.dict(os.environ, {"MONITOR_BIN": self.fake_monitor(directory, current)}):
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
                     RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=False)
@@ -339,7 +339,7 @@ class RunnerGateTests(unittest.TestCase):
                 self.assertIn("credits   on credits, 62,168.59 cr left  Codex · ChatGPT: on pace", codex_row)
 
     def test_gate_lets_runs_through_when_quota_is_unknown(self) -> None:
-        with mock.patch.dict(os.environ, {"AI_USAGE_BIN": "/nonexistent/ai-usage"}):
+        with mock.patch.dict(os.environ, {"MONITOR_BIN": "/nonexistent/monitor"}):
             RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=False)
 
 

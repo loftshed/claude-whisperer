@@ -22,9 +22,9 @@ from unittest import mock
 SKILL_DIR = Path(__file__).resolve().parents[5] / "plugins" / "orchestrate" / "skills" / "orchestrate"
 SCRIPT = SKILL_DIR / "scripts" / "run_agent.py"
 FIXTURES = Path(__file__).parent / "fixtures"
-# Runner tests must never query real subscription accounts through ai-usage; test_quota.py sets
+# Runner tests must never query real subscription accounts through monitor; test_quota.py sets
 # its own fake per test.
-os.environ["AI_USAGE_BIN"] = str(Path(__file__).parent / "no-ai-usage")
+os.environ["MONITOR_BIN"] = str(Path(__file__).parent / "no-monitor")
 # Routes and families come from the bundled defaults only, never the developer's own config.
 os.environ["AGENT_EXECUTOR_CONFIG"] = str(Path(tempfile.mkdtemp()) / "absent-config.json")
 SPEC = importlib.util.spec_from_file_location("agent_executor_runner", SCRIPT)

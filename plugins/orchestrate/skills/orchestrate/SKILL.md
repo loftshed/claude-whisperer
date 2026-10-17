@@ -128,7 +128,7 @@ substituting. See [references/runner.md](references/runner.md#model-catalogs).
 python3 <skill-directory>/scripts/run_agent.py quota
 ```
 
-It reads live [ai-usage](https://github.com/loftshed/claude-whisperer/tree/main/plugins/ai-usage) data.
+It reads live [monitor](https://github.com/loftshed/claude-whisperer/tree/main/plugins/monitor) data.
 The route table decides which models fit the task; quota only chooses among fitting routes and never
 justifies a weaker model. Prefer pools marked expiring (capacity lost at the weekly rollover), then the
 most unused capacity. The runner refuses a blocked pool (exit 15; `--ignore-quota` only on the user's
@@ -137,7 +137,7 @@ blocked: the run goes ahead, metered against the balance, and prints `AGENT_LIFE
 with the balance. When the user asked for that route, launch it and note the credits in one line of
 the report ("on credits, 62,168 cr left"), nothing more; only choose it yourself when no fitting route
 has free quota, since it ranks after pools with free quota. Never switch billing context (work vs
-personal account) on quota grounds without the user. Without ai-usage, quota is unknown and runs
+personal account) on quota grounds without the user. Without monitor, quota is unknown and runs
 proceed.
 The `opencode` row is the OpenRouter account's remaining dollar credit (key from `OPENROUTER_API_KEY` or
 OpenCode's `auth.json`; the sandbox needs `openrouter.ai` allowed). It is informational: the launch gate
