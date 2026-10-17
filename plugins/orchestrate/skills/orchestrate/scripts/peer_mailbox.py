@@ -1480,7 +1480,11 @@ def render_all(found: list[dict[str, Any]]) -> str:
     if not found:
         return ""
     blocks = "\n\n".join(render(message) for message in found)
-    hint = "Reply with send(to=sender, replyTo=id); use your native way of messaging within your harness."
+    hint = (
+        "Reply only when an answer or action is needed, using send(to=sender, replyTo=id). "
+        "Use wake=false for FYI or progress updates; do not send acknowledgement-only replies. "
+        "A completion that unblocks work may need a wake. Use your native way of messaging within your harness."
+    )
     return f"{blocks}\n\n{NOTICE}\n{hint}"
 
 

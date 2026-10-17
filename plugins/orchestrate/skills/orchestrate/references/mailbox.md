@@ -105,8 +105,10 @@ See the [MCP audit](../../../../../docs/mailbox-mcp-audit.md) for verification a
 
 ## Wake an idle peer
 
-MCP `send` wakes the receiver by default; set `wake: false` for quiet delivery. The CLI equivalent
-is `mailbox send --no-wake`. Mail is saved before activation is attempted, and the result includes a
+MCP `send` wakes the receiver by default. Use `wake: false` for FYI and progress updates.
+Do not send acknowledgement-only replies. Requests and completions that unblock work should still wake
+the recipient. The CLI equivalent is `mailbox send --no-wake`.
+Mail is saved before activation is attempted, and the result includes a
 `wake` status: `scheduled` (queue accepted it), `queued` (busy Codex), `unsupported`, or
 `unavailable`. A wake failure leaves the message unread for normal delivery.
 
@@ -119,6 +121,9 @@ already loaded there; it never resumes a second copy of a terminal session. Busy
 working and receive mail at their next hook boundary. OpenCode v2 admits the notification with
 `delivery: queue`, which wakes an idle session and defers a busy one. Neither adapter interrupts a
 turn, changes the model, or changes permissions. Waking an idle peer can use its model quota.
+Codex and OpenCode serialize wake admission per recipient and reuse an existing pending mailbox
+notification. They recheck unread mail before admission. Queue inspection failure leaves mail queued
+without scheduling another turn. Mail consumed after admission can still leave one redundant turn.
 
 Claude and Gemini/Antigravity use a persistent streaming listener. Launch it once in the project:
 

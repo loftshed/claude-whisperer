@@ -2793,6 +2793,22 @@ def write_run_result(result_path: Path, result: dict[str, Any]) -> None:
         write_json_atomic(result_path, result)
 
 
+def attach_tariff_estimate(result: dict[str, Any]) -> None:
+    """Add the reference tariff estimate for the result's reported usage; a missing registry is a gap, not a failure."""
+    usage_module = bundled_module("usage")
+    registry_path = Path(__file__).parents[1] / "references" / "model-registry.json"
+    try:
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        result["tariff_estimate"] = usage_module.estimate_tariff(
+            result["usage"],
+            result.get("model", ""),
+            registry,
+            billing_mode=result.get("billing_mode", "unknown"),
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        result["tariff_estimate"] = {"estimated_usd": None, "gaps": ["tariff_registry_unavailable_or_invalid"]}
+
+
 # The segment a detached runner is on, so an uncaught failure publishes to the event people wait on.
 _ACTIVE_SEGMENT: dict[str, Path] = {}
 
@@ -2806,19 +2822,8 @@ def finish_run(
     completion_hook: Path | None,
     extra_event_fields: dict[str, Any] | None = None,
 ) -> int:
-    usage_module = bundled_module("usage")
-    result.setdefault("usage", usage_module.empty())
-    registry_path = Path(__file__).parents[1] / "references" / "model-registry.json"
-    try:
-        registry = json.loads(registry_path.read_text(encoding="utf-8"))
-        result["tariff_estimate"] = usage_module.estimate_tariff(
-            result["usage"],
-            result.get("model", ""),
-            registry,
-            billing_mode=result.get("billing_mode", "unknown"),
-        )
-    except (OSError, ValueError, KeyError, TypeError):
-        result["tariff_estimate"] = {"estimated_usd": None, "gaps": ["tariff_registry_unavailable_or_invalid"]}
+    result.setdefault("usage", bundled_module("usage").empty())
+    attach_tariff_estimate(result)
     write_run_result(result_path, result)
     if completion_event_path is not None:
         publish_completion_event(
@@ -2913,15 +2918,16 @@ def prune_state(older_than_seconds: float, *, dry_run: bool = False) -> dict[str
     directories they point to, are always kept: they are results nobody has reviewed yet."""
     cache = default_agent_cache_dir()
     cutoff = time.time() - older_than_seconds
-    removed = {"events": 0, "jobs": 0, "runs": 0, "locks": 0, "mailbox": 0, "bytes": 0}
+    removed = {"events": 0, "jobs": 0, "runs": 0, "consults": 0, "locks": 0, "mailbox": 0, "bytes": 0}
     protected: set[Path] = set()
+    job_roots = (cache / "jobs-v1", cache / "consults-v1")
     for event_path in sorted((cache / "completions-v1").glob("*.json")):
         try:
             event = json.loads(event_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         result_path = Path(str(event.get("result_path") or ""))
-        job_dir = next((parent for parent in result_path.parents if parent.parent == cache / "jobs-v1"), None)
+        job_dir = next((parent for parent in result_path.parents if parent.parent in job_roots), None)
         if not event.get("acknowledged_at") or event_path.stat().st_mtime > cutoff:
             if job_dir is not None:
                 protected.add(job_dir)
@@ -2931,7 +2937,11 @@ def prune_state(older_than_seconds: float, *, dry_run: bool = False) -> dict[str
         if not dry_run:
             event_path.unlink(missing_ok=True)
             (event_path.parent / "channels" / event_path.name).unlink(missing_ok=True)
-    for kind, directory in (("jobs", cache / "jobs-v1"), ("runs", cache / "runs-v1")):
+    for kind, directory in (
+        ("jobs", cache / "jobs-v1"),
+        ("runs", cache / "runs-v1"),
+        ("consults", cache / "consults-v1"),
+    ):
         for entry in sorted(directory.glob("*")) if directory.is_dir() else []:
             if not entry.is_dir() or entry in protected or entry.stat().st_mtime > cutoff:
                 continue
@@ -3574,6 +3584,9 @@ def main() -> int:
         return bundled_module("mailbox_listener").main(argv[1:])
     if argv and argv[0] == "steer":
         return steer_main(argv[1:])
+    if argv and argv[0] == "consult":
+        auto_prune()
+        return bundled_module("consult").main(argv[1:])
     if argv and argv[0] == "models":
         return models_main(argv[1:])
     if argv and argv[0] == "events":
