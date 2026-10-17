@@ -146,6 +146,18 @@
         "Does not route DeepSeek through Codex, Antigravity or Claude Code.",
         "Reports the resolved model ID from the result."
       ]
+    },
+    {
+      "id": 22,
+      "prompt": "You are in Claude. I'm unsure whether our flock-based lease survives a fork. Ask GPT Sol what it thinks, with scripts/execution_support.py as context, and tell me what it said. Don't change anything.",
+      "expected_output": "Uses `run_agent.py consult` with the question, the file as an attachment and `--model gpt:sol`, not a task spec or an implementation run. Reports the answer as the consultant's, with its UNCERTAINTY section and the model recorded in the result, and treats it as advice rather than as approval to change code.",
+      "files": [],
+      "expectations": [
+        "Uses the consult command rather than a delegation brief or task spec.",
+        "Attaches the file and passes the GPT Sol selector without inventing a versioned ID.",
+        "Reports the answer, the uncertainty and the model that answered.",
+        "Makes no edits on the strength of the answer."
+      ]
     }
   ]
 }

@@ -28,3 +28,7 @@ plasmoid
 cwds
 urandom
 RDWR
+pypirc
+todowrite
+todoread
+multiedit

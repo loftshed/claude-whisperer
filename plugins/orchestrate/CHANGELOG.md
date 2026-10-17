@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Add `run_agent.py consult`: one focused question to a more capable model, with inline context and
+  text attachments, answered once with the model that answered and its stated uncertainty. The
+  consultant has no write permission (Codex read-only sandbox, Claude Code without tools or MCP
+  servers, Antigravity plan mode, OpenCode on a private server with its tools disabled; each
+  checked live with a write probe). `--intent investigate` and `--intent
+review` with `--read <repo>` (and `--diff`) reuse the same mechanism with read tools in one
+  repository, returning findings with evidence; a changed repository is reported, not judged.
+  Explicit models, effort and Claude profiles are kept, and pinned across `--follow-up` with the
+  intent and repository; a model the calling harness runs itself is handed back to its native agent
+  tools; `--detach` resolves the model first and publishes a completion event. Attachments named
+  or located like credentials are refused on the given and the resolved path. Implementation
+  delegation keeps its separate scoped, audited and verified workflow.
+
 ## 0.21.0
 
 - feat!: rename ai-usage to monitor, round remaining days, and add icon-only bar mode
