@@ -57,8 +57,8 @@ once; JSON duplication is an explicit compatibility choice. Waiting polls locall
 From the repository root:
 
 ```sh
-TMPDIR=/private/tmp python3 -B -m unittest discover -s tests/plugins/agent-executor/skills/agent-executor -p 'test_*.py'
-python3 plugins/agent-executor/skills/agent-executor/scripts/run_agent.py mailbox daemon --help
+TMPDIR=/private/tmp python3 -B -m unittest discover -s tests/plugins/orchestrate/skills/orchestrate -p 'test_*.py'
+python3 plugins/orchestrate/skills/orchestrate/scripts/run_agent.py mailbox daemon --help
 ```
 
 The canonical macOS temp path avoids the existing `/var` versus `/private/var` installer comparison.

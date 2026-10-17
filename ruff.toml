@@ -1,4 +1,4 @@
-# Python lives in the agent-executor skill (standard library only) and its tests.
+# Python lives in the orchestrate skill (standard library only) and its tests.
 target-version = "py311"
 line-length = 120
 

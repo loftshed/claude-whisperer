@@ -13,7 +13,7 @@ Reference: [plugin marketplaces](https://code.claude.com/docs/en/plugin-marketpl
 ```sh
 yarn install   # dev tools, plus the git hooks
 yarn check     # the lint gate (scripts/check.sh); CI runs the same script
-yarn test      # Vitest for JavaScript, unittest for the agent-executor Python (scripts/test.sh)
+yarn test      # Vitest for JavaScript, unittest for the orchestrate Python (scripts/test.sh)
 node scripts/release.js plan   # what the next release would publish
 ```
 

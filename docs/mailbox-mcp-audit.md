@@ -62,16 +62,16 @@ file-handle ResourceWarnings while passing.
 From the repository root:
 
 ```sh
-python3 -B -m unittest discover -s tests/plugins/agent-executor/skills/agent-executor -p 'test_mailbox*.py'
-python3 -B -m unittest discover -s tests/plugins/agent-executor/skills/agent-executor -p 'test_*.py'
+python3 -B -m unittest discover -s tests/plugins/orchestrate/skills/orchestrate -p 'test_mailbox*.py'
+python3 -B -m unittest discover -s tests/plugins/orchestrate/skills/orchestrate -p 'test_*.py'
 ```
 
-The [evaluation XML](../tests/plugins/agent-executor/skills/agent-executor/evaluations/evaluation.xml)
-contains ten stable questions and answer keys. Its [synthetic snapshot](../tests/plugins/agent-executor/skills/agent-executor/evaluations/snapshot.json)
+The [evaluation XML](../tests/plugins/orchestrate/skills/orchestrate/evaluations/evaluation.xml)
+contains ten stable questions and answer keys. Its [synthetic snapshot](../tests/plugins/orchestrate/skills/orchestrate/evaluations/snapshot.json)
 is served in a temporary Git project:
 
 ```sh
-python3 -B tests/plugins/agent-executor/skills/agent-executor/mailbox_evaluation_server.py
+python3 -B tests/plugins/orchestrate/skills/orchestrate/mailbox_evaluation_server.py
 ```
 
 Use current-spec discovery and tool calls with `session: "investigator"`. Only `peers` and

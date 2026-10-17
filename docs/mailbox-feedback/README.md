@@ -8,7 +8,7 @@ themselves or wake another agent.
 Review the collector from this checkout:
 
 ```bash
-python3 plugins/agent-executor/skills/agent-executor/scripts/run_agent.py mailbox feedback-summary --scope cross-project --format json
+python3 plugins/orchestrate/skills/orchestrate/scripts/run_agent.py mailbox feedback-summary --scope cross-project --format json
 ```
 
 Agent reports answer three questions: what were you trying to achieve, what went wrong, and what
@@ -30,4 +30,4 @@ Configure `mailbox_feedback.directory` in the existing agent-executor config to 
 project. CLI calls and hooks pick up configuration on their next invocation. Restart an existing
 mailbox MCP server to load the new tool and recorder.
 
-See the [tool and configuration reference](../../plugins/agent-executor/skills/agent-executor/references/mailbox.md#communication-feedback).
+See the [tool and configuration reference](../../plugins/orchestrate/skills/orchestrate/references/mailbox.md#communication-feedback).
