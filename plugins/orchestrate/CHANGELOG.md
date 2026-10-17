@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.20.0
 
 - Harden runner process lifecycle, report extraction, quota lane matching, and model registries:
   stop leaking worktree lock file descriptors to child processes, reap killed process groups, drop

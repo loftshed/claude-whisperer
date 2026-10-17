@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.0
+
+- feat(ai-usage): add a recoverable KDE quota widget
+
 ## 0.10.0
 
 - ChatGPT's exhausted weekly allowance switches to remaining credits in full and compact menu bar pills,
