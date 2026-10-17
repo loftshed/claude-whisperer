@@ -38,8 +38,9 @@ For an authorized executor worker, pass the normal engine permission arguments a
 Claude `--permission-mode bypassPermissions`, Antigravity `--dangerously-skip-permissions`.
 Headless defaults can deny MCP calls; never change global permissions to fix a worker.
 Inspect the returned `wake` status; unavailable hosts retain the message for normal delivery.
-Use `wake: false` (CLI `--no-wake`) for quiet mail. Busy agents keep working; they may acknowledge a
-message and defer its request. Never interrupt their turn or launch a second copy to force delivery.
+Use `wake: false` (CLI `--no-wake`) for FYI and progress updates. Do not send acknowledgement-only
+replies. Keep waking requests and completions that unblock work. Busy agents keep working and can
+defer requests to their next checkpoint. Never interrupt their turn or launch a second copy to force delivery.
 
 ## Native first; OpenRouter only for open-weight models
 
