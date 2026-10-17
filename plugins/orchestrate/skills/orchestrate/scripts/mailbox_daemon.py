@@ -6,6 +6,7 @@ import argparse
 import base64
 import contextlib
 import fcntl
+import functools
 import hashlib
 import hmac
 import http.client
@@ -53,6 +54,7 @@ def store_id(base: Path) -> str:
     return hashlib.sha256(str(base.resolve()).encode()).hexdigest()
 
 
+@functools.cache
 def runtime_revision() -> str:
     digest = hashlib.sha256()
     skill = Path(__file__).resolve().parent.parent
@@ -215,6 +217,12 @@ class HTTPDaemon(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     block_on_close = False
     allow_reuse_address = True
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
 
     def __init__(self, address: tuple[str, int], base: Path, token: str):
         super().__init__(address, DaemonHandler)
@@ -743,7 +751,7 @@ def start_daemon_process(base: Path, port: int) -> None:
         threading.Thread(target=child.wait, daemon=True).start()
 
 
-def ensure_running(base: Path, port: int = 0, *, startup_timeout: float = 5) -> dict[str, Any]:
+def ensure_running(base: Path, port: int = 0, *, startup_timeout: float = 15) -> dict[str, Any]:
     base = base.expanduser().resolve()
     if type(port) is not int or not 0 <= port <= 65535 or port in RESERVED_PORTS:
         raise mailbox.MailboxError("choose an available, unreserved port or zero for first startup")

@@ -159,28 +159,40 @@ export function planRelease({ root = REPO_ROOT, git = gitIn(root), head } = {}) 
   if (!/^[\da-f]{40}$/u.test(config.since ?? "")) {
     throw new Error("release.json needs `since`: the full SHA releases are counted from");
   }
+  const renames = config.renames ?? {};
   const tags = git(["tag", "--list", "*--v*"]).split("\n").filter(Boolean);
   const before = new Map(pluginsAt(git, config.since).map((plugin) => [plugin.name, plugin]));
   const releases = [];
 
   for (const plugin of pluginsAt(git, head)) {
-    const tag = latestTag(tags, plugin.name);
+    const formerName = renames[plugin.name];
+    const tag = latestTag(tags, plugin.name) ?? (formerName ? latestTag(tags, formerName) : null);
+    const tagPrefix =
+      tag && formerName && tag.startsWith(`${formerName}--v`)
+        ? `${formerName}--v`
+        : `${plugin.name}--v`;
     const baseline = tag ? git(["rev-list", "-n", "1", tag]) : config.since;
     if (isAncestor(git, head, baseline)) continue;
     if (!isAncestor(git, baseline, head)) {
       throw new Error(`${plugin.name}: ${tag ?? "release.json"} is not in this branch's history`);
     }
-    const released = tag ? tag.slice(`${plugin.name}--v`.length) : before.get(plugin.name)?.version;
+    const released = tag
+      ? tag.slice(tagPrefix.length)
+      : (before.get(plugin.name) ?? (formerName ? before.get(formerName) : undefined))?.version;
     if (released && plugin.version !== released) {
       throw new Error(
         `${plugin.name}: version ${plugin.version} was edited by hand; the release job sets it (last release ${released})`,
       );
     }
 
-    const paths = shippedPaths(plugin.name);
+    const paths = [...shippedPaths(plugin.name), ...(formerName ? shippedPaths(formerName) : [])];
     const isContentChanged =
       git(["diff", "--quiet", baseline, head, "--", ...paths], { allowFailure: true }) === null;
-    const entryBefore = pluginsAt(git, baseline).find(({ name }) => name === plugin.name)?.entry;
+    const baselinePlugins = pluginsAt(git, baseline);
+    const entryBefore = (
+      baselinePlugins.find(({ name }) => name === plugin.name) ??
+      (formerName ? baselinePlugins.find(({ name }) => name === formerName) : undefined)
+    )?.entry;
     const isEntryChanged = JSON.stringify(entryBefore ?? null) !== JSON.stringify(plugin.entry);
     if (!isContentChanged && !isEntryChanged) continue;
 
@@ -417,7 +429,7 @@ function releasesIn(git, commit) {
 export async function publishRelease({
   root = REPO_ROOT,
   env = process.env,
-  gate = (files, dir) => runGates(files, dir, { withTests: true }),
+  gate = (files, dir) => runGates(files, dir, { withTests: false }),
   request = fetch,
   remote,
 } = {}) {

@@ -225,6 +225,31 @@ describe("releases in a repository", () => {
     expect(() => planRelease({ root })).toThrow("not in this branch's history");
   });
 
+  test("a renamed plugin continues version progression from its former tag", () => {
+    commit("fix: one", "plugins/one/skills/one/SKILL.md");
+    writeRelease(planRelease({ root }), root);
+    commit(RELEASE_SUBJECT);
+    git(["tag", "one--v0.3.1"]);
+
+    git(["mv", "plugins/one", "plugins/renamed"]);
+    put("plugins/renamed/.claude-plugin/plugin.json", { name: "renamed", version: "0.3.1" });
+    const marketplace = json(".claude-plugin/marketplace.json");
+    marketplace.plugins[0] = {
+      description: "renamed",
+      name: "renamed",
+      source: "./plugins/renamed",
+    };
+    put(".claude-plugin/marketplace.json", marketplace);
+    put("README.md", read("README.md").replace("`one`", "`renamed`"));
+    put("release.json", { renames: { renamed: "one" }, since });
+    commit("feat: rename one to renamed", "plugins/renamed/skills/one/SKILL.md");
+
+    const plan = planRelease({ root });
+    expect(plan.releases.map(({ name, previous, version }) => [name, previous, version])).toEqual([
+      ["renamed", "0.3.1", "0.4.0"],
+    ]);
+  });
+
   test("check gates the release in a scratch worktree and leaves the checkout alone", () => {
     commit("fix: one", "plugins/one/skills/one/SKILL.md");
     put("scratch.txt", "local work\n");
