@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.22.0
 
 - Add `run_agent.py consult`: one focused question to a more capable model, with inline context and
   text attachments, answered once with the model that answered and its stated uncertainty. The
