@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.21.0
+
+- feat!: rename ai-usage to monitor, round remaining days, and add icon-only bar mode
+
 ## 0.20.0
 
 - Harden runner process lifecycle, report extraction, quota lane matching, and model registries:

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.12.0
 
 - Renamed plugin, CLI, MCP server, skill, macOS menu bar app (`Monitor.app`), and KDE Plasma widget to `monitor` (snapshot schema `monitor.snapshot.v1`).
 - Rounded remaining days in compact pills and status-line output to the nearest day (`Math.round(minutes / 1440)`), so e.g. `4d 22h` and `6d 18h` display as `5d` and `7d` instead of flooring to `4d` and `6d`.
