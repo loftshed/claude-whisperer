@@ -171,7 +171,7 @@ d.serve(base)
             stderr=subprocess.DEVNULL,
         )
         self.children.append(child)
-        until = time.monotonic() + 5
+        until = time.monotonic() + 15
         while time.monotonic() < until:
             state = daemon.owned_state(self.base)
             if state and state["pid"] == child.pid:

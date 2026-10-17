@@ -1,9 +1,20 @@
 # shellcheck shell=sh
+# Refuse direct local pushes to main; all changes go through feature branches and PRs.
+stdin_lines=$(cat)
+if [ "${CI:-}" != "true" ]; then
+  printf '%s\n' "$stdin_lines" | while IFS=' ' read -r _local_ref _local_oid remote_ref _remote_oid; do
+    if [ "$remote_ref" = "refs/heads/main" ]; then
+      echo "pre-push: direct pushes to main are disabled. Push a branch and merge a pull request instead." >&2
+      exit 1
+    fi
+  done || exit 1
+fi
+
 # Husky points this repository's core.hooksPath at .husky/_, which hides a
 # machine-wide hooks directory set in ~/.gitconfig. Forward to its pre-push so
 # a global guard (for example against force-pushing over others' commits) still runs.
 global_hooks=$(git config --global core.hooksPath 2>/dev/null) || exit 0
 global_hooks=$(eval echo "$global_hooks")
 if [ -x "$global_hooks/pre-push" ]; then
-  exec "$global_hooks/pre-push" "$@"
+  printf '%s\n' "$stdin_lines" | exec "$global_hooks/pre-push" "$@"
 fi
