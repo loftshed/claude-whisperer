@@ -1,5 +1,6 @@
 {
   "renames": {
+    "monitor": "ai-usage",
     "orchestrate": "agent-executor"
   },
   "since": "8d021e4b5cfe6f4301beecc61aaf642187c997e9"

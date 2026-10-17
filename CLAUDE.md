@@ -21,7 +21,7 @@ Both scripts call `./node_modules/.bin` directly, so they work without `yarn` on
 
 ## Rules for changes
 
-- **Never edit a plugin version.** Write conventional commit subjects (`feat(ai-usage): …`, `fix: …`, `refactor!: …`); CI releases on `main` and writes every version, changelog heading and tag. Notes under `## Unreleased` in a plugin's `CHANGELOG.md` replace the generated ones. Details: [docs/releases.md](docs/releases.md).
+- **Never edit a plugin version.** Write conventional commit subjects (`feat(monitor): …`, `fix: …`, `refactor!: …`); CI releases on `main` and writes every version, changelog heading and tag. Notes under `## Unreleased` in a plugin's `CHANGELOG.md` replace the generated ones. Details: [docs/releases.md](docs/releases.md).
 - **Tests go in `tests/`**, at the same relative path as the code they cover, never inside `plugins/`: a plugin directory is copied whole on install. JavaScript tests are `*-test.js` files run by Vitest. Files under `tests/**/fixtures/` are captured output; keep them byte-for-byte.
 - **Plugin code is ESM `.mjs`** with Node built-ins only, because it runs from a copied cache with no `package.json` or `node_modules`. Repository tooling in `scripts/` is `.js`. When a script checks whether it is the entry point, compare real paths, since plugins are often started through symlinks.
 - **Let the gate decide style.** ESLint, Prettier, markdownlint, cspell, ruff and shellcheck run on commit and in CI. Fix what a rule reports instead of disabling it; an unavoidable inline disable carries a `-- reason`. New words go in [`project-words.txt`](project-words.txt).

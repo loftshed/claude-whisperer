@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 SKILL_DIR = Path(__file__).resolve().parents[5] / "plugins" / "orchestrate" / "skills" / "orchestrate"
-os.environ["AI_USAGE_BIN"] = str(Path(__file__).parent / "no-ai-usage")
+os.environ["MONITOR_BIN"] = str(Path(__file__).parent / "no-monitor")
 # Families come from the bundled defaults only, never the developer's own config.
 os.environ["AGENT_EXECUTOR_CONFIG"] = str(Path(tempfile.mkdtemp()) / "absent-config.json")
 
