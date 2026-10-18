@@ -230,6 +230,8 @@ def model_name(peer: dict[str, Any]) -> str:
 
 
 def harness_name(peer: dict[str, Any]) -> str:
+    if peer.get("harnessLabel"):
+        return peer["harnessLabel"]
     return {"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode", "gemini": "Gemini / Antigravity"}.get(
         peer.get("harness"), "harness unknown"
     )
@@ -243,6 +245,12 @@ def model_fields(model: str, source: str = "declared") -> dict[str, str]:
     if not isinstance(model, str) or not model.strip() or len(model) > 200:
         raise MailboxError("model must be a nonempty model ID or name of at most 200 characters")
     return {"model": " ".join(model.split()), "modelSource": source}
+
+
+def harness_fields(label: str) -> dict[str, str]:
+    if not isinstance(label, str) or not label.strip() or len(label) > 80:
+        raise MailboxError("harness label must contain at most 80 characters of actual runtime identity")
+    return {"harnessLabel": " ".join(label.split())}
 
 
 def repository_name(peer: dict[str, Any]) -> str:
@@ -777,12 +785,18 @@ def describe_colleagues(rows: list[dict[str, Any]], me: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def set_focus(base: Path, session: str, text: str, *, model: str | None = None) -> dict[str, Any]:
+def set_focus(
+    base: Path, session: str, text: str, *, model: str | None = None, harness_label: str | None = None
+) -> dict[str, Any]:
     """One line on what this session is working on, shown to every agent in the same project."""
     peer = load(peer_path(base, session))
     if valid_peer(peer) and not is_run_peer(peer):
         peer = annotate(
-            base, session, focus=" ".join(text.split())[:200], **(model_fields(model) if model is not None else {})
+            base,
+            session,
+            focus=" ".join(text.split())[:200],
+            **(model_fields(model) if model is not None else {}),
+            **(harness_fields(harness_label) if harness_label is not None else {}),
         )
     if not valid_peer(peer) or is_run_peer(peer):  # also when the session ended in between
         raise MailboxError("register this session before setting its focus")
@@ -1825,7 +1839,10 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__,
         epilog="Name your actual task: mailbox focus --session NATIVE_SESSION_ID --text 'Your actual task'. "
         "This registers CLI presence automatically; update focus when the task changes. "
-        "Peer lists show task, repo, branch and worktree separately; send to the routing name or session ID.",
+        "Refer to peers by their displayed task/model/harness label; route by stable session ID (old names still work). "
+        "Send accepts --text/--message/--body. Wait for a reply with mailbox wait --session ID "
+        "--reply-to MESSAGE_ID --timeout 300, rather than repeated inbox checks. "
+        "Use --no-wake for FYI/progress and avoid acknowledgement-only replies.",
     )
     commands = parser.add_subparsers(dest="action", required=True)
     for name in (
@@ -1858,23 +1875,26 @@ def main(argv: list[str] | None = None) -> int:
         if name == "send":
             sub.add_argument("--no-wake", action="store_true", help="queue mail without waking an idle receiver")
             sub.add_argument("--to", default=os.environ.get("AGENT_MAILBOX_PEER"))
-            sub.add_argument("--text", required=True)
+            sub.add_argument("--text", "--message", "--body", dest="text", required=True)
             sub.add_argument("--kind", choices=("question", "reply", "update"))
             sub.add_argument("--id", help="caller ID for idempotent run-message delivery")
             sub.add_argument("--reply-to")
         if name == "ask":
             sub.add_argument("--to", default=os.environ.get("AGENT_MAILBOX_PEER"))
             sub.add_argument("--id", required=True)
-            sub.add_argument("--text", required=True)
+            sub.add_argument("--text", "--message", "--body", dest="text", required=True)
             sub.add_argument("--timeout", type=float, default=300)
         if name in {"inbox", "wait"}:
             sub.add_argument("--peek", action="store_true", help="leave the messages unread")
         if name == "wait":
-            sub.add_argument("--timeout", type=float, default=300)
+            sub.add_argument(
+                "--timeout", type=float, default=300, help="block locally for mail; no model polling (seconds)"
+            )
             sub.add_argument("--reply-to")
         if name == "ack":
             sub.add_argument("ids", nargs="+")
         if name == "focus":
+            sub.add_argument("--harness-label", help="actual host name, e.g. Antigravity; omit if not known")
             sub.add_argument("--model", help="current model ID/name verified from your runtime; omit if unknown")
             sub.add_argument(
                 "--text",
@@ -1916,7 +1936,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(table(rows, session_arg(args), args.harness or detect_harness(), here=me, scope=args.scope))
                 return 0
             output = [
-                {**peer, "displayName": display_name(peer), "repositoryName": repository_name(peer)} for peer in rows
+                {
+                    **peer,
+                    "displayName": display_name(peer),
+                    "displayLabel": display_label(peer),
+                    "repositoryName": repository_name(peer),
+                }
+                for peer in rows
             ]
         else:
             me = caller(args, base)
@@ -1983,7 +2009,9 @@ def main(argv: list[str] | None = None) -> int:
                 elif args.action == "focus":
                     if is_run_peer(me):
                         raise MailboxError("focus is for interactive sessions")
-                    output = set_focus(base, me["session"], args.text, model=args.model)
+                    output = set_focus(
+                        base, me["session"], args.text, model=args.model, harness_label=args.harness_label
+                    )
                 elif args.action == "history":
                     if not is_run_peer(me):
                         raise MailboxError("history is only supported for run sessions")
