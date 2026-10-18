@@ -92,22 +92,30 @@ class ContractTests(unittest.TestCase):
         return MAILBOX.send(self.base, sender=self.sender, to=self.reader["name"], text=text, reply_to=reply_to)
 
     def test_registration_focus_and_peer_display_names_preserve_old_clients(self):
-        args = {"cwd": os.getcwd(), "harness": "codex", "focus": "Designer · translation parity", "model": "gpt-6-sol"}
+        args = {
+            "cwd": os.getcwd(),
+            "harness": "codex",
+            "focus": "Designer · translation parity",
+            "model": "gpt-6-sol",
+            "harnessLabel": "Codex CLI",
+        }
         registered = self.tool("register", args)["result"]
         self.assertEqual(registered["structuredContent"], {"session": "fixture-reader"})
         rows = self.tool("peers")["result"]
         reader = next(p for p in rows["structuredContent"]["peers"] if p["session"] == "fixture-reader")
         self.assertEqual(reader["displayName"], args["focus"])
         self.assertEqual(reader["model"], "gpt-6-sol")
+        self.assertEqual(reader["displayLabel"], "Designer · translation parity · gpt-6-sol · Codex CLI")
+        self.assertEqual(reader["harnessLabel"], "Codex CLI")
         self.assertEqual(reader["modelSource"], "declared")
-        self.assertIn("gpt-6-sol · Codex", rows["content"][0]["text"])
+        self.assertIn("gpt-6-sol · Codex CLI", rows["content"][0]["text"])
         self.assertEqual(reader["name"], self.reader["name"])
         self.assertEqual(reader["checkout"], str(SCRIPTS.parents[4].resolve()))
         self.assertEqual(reader["repositoryName"], "claude-whisperer")
         self.assertTrue(rows["content"][0]["text"].startswith(args["focus"]))
         self.tool("register", {"cwd": os.getcwd(), "harness": "codex"})
         self.assertEqual(MAILBOX.load(MAILBOX.peer_path(self.base, "fixture-reader"))["focus"], args["focus"])
-        self.tool("focus", {"text": "Mock server · rebase fixes", "model": "gpt-6-astra"})
+        self.tool("focus", {"text": "Mock server · rebase fixes", "model": "gpt-6-astra", "harnessLabel": "Codex"})
         rows = self.tool("peers")["result"]["structuredContent"]["peers"]
         self.assertEqual(next(p for p in rows if p["session"] == "fixture-reader")["model"], "gpt-6-astra")
         self.assertEqual(
@@ -115,6 +123,12 @@ class ContractTests(unittest.TestCase):
         )
         self.assertEqual(next(p for p in rows if p["session"] == "fixture-sender")["displayName"], self.sender["name"])
         self.assertTrue(self.tool("register", {**args, "focus": "   "})["result"]["isError"])
+        self.assertTrue(self.tool("focus", {"text": "Review", "harnessLabel": " "})["result"]["isError"])
+        self.assertEqual(next(p for p in rows if p["session"] == "fixture-reader")["harness"], "codex")
+        self.assertEqual(
+            next(p for p in rows if p["session"] == "fixture-reader")["displayLabel"],
+            "Mock server · rebase fixes · gpt-6-astra · Codex",
+        )
 
     def test_modern_discovery_and_cacheable_catalog_without_a_handshake(self):
         discovered = self.rpc("server/discover")["result"]

@@ -26,6 +26,26 @@ harnesses; run-scoped conductor and worker sessions are an exception so every ru
 store, including when both sessions use Claude Code. Harnesses known to have native peer messaging are listed in
 `NATIVE_MESSAGING` in `scripts/peer_mailbox.py`; add one there when another harness gains it.
 
+## Readable identity and quick commands
+
+Use `displayLabel` (task · model · harness) in conversation. Route to the stable `session` ID;
+legacy `name` aliases remain accepted. `displayName` stays purpose-only. Keep repo, branch and
+checkout context separate. Set/update your actual responsibility with `focus`; optional `model`
+and `harnessLabel` on MCP register/focus are declarations from your runtime, never guesses.
+CLI focus uses `--model` and `--harness-label`. Without a precise host declaration, Gemini/Antigravity
+remains grouped; absent models remain explicitly unknown.
+
+```bash
+python3 scripts/run_agent.py mailbox focus --session MY_ID --text 'Your actual responsibility'
+python3 scripts/run_agent.py mailbox peers --session MY_ID --format json
+python3 scripts/run_agent.py mailbox send --session MY_ID --to PEER_SESSION_ID --message 'Question'
+python3 scripts/run_agent.py mailbox wait --session MY_ID --reply-to MESSAGE_ID --timeout 300
+```
+
+Send/ask also accept `--text` or `--body`. Block locally for replies, rather than repeated model-driven
+inbox polling. Use `--no-wake` for FYI/progress and avoid acknowledgement-only replies. A timeout is
+not a reply; accepted delivery is not evidence of receipt or consideration.
+
 ## Tools
 
 The normal server is `scripts/mailbox_daemon.py`. `scripts/mailbox_mcp.py` remains a stdio fallback; the CLI is `run_agent.py mailbox …`.

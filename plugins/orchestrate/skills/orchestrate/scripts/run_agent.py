@@ -162,7 +162,13 @@ class RunnerError(Exception):
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog="Peer communication: mailbox peers lists task/model/harness labels; mailbox focus sets your actual "
+        "task and optional verified model/host metadata. mailbox send --to SESSION --message TEXT sends; "
+        "--text and --body are aliases. mailbox wait --reply-to MESSAGE_ID --timeout 300 blocks locally "
+        "without model polling. mailbox feedback records friction. Run mailbox --help for details.",
+    )
     parser.add_argument("--cwd", type=Path, default=Path.cwd(), help="Target Git repository root")
     task_input = parser.add_mutually_exclusive_group(required=True)
     task_input.add_argument("--brief", help="Handwritten Markdown brief file path, or '-' to read stdin")

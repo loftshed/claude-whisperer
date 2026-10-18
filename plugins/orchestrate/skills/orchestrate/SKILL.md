@@ -288,6 +288,32 @@ For needed coordination across projects, explicitly pass `scope: "cross-project"
 automatic hooks always stay within the project. Declare your work with `focus` and agree on a split
 before editing shared files.
 
+### Compact communication commands
+
+```bash
+python3 <skill-directory>/scripts/run_agent.py mailbox focus --session MY_ID --harness codex --text 'Your actual responsibility' --model VERIFIED_MODEL_ID --harness-label Codex
+python3 <skill-directory>/scripts/run_agent.py mailbox peers --session MY_ID --format json
+python3 <skill-directory>/scripts/run_agent.py mailbox send --session MY_ID --to PEER_SESSION_ID --message 'Question with evidence'
+python3 <skill-directory>/scripts/run_agent.py mailbox wait --session MY_ID --reply-to SENT_MESSAGE_ID --timeout 300
+```
+
+Omit model/host declarations unless verified from your current runtime. `--text`, `--message`, and
+`--body` are interchangeable for send/ask. After discovery, use `displayLabel` (task · model · harness)
+when describing yourself or another peer to the user or another agent; do not substitute the routing
+`name`. Keep `session` as the preferred routing key; old names still work and labels need not be unique.
+`displayName` remains the purpose alone for compatibility. Repo, branch and checkout remain separate.
+
+Set a short focus from your actual responsibility at task start, and update it when the assignment
+changes. MCP `register`/`focus` accept `model` and `harnessLabel`; CLI focus accepts `--model` and
+`--harness-label`. State a precise host such as Antigravity or Gemini CLI only when known. Unknown
+model metadata stays unknown; a declared model is not provider attestation.
+
+Read inbox once at a turn boundary, then block with `wait` (MCP `wait(replyTo=...)`) for a needed
+answer rather than repeatedly calling inbox/peers or waking the model on short timers. Waiting is
+local; a timeout is not an answer and does not justify endless retries. Use `--no-wake` / `wake:false`
+for FYI and progress. Do not send acknowledgement-only replies. Delivery acceptance is not proof that
+an agent read or considered a message. These reduce avoidable interactions; no token savings are measured.
+
 ### Name your task for peers
 
 At task start, set `focus` to a short display name from your actual assignment, such as

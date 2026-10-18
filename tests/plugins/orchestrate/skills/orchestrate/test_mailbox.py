@@ -166,6 +166,51 @@ class MailboxTests(unittest.TestCase):
         self.assertIn("Rebase fixes", result.stdout)
         self.assertIn("model unknown · Codex", MAILBOX.table([self.codex], self.codex["session"]))
 
+    def test_cli_aliases_route_identically_and_unknown_identity_is_explicit(self):
+        for flag in ["--text", "--message", "--body"]:
+            mailbox_cli(
+                self.base,
+                "send",
+                "--session",
+                self.codex["session"],
+                "--harness",
+                "codex",
+                "--to",
+                self.claude["session"],
+                flag,
+                "sent with " + flag,
+                "--no-wake",
+                cwd=self.repository,
+                check=True,
+            )
+        self.assertEqual(
+            [m["text"] for m in MAILBOX.take(self.base, self.claude["session"])],
+            ["sent with --text", "sent with --message", "sent with --body"],
+        )
+        result = mailbox_cli(
+            self.base,
+            "focus",
+            "--session",
+            self.codex["session"],
+            "--harness",
+            "codex",
+            "--text",
+            "Review parity",
+            "--model",
+            "gpt-6.1-sol",
+            "--harness-label",
+            "Codex CLI",
+            cwd=self.repository,
+            check=True,
+        )
+        rows = json.loads(mailbox_cli(self.base, "peers", "--format", "json", cwd=self.repository, check=True).stdout)
+        row = next(p for p in rows if p["session"] == self.codex["session"])
+        self.assertEqual(row["displayLabel"], "Review parity · gpt-6.1-sol · Codex CLI")
+        self.assertEqual(row["displayName"], "Review parity")
+        self.assertEqual(row["name"], self.codex["name"])
+        self.assertIn("model unknown · Claude Code", MAILBOX.display_label(self.claude))
+        self.assertEqual(result.returncode, 0)
+
     def test_send_delivers_in_order_and_marks_read_once(self):
         first = MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text="one")
         second = MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text="two")
