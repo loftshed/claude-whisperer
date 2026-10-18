@@ -53,7 +53,20 @@ Always prefer the host harness's built-in way of messaging or spawning other age
 - **Codex:** use Codex's native sub-agent / thread tools for GPT models.
 - **OpenCode:** use OpenCode's native sub-agent tools for OpenCode models.
 
-Use `orchestrate` and `peer-mailbox` only to cross a harness or provider boundary.
+Choose the communication tool for each recipient. Report progress, questions, and completion to an
+outside coordinator through `peer-mailbox`. Communicate with teammates and delegate authorized work
+inside the current harness through its native tools, even when the coordinator uses another harness.
+Native tools do not expand delegation authority. A runner worker instructed to request help through
+its conductor must still do so. Different models, sessions, branches, or worktrees do not by themselves
+create a harness boundary.
+
+For example, a Codex agent reporting to a Gemini coordinator sends that report through the mailbox,
+but uses Codex thread messaging or sub-agent tools with other Codex agents. A missing recipient in one
+native tool is a reason to check the host's other native session/thread tools, not to switch to the mailbox.
+
+Use `orchestrate` for authorized execution across provider boundaries and `peer-mailbox` for messages
+between harnesses. Keep any runner-assigned conductor/worker mailbox limited to that run's reporting
+contract; it does not replace native communication with other teammates.
 
 Every hosted frontier model goes through its own vendor's harness, never through OpenCode/OpenRouter:
 
@@ -73,14 +86,14 @@ and GPT-OSS pool (`agy` models) is a native Antigravity route and stays allowed.
 Say what you need; the smallest mechanism that serves it wins. A question never becomes a job
 because of which harness or model answers it.
 
-| Need                                      | Use                                                                                                                                        |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| "Am I missing something?"                 | `consult` (one question, one answer)                                                                                                       |
-| "What about this detail?"                 | `consult --follow-up <result.json>` (same session, context intact)                                                                         |
-| "Find out why this happens."              | `consult --intent investigate --read <repo>` (reads, returns findings with evidence)                                                       |
-| "Check my work."                          | `consult --intent review --read <repo> --diff` for a fresh reviewer; the peer mailbox to ask a live session that already holds the context |
-| "Implement this."                         | The run below: scope, lease, audit, runner-owned verification                                                                              |
-| "You own this file; I need to change it." | The peer mailbox: `focus`, `peers`, `send`, `wait` between existing sessions                                                               |
+| Need                                      | Use                                                                                                                                           |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| "Am I missing something?"                 | `consult` (one question, one answer)                                                                                                          |
+| "What about this detail?"                 | `consult --follow-up <result.json>` (same session, context intact)                                                                            |
+| "Find out why this happens."              | `consult --intent investigate --read <repo>` (reads, returns findings with evidence)                                                          |
+| "Check my work."                          | Native tools for a reviewer in this harness; `consult --intent review --read <repo> --diff` or peer mailbox for a reviewer in another harness |
+| "Implement this."                         | The run below: scope, lease, audit, runner-owned verification                                                                                 |
+| "You own this file; I need to change it." | Native messaging for an owner in this harness; peer mailbox for an owner in another harness                                                   |
 
 The coordinator's `--kind investigation` and `consultation` remain for work that must count against
 a task's invocation allowance, and for a blocked worker asking its conductor.
@@ -168,13 +181,16 @@ never substitute another family. If an exact pin is required or no matching alia
 gap and ask before substituting. For other missing models, report the gap and ask rather than silently
 substituting. See [references/runner.md](references/runner.md#model-catalogs).
 
+For the provisional task archetypes, tier-strength hints, telemetry gates, and their evidence limits,
+see [references/archetype-rationale.md](references/archetype-rationale.md).
+
 ## Check quota
 
 ```bash
 python3 <skill-directory>/scripts/run_agent.py quota
 ```
 
-It reads live [monitor](https://github.com/loftshed/claude-whisperer/tree/main/plugins/monitor) data.
+It reads live [monitor](https://github.com/loftshed/orkest/tree/main/plugins/monitor) data.
 The route table decides which models fit the task; quota only chooses among fitting routes and never
 justifies a weaker model. Prefer pools marked expiring (capacity lost at the weekly rollover), then the
 most unused capacity. The runner refuses a blocked pool (exit 15; `--ignore-quota` only on the user's
@@ -193,6 +209,9 @@ never blocks OpenCode.
 
 1. Scope: a JSON `--task-spec` carries authoritative `allow_paths`/`track_paths`; a handwritten brief
    uses repeatable `--allow-path` and `--track-path`. Mutating runs add `--expect-changes`.
+   Read-only runs (empty scope) allocate a private per-run scratch directory outside the checkout;
+   artifacts written there are retained and reported without failing the source-scope audit, while
+   symlinks escaping the scratch boundary fail as scope violations.
 2. The executor must not commit, push, merge, reset, clean, stash, checkout, switch branches, create
    worktrees, publish, or touch secrets. A change to this worktree's branch, HEAD, reflog or stash fails
    the run.
@@ -227,6 +246,9 @@ never blocks OpenCode.
    starting with `review`: `status`, `task_outcome`, `verification`, `run_delta`,
    `scope_violations`, `history_violations`, `provider_error`. Then read the full diff and map every
    acceptance criterion to code, a test or an observation. A passed runner gate need not be rerun.
+   For read-only runs, read `scratch.artifacts` as usable output; do not rerun the model just to
+   reproduce a report. A `scope_violation` whose entries are all `scratch-escape:` means only the
+   scratch boundary was breached, and any other entry is a source mutation to investigate.
 5. If review finds a gap, prefer finishing a small, understood fix yourself after the worker has
    stopped. Use the guidance below to choose local completion or one focused worker correction.
    Never repeat an unchanged failed prompt.
@@ -251,6 +273,48 @@ and conductor takeover first when using the coordinator. Preserve the original w
 identify the conductor's edits, and run checks affected by those edits. "Almost done" never lowers
 the acceptance criteria. Scope or history violations require rejection and do not permit resuming
 that run; inspect any proposed changes independently before deciding what can be retained.
+
+## View a stooges team
+
+Use `run_agent.py stooges` or `node <plugin-root>/bin/ork.mjs stooges` to open the Orchestrate team view.
+It launches, observes, or formats multi-agent swarm rooms under `<agent-executor cache>/rooms-v1/<room-id>.json`.
+Node.js must be available as `node` on `PATH`.
+
+```bash
+# Launch a custom team or built-in preset (scout-swarm, bug-court, patch-race, heavy-trifecta)
+python3 <skill-directory>/scripts/run_agent.py stooges --team 'claude:haiku*2,agy:flash*2,codex:luna:max'
+node plugins/orchestrate/bin/ork.mjs stooges --preset scout-swarm
+
+# Observe an existing live room or queue new members for the conductor
+node plugins/orchestrate/bin/ork.mjs stooges --attach-room ROOM_ID
+python3 <skill-directory>/scripts/run_agent.py stooges spawn --attach-room ROOM_ID --team 'codex:luna:max'
+
+# Offline fixture inspection and formatting
+node plugins/orchestrate/bin/ork.mjs stooges --fixture /path/to/room.json --print --width 120
+```
+
+`--json` outputs the room JSON (`agent-executor.room.v1` schema), `--print` renders a single terminal frame
+and exits, and `--fixture` opens saved room state offline without live mutations. The room schema tracks conductor
+status, agent entries (`output`, `question`), and the message stream, while the header card displays quota
+snapshots fetched by `monitor`. Use `spawn --attach-room` to enqueue additional members for the conductor
+to orchestrate into the active room.
+
+## Probe a candidate patch
+
+Use `run_agent.py probe` to run a test command against an isolated `/tmp` overlay. From the target repository,
+copy only the needed files, apply a candidate patch there, and put the test command after `--`:
+
+```bash
+python3 <skill-directory>/scripts/run_agent.py probe \
+  --copy src/module.py \
+  --patch /tmp/candidate.patch \
+  -- python3 -m unittest tests.test_module
+```
+
+The command runs from the overlay with temporary and cache directories redirected there; the source checkout
+is unchanged. The command is executed without a shell. Use repeatable `--copy PATH` arguments when the patch or
+test needs additional source files. When running outside the target repository, use `--target-repo PATH` and
+pass the test command as one quoted `--cmd` string instead.
 
 ## Steer a running job
 

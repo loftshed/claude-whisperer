@@ -41,9 +41,13 @@ only when you want a human-readable preview before dispatch.
 
 All fields are required. Arrays may be empty only for `allow_paths`, `track_paths`,
 `pre_existing_changes`, and `development_checks`; an empty allowed/track scope is an explicitly
-read-only brief. Paths in `allow_paths` and `track_paths` must be non-root repository-relative
-paths. The runner derives its effective allowed scope from exactly those two arrays, so scope cannot
-drift from the submitted brief or runner enforcement.
+read-only brief. For read-only tasks, the runner automatically allocates a private per-run scratch
+directory outside the target repository and notes its location in the brief. Artifacts written there
+are collected and retained under `scratch` in the result without triggering scope violations; writes
+inside the repository or symlinks escaping the scratch boundary fail as scope violations. Paths in
+`allow_paths` and `track_paths` must be non-root repository-relative paths. The runner derives its
+effective allowed scope from exactly those two arrays, so scope cannot drift from the submitted
+brief or runner enforcement.
 
 An optional `context_packet` object accepts four string arrays: `decisions`, `failed_attempts`,
 `evidence`, and `versions`. Include only context needed to finish without unrecorded history.
@@ -70,6 +74,9 @@ match the runner path scope exactly, and comply with the report contract.
 - Never place secrets in `--verify-command`; exact command strings are retained in private run artifacts.
 - For a `--task-spec`, treat `allow_paths` and `track_paths` as the one source of truth; do not pass duplicate runner scope flags.
 - Track every ignored deliverable explicitly; Git status cannot prove that it was created.
+- State the reporting recipient and transport. Use the peer mailbox for an outside coordinator and
+  native tools for teammates in the executor's own harness. An external reporting obligation does not
+  make internal communication external. Preserve any runner-assigned reporting endpoints and delegation limits.
 - Prefer one coherent batch over several conversational micro-delegations.
 - Put bulky context in workspace files and point to them rather than pasting it into the brief.
 - Never place a secret in the brief. Its contents are sent to the selected model provider; the agy engine also includes the submitted brief in the local process arguments.

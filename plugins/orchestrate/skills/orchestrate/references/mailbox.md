@@ -20,11 +20,21 @@ models or test idle activation. Restart an existing harness session after changi
 The checkout installer `plugins/orchestrate/install.sh` includes messaging setup. A native plugin
 copy can also run `scripts/install_mailbox.py` directly, so setup needs no separate AI intervention.
 
-**Native first.** A session messages or spawns agents of its own harness with that harness's native tools whenever
-it has any (Claude Code: `SendMessage` and `ListAgents`; Antigravity/Gemini: `send_message` and `invoke_subagent`). Interactive mailbox traffic is only for crossing
-harnesses; run-scoped conductor and worker sessions are an exception so every run has one durable message
-store, including when both sessions use Claude Code. Harnesses known to have native peer messaging are listed in
-`NATIVE_MESSAGING` in `scripts/peer_mailbox.py`; add one there when another harness gains it.
+**Native first.** Choose the transport for the recipient's harness. Use native tools for teammates in
+the current harness, including when the task comes from an outside coordinator. Send progress,
+questions, and completion to that external coordinator through the peer mailbox. Different models,
+sessions, branches, or worktrees do not make communication external.
+
+Claude Code uses `SendMessage` and `ListAgents`; Antigravity/Gemini uses `send_message` and
+`invoke_subagent`; Codex uses native agent or thread tools; OpenCode uses its native agent tools.
+Check other native session/thread tools if one cannot reach a teammate. Do not route around that
+failure through the mailbox.
+
+Runner-assigned conductor and worker sessions retain their dedicated mailbox for the run's reporting
+contract, including when both sessions use the same harness. This exception applies only to those two
+assigned endpoints. Use native tools with other teammates and follow the run's delegation limits.
+`NATIVE_MESSAGING` in `scripts/peer_mailbox.py` lists the harnesses with an enforced mailbox guard;
+the native-first instruction also applies when the current host exposes native tools not in that list.
 
 ## Readable identity and quick commands
 

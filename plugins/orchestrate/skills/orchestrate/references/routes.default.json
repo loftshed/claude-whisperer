@@ -1,6 +1,6 @@
 {
   "schema": "agent-executor.routes.v1",
-  "note": "Defaults for each role. Override any of them in ~/.config/agent-executor/config.json (run_agent.py init writes a starter). Claude, GPT and Gemini always run in their own harness; opencode routes are for families without one (GLM, DeepSeek, Qwen, Kimi). Models are family selectors (see families.json) that resolve to the newest live ID; write an exact ID to pin one.",
+  "note": "Defaults for each role. Override any of them in ~/.config/agent-executor/config.json (run_agent.py init writes a starter). Claude, GPT and Gemini always run in their own harness; opencode routes are for families without one (GLM, DeepSeek, Qwen, Kimi). Models are family selectors (see families.json) that resolve to the newest live ID; write an exact ID to pin one. Archetype routes keep their primary candidate in engine/model/effort and expose ordered alternates through routes.py:route_candidates.",
   "routes": {
     "implementation": {
       "engine": "codex",
@@ -25,6 +25,59 @@
       "engine": "opencode",
       "model": "glm:flash",
       "variant": "high"
+    },
+    "debug-invariants": {
+      "engine": "codex",
+      "model": "gpt:sol",
+      "effort": "high",
+      "alternates": [
+        { "engine": "claude", "model": "claude:frontier", "effort": "high" },
+        { "engine": "codex", "model": "gpt:luna", "effort": "max" }
+      ]
+    },
+    "structural-refactor": {
+      "engine": "claude",
+      "model": "claude:frontier",
+      "effort": "high",
+      "alternates": [
+        { "engine": "codex", "model": "gpt:sol", "effort": "high" },
+        { "engine": "claude", "model": "claude:balanced", "effort": "high" }
+      ]
+    },
+    "ui-design-system": {
+      "engine": "codex",
+      "model": "gpt:astra",
+      "effort": "high",
+      "alternates": [
+        { "engine": "claude", "model": "claude:frontier", "effort": "high" },
+        { "engine": "claude", "model": "claude:balanced", "effort": "high" }
+      ]
+    },
+    "architecture-conductor": {
+      "engine": "agy",
+      "model": "gemini:pro",
+      "alternates": [
+        { "engine": "claude", "model": "claude:frontier", "effort": "high" },
+        { "engine": "codex", "model": "gpt:sol", "effort": "high" }
+      ]
+    },
+    "mechanical-sweep": {
+      "engine": "claude",
+      "model": "claude:fast",
+      "effort": "medium",
+      "alternates": [
+        { "engine": "agy", "model": "gemini:flash-high" },
+        { "engine": "codex", "model": "gpt:luna", "effort": "medium" }
+      ]
+    },
+    "independent-review": {
+      "engine": "codex",
+      "model": "gpt:sol",
+      "effort": "high",
+      "alternates": [
+        { "engine": "claude", "model": "claude:frontier", "effort": "high" },
+        { "engine": "agy", "model": "gemini:flash-high" }
+      ]
     }
   }
 }

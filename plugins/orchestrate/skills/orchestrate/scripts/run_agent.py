@@ -15,6 +15,7 @@ import math
 import os
 import queue
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -1365,6 +1366,100 @@ def find_scope_violations(delta: dict[str, list[str]], allowed_paths: list[str])
     return [path for path in delta["changed_paths"] if not path_is_allowed(path, allowed_paths)]
 
 
+def prepare_scratch_dir(out_dir: Path) -> Path:
+    """Private per-run scratch directory for a read-only run: outside the reviewed checkout, inside the run dir."""
+    scratch = out_dir / "scratch-root" / "scratch"
+    scratch.parent.mkdir(mode=0o700, parents=True)
+    scratch.parent.chmod(0o700)
+    scratch.mkdir(mode=0o700)
+    return scratch.resolve()
+
+
+def scratch_brief_note(scratch: Path) -> str:
+    return (
+        "\nSCRATCH DIRECTORY (read-only task)\n"
+        f"If you need to save a diff, notes or gathered context, write it only under {scratch}.\n"
+        "Anything written elsewhere in the repository counts as a source change and fails the run.\n"
+        "Do not create symlinks in the scratch directory that point outside it. Scratch files are kept "
+        "and listed in the result.\n"
+    )
+
+
+RUNNER_OUT_DIR_FILES = frozenset(
+    {
+        "brief.txt",
+        "submitted-brief.txt",
+        "stdout.txt",
+        "stderr.txt",
+        "executor.log",
+        "runner.log",
+        "final-output.txt",
+        "agy-input.jsonl",
+        "result.json",
+        "run_summary.json",
+        "events.jsonl",
+        "event_completion.json",
+        "segment_summary.json",
+        "history.json",
+        STEER_REQUEST_NAME,
+    }
+)
+
+RUNNER_ARCHIVED_ATTEMPT_PATTERN = re.compile(r"attempt-\d+-(?:stdout\.txt|stderr\.txt|executor\.log|final-output\.txt)")
+RUNNER_VERIFICATION_OUTPUT_PATTERN = re.compile(r"verification-\d{2,}\.(?:stdout|stderr)\.txt")
+
+
+def is_runner_out_dir_file(name: str) -> bool:
+    return (
+        name in RUNNER_OUT_DIR_FILES
+        or RUNNER_ARCHIVED_ATTEMPT_PATTERN.fullmatch(name) is not None
+        or RUNNER_VERIFICATION_OUTPUT_PATTERN.fullmatch(name) is not None
+    )
+
+
+def collect_scratch_artifacts(scratch: Path) -> dict[str, Any]:
+    """List what a run left in its scratch directory without following symlinks; report escapes as violations."""
+    artifacts: list[dict[str, Any]] = []
+    escapes: list[str] = []
+    root = scratch.resolve()
+    scratch_root = scratch.parent
+    if scratch_root.is_symlink() or not scratch_root.is_dir():
+        escapes.append(Path(os.path.relpath(scratch_root, scratch)).as_posix())
+    elif scratch.is_symlink() or not scratch.is_dir():
+        escapes.append(scratch.name)
+    else:
+        for current, directories, files in os.walk(scratch, followlinks=False):
+            for name in [*directories, *files]:
+                path = Path(current) / name
+                relative = path.relative_to(scratch).as_posix()
+                if path.is_symlink():
+                    target = path.resolve()
+                    if target != root and root not in target.parents:
+                        escapes.append(relative)
+                        continue
+                if path.is_file() and not path.is_symlink():
+                    artifacts.append({"path": relative, "size_bytes": path.stat().st_size})
+
+    if scratch_root.is_dir() and not scratch_root.is_symlink():
+        for entry in scratch_root.iterdir():
+            if entry.name != scratch.name:
+                escapes.append(Path(os.path.relpath(entry, scratch)).as_posix())
+
+    run_dir = scratch_root.parent
+    if run_dir.is_dir():
+        for entry in run_dir.iterdir():
+            if entry.name == scratch_root.name and entry.is_dir() and not entry.is_symlink():
+                continue
+            if entry.is_symlink() or not entry.is_file() or not is_runner_out_dir_file(entry.name):
+                escapes.append(Path(os.path.relpath(entry, scratch)).as_posix())
+
+    return {
+        "path": str(scratch),
+        "artifacts": sorted(artifacts, key=lambda item: item["path"]),
+        "escapes": sorted(set(escapes)),
+    }
+
+
 class _RunnerNamespaceProxy:
     def __getattr__(self, attr: str) -> Any:
         try:
@@ -1528,6 +1623,8 @@ def print_summary(result: dict[str, Any], result_path: Path) -> None:
         print(f"AGENT_SESSION={result['session_id']}")
     if result.get("scope_violations"):
         print(f"AGENT_SCOPE_VIOLATIONS={json.dumps(result['scope_violations'])}")
+    if result.get("scratch") and result["scratch"].get("artifacts"):
+        print(f"AGENT_SCRATCH={json.dumps(result['scratch']['artifacts'])}")
     if result.get("history_violations"):
         print(f"AGENT_HISTORY_VIOLATIONS={json.dumps(result['history_violations'])}")
     if result.get("event_errors"):
@@ -1621,6 +1718,42 @@ def git_identity(repo: Path) -> dict[str, Any]:
         "head_reflog_sha256": text_fingerprint(head_reflog),
         "common_dir": common_dir or None,
     }
+
+
+GIT_METADATA_VOLATILE = {"objects", "logs", "refs", "index", "HEAD", "FETCH_HEAD", "ORIG_HEAD", "gc.pid"}
+
+
+def git_metadata_snapshot(repo: Path) -> dict[str, tuple[int, int]]:
+    """Size and mtime of this worktree's Git metadata files, minus what Git itself rewrites during a read.
+
+    `git status` never lists anything under .git, so a worker could add a hook or edit config unseen.
+    HEAD, refs and the reflog are judged by git_identity(); objects, the index and lock files churn.
+    """
+    git_dir = git_optional_output(repo, "rev-parse", "--absolute-git-dir")
+    if not git_dir:
+        return {}
+    root = Path(git_dir)
+    try:
+        prefix = root.relative_to(repo.resolve()).as_posix()
+    except ValueError:
+        prefix = root.as_posix()
+    snapshot: dict[str, tuple[int, int]] = {}
+    for current, directories, files in os.walk(root, followlinks=False):
+        relative_dir = Path(current).relative_to(root)
+        if relative_dir == Path("."):
+            directories[:] = [name for name in directories if name not in GIT_METADATA_VOLATILE]
+        for name in files:
+            if relative_dir == Path(".") and name in GIT_METADATA_VOLATILE or name.endswith(".lock"):
+                continue
+            path = Path(current) / name
+            with contextlib.suppress(OSError):
+                stat = path.lstat()
+                snapshot[f"{prefix}/{(relative_dir / name).as_posix()}"] = (stat.st_size, stat.st_mtime_ns)
+    return snapshot
+
+
+def find_git_metadata_changes(before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]) -> list[str]:
+    return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
 
 
 def git_activity(repo: Path) -> dict[str, Any]:
@@ -3581,6 +3714,19 @@ def steer_main(argv: list[str] | None = None) -> int:
 
 def main() -> int:
     argv = sys.argv[1:]
+    if argv and argv[0] == "probe":
+        return probe_main(argv[1:])
+    if argv and argv[0] == "stooges":
+        plugin_root = Path(__file__).resolve().parents[3]
+        command = ["node", str(plugin_root / "bin" / "ork.mjs"), "stooges", *argv[1:]]
+        try:
+            return subprocess.run(command, check=False).returncode
+        except FileNotFoundError:
+            print("run_agent.py stooges requires Node.js (`node`) on PATH.", file=sys.stderr)
+            return 127
+        except OSError as exc:
+            print(f"run_agent.py stooges could not start Node.js: {exc}", file=sys.stderr)
+            return 126
     if argv and argv[0] == "messages":
         print("run_agent.py messages was removed; use run_agent.py mailbox.", file=sys.stderr)
         return 4
@@ -3629,6 +3775,35 @@ def main() -> int:
         raise RunnerError(str(exc), 27) from exc
 
 
+def probe_main(argv: list[str]) -> int:
+    if "--target-repo" not in argv and "--cmd" not in argv:
+        return bundled_module("probe_overlay").main(argv)
+
+    parser = argparse.ArgumentParser(
+        prog="run_agent.py probe",
+        description="Run a candidate patch and test command in an isolated source overlay.",
+    )
+    parser.add_argument("--target-repo", type=Path, required=True, help="source repository to copy from")
+    parser.add_argument("--copy", action="append", default=[], metavar="PATH", help="copy a repository-relative file")
+    parser.add_argument("--patch", type=Path, required=True, help="candidate patch to apply inside the overlay")
+    parser.add_argument("--cmd", required=True, help="test command and arguments, quoted as one string")
+    args = parser.parse_args(argv)
+    try:
+        command = shlex.split(args.cmd)
+    except ValueError as exc:
+        print(f"run_agent.py probe: invalid --cmd: {exc}", file=sys.stderr)
+        return 2
+    if not command:
+        print("run_agent.py probe: --cmd must contain an executable and arguments.", file=sys.stderr)
+        return 2
+
+    forwarded = ["--repo", str(args.target_repo)]
+    for path in args.copy:
+        forwarded.extend(["--copy", path])
+    forwarded.extend(["--patch", str(args.patch), "--", *command])
+    return bundled_module("probe_overlay").main(forwarded)
+
+
 def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
     if args.job_dir and not args.detach:
         raise RunnerError("--job-dir requires --detach", 4)
@@ -3668,6 +3843,9 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
     ensure_hook_outside_workspaces(completion_hook, [repo, *add_dirs])
     out_dir = prepare_out_dir(args.out_dir, repo)
     result_path = out_dir / "result.json"
+    scratch_dir = prepare_scratch_dir(out_dir) if not enforced_paths else None
+    if scratch_dir is not None:
+        add_dirs = [*add_dirs, scratch_dir]
     mailbox_module = bundled_module("peer_mailbox")
     mailbox_run_id = bundled_module("peer_mailbox").run_id_for(
         args.mailbox_run_id or (completion_event_path.stem if completion_event_path else foreground_run_name(out_dir))
@@ -3695,7 +3873,8 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
     final_output_path = out_dir / "final-output.txt"
     write_private_text(original_brief_path, brief + "\n")
     contract_text = REPORT_CONTRACT + (AGY_ONESHOT_GUARDRAIL if args.engine == "agy" else "")
-    submitted_brief = f"{brief}\n\n{contract_text}\n{mailbox_module.run_instructions(mailbox_run_id)}"
+    scratch_note = scratch_brief_note(scratch_dir) if scratch_dir is not None else ""
+    submitted_brief = f"{brief}\n{scratch_note}\n{contract_text}\n{mailbox_module.run_instructions(mailbox_run_id)}"
     write_private_text(submitted_brief_path, submitted_brief)
     write_private_text(log_path, "")
     write_private_text(final_output_path, "")
@@ -3759,6 +3938,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
             "engine": args.engine,
             "model": model,
             "requested_model": args.model,
+            **({"route": args.route, "task_archetype": args.route} if args.route else {}),
             "requested_effort": selected_effort,
             "variant": variant,
             "full_permissions": True,
@@ -3780,6 +3960,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
 
     before = git_state(repo, tracked_paths)
     git_identity_before = git_identity(repo)
+    git_metadata_before = git_metadata_snapshot(repo) if not enforced_paths else {}
     git_activity_before = git_activity(repo)
     if previous_result is not None and (
         (bool(enforced_paths) and previous_result.get("git_after", {}).get("fingerprint") != before["fingerprint"])
@@ -3822,6 +4003,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         "executor_version": version,
         "model": model,
         "requested_model": args.model,
+        **({"route": args.route, "task_archetype": args.route} if args.route else {}),
         "resolved_model": None,
         "effort": effort,
         "billing_mode": args.billing_mode,
@@ -4309,6 +4491,16 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         run_delta_after_executor,
         enforced_paths,
     )
+    scratch_report = collect_scratch_artifacts(scratch_dir) if scratch_dir is not None else None
+    if scratch_report is not None:
+        scope_violations_after_executor = [
+            *scope_violations_after_executor,
+            *(f"scratch-escape:{item}" for item in scratch_report["escapes"]),
+        ]
+        scope_violations_after_executor = [
+            *scope_violations_after_executor,
+            *find_git_metadata_changes(git_metadata_before, git_metadata_snapshot(repo)),
+        ]
 
     preliminary_status, preliminary_exit_code = classify_result(
         history_violations=history_violations_after_executor,
@@ -4358,6 +4550,13 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         git_identity_after,
     )
     scope_violations = find_scope_violations(run_delta, enforced_paths)
+    scratch_report = collect_scratch_artifacts(scratch_dir) if scratch_dir is not None else None
+    if scratch_report is not None:
+        scope_violations = [*scope_violations, *(f"scratch-escape:{item}" for item in scratch_report["escapes"])]
+        scope_violations = [
+            *scope_violations,
+            *find_git_metadata_changes(git_metadata_before, git_metadata_snapshot(repo)),
+        ]
     workspace_changed = before["fingerprint"] != after["fingerprint"]
     verification_changed_workspace = (
         verification["completed_count"] > 0 and after_executor["fingerprint"] != after["fingerprint"]
@@ -4452,6 +4651,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         "review": review,
         "usage": usage_module.combine_attempts(attempt_usage),
         "consultation": consultation,
+        "scratch": scratch_report,
     }
     if steers_applied:
         # History, scope and verification above were judged from the original snapshot: one combined run.

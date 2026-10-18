@@ -111,7 +111,7 @@ class ContractTests(unittest.TestCase):
         self.assertIn("gpt-6-sol · Codex CLI", rows["content"][0]["text"])
         self.assertEqual(reader["name"], self.reader["name"])
         self.assertEqual(reader["checkout"], str(SCRIPTS.parents[4].resolve()))
-        self.assertEqual(reader["repositoryName"], "claude-whisperer")
+        self.assertEqual(reader["repositoryName"], SCRIPTS.parents[4].resolve().name)
         self.assertTrue(rows["content"][0]["text"].startswith(args["focus"]))
         self.tool("register", {"cwd": os.getcwd(), "harness": "codex"})
         self.assertEqual(MAILBOX.load(MAILBOX.peer_path(self.base, "fixture-reader"))["focus"], args["focus"])

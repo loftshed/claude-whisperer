@@ -1,0 +1,18 @@
+{
+  "scout-swarm": {
+    "team": "claude:haiku*2,agy:flash*2,codex:luna:max",
+    "description": "Five scouts across three providers"
+  },
+  "bug-court": {
+    "team": "claude:sonnet,agy:pro,codex:sol:high",
+    "description": "Three independent reviewers"
+  },
+  "patch-race": {
+    "team": "claude:sonnet,codex:luna:max,agy:flash",
+    "description": "Three candidate workers; assign separate worktrees for edits"
+  },
+  "heavy-trifecta": {
+    "team": "claude:opus,agy:pro,codex:astra:high",
+    "description": "Three deep reasoning workers"
+  }
+}

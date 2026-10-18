@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -32,6 +33,85 @@ assert SPEC and SPEC.loader
 RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
 MAILBOX = RUNNER.bundled_module("peer_mailbox")
+
+
+class StoogesCommandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="agent-stooges-command-")
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def install_fake_node(self) -> None:
+        node = self.root / "node"
+        node.write_text(
+            "#!/bin/sh\n"
+            'printf \'%s\\n\' "$@" > "$STOOGES_ARGV_CAPTURE"\n'
+            "printf 'stooges child output\\n'\n"
+            'exit "${STOOGES_EXIT:-0}"\n',
+            encoding="utf-8",
+        )
+        node.chmod(0o755)
+
+    def test_stooges_forwards_arguments_and_returns_child_status(self) -> None:
+        self.install_fake_node()
+        capture = self.root / "argv.txt"
+        argv = [
+            "spawn",
+            "--team",
+            "claude:haiku*2,codex:luna:max",
+            "--attach-room",
+            "room-123",
+            "--json",
+        ]
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "stooges",
+                *argv,
+            ],
+            env={
+                **os.environ,
+                "PATH": str(self.root),
+                "STOOGES_ARGV_CAPTURE": str(capture),
+                "STOOGES_EXIT": "23",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        received = capture.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(
+            received,
+            [
+                str(SCRIPT.resolve().parents[3] / "bin" / "ork.mjs"),
+                "stooges",
+                "spawn",
+                "--team",
+                "claude:haiku*2,codex:luna:max",
+                "--attach-room",
+                "room-123",
+                "--json",
+            ],
+        )
+        self.assertEqual(result.returncode, 23)
+        self.assertEqual(result.stdout, "stooges child output\n")
+        self.assertEqual(result.stderr, "")
+
+    def test_stooges_reports_when_node_is_unavailable(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "stooges", "--help"],
+            env={**os.environ, "PATH": str(self.root)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 127)
+        self.assertIn("requires Node.js (`node`) on PATH", result.stderr)
 
 
 class TemporaryGitRepository:
@@ -63,6 +143,103 @@ class TemporaryGitRepository:
 
     def close(self) -> None:
         self._temporary.cleanup()
+
+
+class ProbeCommandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repository = TemporaryGitRepository()
+        self.external = tempfile.TemporaryDirectory(prefix="agent-probe-command-")
+        self.external_path = Path(self.external.name)
+
+    def tearDown(self) -> None:
+        self.external.cleanup()
+        self.repository.close()
+
+    def run_probe(self, *arguments: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "probe", *arguments],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+
+    def make_patch(self) -> Path:
+        patch = self.external_path / "candidate.patch"
+        patch.write_text(
+            "diff --git a/tracked.txt b/tracked.txt\n"
+            "--- a/tracked.txt\n"
+            "+++ b/tracked.txt\n"
+            "@@ -1 +1 @@\n"
+            "-initial\n"
+            "+candidate\n",
+            encoding="utf-8",
+        )
+        return patch
+
+    def test_probe_command_applies_patch_and_runs_in_disposable_overlay(self) -> None:
+        patch = self.make_patch()
+        shell_marker = self.external_path / "SHOULD_NOT_EXIST"
+        literal_argument = f"$(touch {shell_marker})"
+        command = (
+            "import os, pathlib; "
+            "assert pathlib.Path.cwd().resolve() == pathlib.Path(os.environ['ORK_PROBE_OVERLAY']).resolve(); "
+            "assert pathlib.Path(os.environ['ORK_PROBE_SOURCE_ROOT']).resolve() != pathlib.Path.cwd().resolve(); "
+            "print(pathlib.Path('tracked.txt').read_text(), end=''); "
+            "import sys; print(sys.argv[1])"
+        )
+
+        result = self.run_probe(
+            "--target-repo",
+            str(self.repository.path),
+            "--copy",
+            "tracked.txt",
+            "--patch",
+            str(patch),
+            "--cmd",
+            shlex.join([sys.executable, "-c", command, literal_argument]),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"candidate\n{literal_argument}\n")
+        self.assertFalse(shell_marker.exists())
+        self.assertEqual((self.repository.path / "tracked.txt").read_text(encoding="utf-8"), "initial\n")
+
+    def test_probe_command_returns_candidate_command_exit_status(self) -> None:
+        patch = self.make_patch()
+        result = self.run_probe(
+            "--target-repo",
+            str(self.repository.path),
+            "--copy",
+            "tracked.txt",
+            "--patch",
+            str(patch),
+            "--cmd",
+            shlex.join([sys.executable, "-c", "raise SystemExit(37)"]),
+        )
+
+        self.assertEqual(result.returncode, 37)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+
+    def test_probe_command_supports_patch_and_command_separator(self) -> None:
+        patch = self.make_patch()
+        result = self.run_probe(
+            "--copy",
+            "tracked.txt",
+            "--patch",
+            str(patch),
+            "--",
+            sys.executable,
+            "-c",
+            "print(open('tracked.txt', encoding='utf-8').read(), end='')",
+            cwd=self.repository.path,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "candidate\n")
+        self.assertEqual((self.repository.path / "tracked.txt").read_text(encoding="utf-8"), "initial\n")
 
 
 class PathScopeTests(unittest.TestCase):
@@ -155,6 +332,42 @@ class RemovedMessagesCommandTests(unittest.TestCase):
             "tracked_paths_changed": [],
         }
         self.assertEqual(RUNNER.find_scope_violations(delta, []), ["unexpected.txt"])
+
+    def test_scratch_dir_collects_artifacts_and_detects_escapes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "run"
+            scratch = RUNNER.prepare_scratch_dir(out_dir)
+            self.assertTrue(scratch.is_dir())
+            self.assertEqual(scratch, (out_dir / "scratch-root" / "scratch").resolve())
+            self.assertEqual(stat.S_IMODE(scratch.parent.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(scratch.stat().st_mode), 0o700)
+            note = RUNNER.scratch_brief_note(scratch)
+            self.assertIn(str(scratch), note)
+            self.assertIn("SCRATCH DIRECTORY", note)
+
+            # Legitimate file and nested directory file
+            (scratch / "diff.patch").write_text("diff content\n", encoding="utf-8")
+            sub = scratch / "nested"
+            sub.mkdir()
+            (sub / "notes.txt").write_text("notes\n", encoding="utf-8")
+
+            # Symlink inside scratch pointing inside scratch
+            (scratch / "link_inside.txt").symlink_to(scratch / "diff.patch")
+
+            # Symlink pointing outside scratch
+            outside_file = Path(tmp) / "outside.txt"
+            outside_file.write_text("secret\n", encoding="utf-8")
+            (scratch / "link_escape.txt").symlink_to(outside_file)
+
+            report = RUNNER.collect_scratch_artifacts(scratch)
+            self.assertEqual(
+                report["artifacts"],
+                [
+                    {"path": "diff.patch", "size_bytes": 13},
+                    {"path": "nested/notes.txt", "size_bytes": 6},
+                ],
+            )
+            self.assertEqual(report["escapes"], ["link_escape.txt"])
 
 
 class GitStateTests(unittest.TestCase):
@@ -797,6 +1010,9 @@ def mutate():
     destination = pathlib.Path(os.environ.get("FAKE_OUTPUT", "allowed/output.txt"))
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(os.environ.get("FAKE_CONTENT", "executor output\n"), encoding="utf-8")
+    if os.environ.get("FAKE_SYMLINK_ESCAPE"):
+        escape_link = destination.parent / "escape.txt"
+        escape_link.symlink_to(pathlib.Path(os.environ["FAKE_SYMLINK_ESCAPE"]))
     if os.environ.get("FAKE_COMMIT") == "1":
         subprocess.run(["git", "add", str(destination)], check=True)
         subprocess.run(
@@ -1058,6 +1274,7 @@ else:
         retry_read_only: int = 0,
         transient_failures: int = 0,
         extra_args: list[str] | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> tuple[int, dict, Path, str, dict]:
         self.run_index += 1
         out_dir = self.external_path / f"artifacts-{self.run_index}"
@@ -1114,6 +1331,7 @@ else:
             "XDG_CACHE_HOME": str(self.external_path / f"cache-{self.run_index}"),
             "PATH": f"{self.external_path}{os.pathsep}{os.environ['PATH']}",
         }
+        environment.update(extra_env or {})
         output = io.StringIO()
         with (
             mock.patch.object(sys, "argv", argv),
@@ -1154,6 +1372,31 @@ else:
         self.assertEqual(stat.S_IMODE(out_dir.stat().st_mode), 0o700)
         for artifact in out_dir.iterdir():
             self.assertEqual(stat.S_IMODE(artifact.stat().st_mode), 0o600)
+
+    def test_archetype_route_is_persisted_for_telemetry(self) -> None:
+        route_config = self.external_path / "routes.json"
+        route_config.write_text(
+            json.dumps(
+                {
+                    "routes": {
+                        "debug-invariants": {
+                            "engine": "codex",
+                            "model": "gpt:luna",
+                            "effort": "max",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        exit_code, result, _out_dir, _summary, _capture = self.run_main(
+            extra_args=["--route", "debug-invariants"],
+            extra_env={"AGENT_EXECUTOR_CONFIG": str(route_config)},
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result["route"], "debug-invariants")
+        self.assertEqual(result["task_archetype"], "debug-invariants")
 
     def test_explicit_effort_overrides_preferred_luna_effort(self) -> None:
         exit_code, result, _out_dir, _summary, _capture = self.run_main(extra_args=["--effort", "low"])
@@ -1530,6 +1773,86 @@ else:
         self.assertEqual(exit_code, 22)
         self.assertEqual(result["status"], "scope_violation")
         self.assertEqual(result["scope_violations"], ["allowed/output.txt"])
+
+    def test_read_only_run_allows_scratch_artifacts_outside_repository(self) -> None:
+        scratch_path = self.external_path / f"artifacts-{self.run_index + 1}" / "scratch-root" / "scratch" / "notes.txt"
+        exit_code, result, out_dir, summary, capture = self.run_main(
+            expect_changes=False,
+            allow_path=None,
+            fake_output=str(scratch_path),
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["task_outcome"], "complete")
+        self.assertEqual(result["scope_violations"], [])
+        self.assertIsNotNone(result["scratch"])
+        expected_scratch = (out_dir / "scratch-root" / "scratch").resolve()
+        self.assertEqual(result["scratch"]["path"], str(expected_scratch))
+        self.assertEqual(result["scratch"]["artifacts"], [{"path": "notes.txt", "size_bytes": 16}])
+        self.assertIn("AGENT_SCRATCH=", summary)
+        self.assertIn(str(expected_scratch), capture["stdin"])
+        self.assertIn(str(expected_scratch), capture["argv"])
+
+    def test_read_only_run_fails_on_scratch_symlink_escape(self) -> None:
+        scratch_path = self.external_path / f"artifacts-{self.run_index + 1}" / "scratch-root" / "scratch" / "notes.txt"
+        outside_target = self.external_path / "leak.txt"
+        outside_target.write_text("leak\n", encoding="utf-8")
+        exit_code, result, _out_dir, _summary, _capture = self.run_main(
+            expect_changes=False,
+            allow_path=None,
+            fake_output=str(scratch_path),
+            extra_env={"FAKE_SYMLINK_ESCAPE": str(outside_target)},
+        )
+        self.assertEqual(exit_code, 22)
+        self.assertEqual(result["status"], "scope_violation")
+        self.assertEqual(result["scope_violations"], ["scratch-escape:escape.txt"])
+
+    def test_read_only_run_fails_on_path_traversal_from_scratch_into_checkout(self) -> None:
+        scratch_path = self.external_path / f"artifacts-{self.run_index + 1}" / "scratch-root" / "scratch"
+        tracked_file = self.repository.path / "tracked.txt"
+        traversed_output = scratch_path / os.path.relpath(tracked_file, scratch_path)
+        exit_code, result, _out_dir, _summary, _capture = self.run_main(
+            expect_changes=False,
+            allow_path=None,
+            fake_output=str(traversed_output),
+        )
+        self.assertEqual(exit_code, 22)
+        self.assertEqual(result["status"], "scope_violation")
+        self.assertEqual(result["scope_violations"], ["tracked.txt"])
+
+    def test_read_only_run_fails_on_path_traversal_outside_scratch(self) -> None:
+        scratch_path = self.external_path / f"artifacts-{self.run_index + 1}" / "scratch-root" / "scratch"
+        traversed_output = scratch_path / ".." / "escaped.txt"
+        exit_code, result, _out_dir, _summary, _capture = self.run_main(
+            expect_changes=False,
+            allow_path=None,
+            fake_output=str(traversed_output),
+        )
+        self.assertEqual(exit_code, 22)
+        self.assertEqual(result["status"], "scope_violation")
+        self.assertEqual(result["scope_violations"], ["scratch-escape:../escaped.txt"])
+
+    def test_read_only_run_fails_on_path_traversal_into_run_directory(self) -> None:
+        scratch_path = self.external_path / f"artifacts-{self.run_index + 1}" / "scratch-root" / "scratch"
+        traversed_output = scratch_path / ".." / ".." / "escaped.txt"
+        exit_code, result, _out_dir, _summary, _capture = self.run_main(
+            expect_changes=False,
+            allow_path=None,
+            fake_output=str(traversed_output),
+        )
+        self.assertEqual(exit_code, 22)
+        self.assertEqual(result["status"], "scope_violation")
+        self.assertEqual(result["scope_violations"], ["scratch-escape:../../escaped.txt"])
+
+    def test_read_only_run_fails_on_git_metadata_write(self) -> None:
+        exit_code, result, _out_dir, _summary, _capture = self.run_main(
+            expect_changes=False,
+            allow_path=None,
+            fake_output=".git/orchestrate-test-metadata",
+        )
+        self.assertEqual(exit_code, 22)
+        self.assertEqual(result["status"], "scope_violation")
+        self.assertEqual(result["scope_violations"], [".git/orchestrate-test-metadata"])
 
     def test_task_spec_is_the_authoritative_mutating_scope(self) -> None:
         task_spec = {
