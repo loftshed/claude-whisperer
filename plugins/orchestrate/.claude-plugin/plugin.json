@@ -1,6 +1,6 @@
 {
   "name": "orchestrate",
-  "version": "0.23.0",
+  "version": "0.23.1",
   "description": "Bounded agent execution, consultation, evidence, and audit.",
   "author": {
     "name": "loftshed"

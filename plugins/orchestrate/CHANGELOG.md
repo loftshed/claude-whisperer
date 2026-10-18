@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.23.1
+
+- fix(orchestrate): clarify peer labels and compact communication commands
+
 ## 0.23.0
 
 - feat(orchestrate): show task purpose, model and harness in peer discovery
