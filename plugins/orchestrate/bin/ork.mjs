@@ -17,7 +17,15 @@ import {
   updateRoom,
   validateRoom,
 } from "../lib/stooges-room.mjs";
-import { displayWidth, fit, plain, StoogesView } from "../lib/stooges-view.mjs";
+import {
+  glyphSet,
+  glyphTier,
+  progressBar,
+  renderPanel,
+  renderTable,
+  StoogesView,
+  wrapText,
+} from "../lib/stooges-view.mjs";
 import { cachedQuota, runTui } from "./stooges-tui.mjs";
 
 const HELP = `ork routes [--archetype <name>] [--json] [--width 120]
@@ -32,6 +40,7 @@ ork stooges --fixture <room.json> [--print|--json] [--width 120]
 New members are queued for the conductor to orchestrate.
 Use --cwd to choose the room's repository. Closing the view leaves workers running.
 1–9 focus an agent; p pins its detail; n advances the page; q exits the display.
+? opens key help; g opens the coalesced room log. Set ORK_GLYPHS=ascii|unicode|nerd to choose a glyph tier.
 `;
 
 const execute = promisify(execFile);
@@ -74,112 +83,133 @@ async function pythonJson(args) {
 }
 
 function wrap(value, width) {
-  const lines = [];
-  let line = "";
-  const tokens = plain(value).match(/\s*\S+/gu) || [];
-  for (const token of tokens) {
-    let word = token;
-    if (line && displayWidth(line + word) > width) {
-      lines.push(line);
-      line = "";
-      word = word.trimStart();
-    }
-    for (const character of word) {
-      if (line && displayWidth(line + character) > width) {
-        lines.push(line);
-        line = "";
-      }
-      line += character;
-    }
-  }
-  if (line || lines.length === 0) lines.push(line);
-  return lines;
+  return wrapText(value, width);
 }
 
-function table(headers, rows, widths) {
-  const output = [
-    headers.map((header, index) => fit(header, widths[index])).join(" | "),
-    widths.map((width) => "-".repeat(width)).join("-+-"),
-  ];
-  for (const row of rows) {
-    const cells = row.map((cell, index) =>
-      String(cell)
-        .split("\n")
-        .flatMap((line) => wrap(line, widths[index])),
+function framedLines(title, summary, body, width, { color = false, tier = glyphTier() } = {}) {
+  return renderPanel(title, [summary, ...body], width, { color, glyphs: glyphSet(tier) })
+    .map((line) => line.trimEnd())
+    .join("\n");
+}
+
+function routeTable(data, width, options = {}) {
+  const tier = options.tier || glyphTier();
+  const summary = `${data.routes.length} archetypes · ordered routes from local configuration`;
+  const bodyWidth = Math.max(4, width - 6);
+  let body;
+  if (width >= 80) {
+    const tableRows = data.routes.flatMap(({ archetype, candidates }) =>
+      candidates.map((candidate, index) => [
+        index === 0 ? archetype : "",
+        index === 0 ? "primary" : `alt ${index}`,
+        `${candidate.engine} / ${candidate.model}${candidate.effort || candidate.variant ? ` / ${candidate.effort || candidate.variant}` : ""}`,
+        candidate.tier_strengths.join(", ") || "No tier metadata",
+      ]),
     );
-    const height = Math.max(...cells.map((cell) => cell.length));
-    for (let line = 0; line < height; line++)
-      output.push(cells.map((cell, index) => fit(cell[line] || "", widths[index])).join(" | "));
+    body = renderTable(
+      ["Task archetype", "Rank", "Engine / model", "Tier strengths"],
+      tableRows,
+      bodyWidth,
+      {
+        weights: [0.24, 0.1, 0.28, 0.38],
+        tier,
+      },
+    );
+  } else if (width >= 64) {
+    const compactRows = data.routes.flatMap(({ archetype, candidates }) =>
+      candidates.map((candidate, index) => [
+        `${archetype} · ${index === 0 ? "primary" : `alt ${index}`}`,
+        `${candidate.engine} / ${candidate.model} / ${candidate.effort || candidate.variant || "default"}`,
+        candidate.tier_strengths.join(", ") || "No tier metadata",
+      ]),
+    );
+    body = renderTable(["Task / rank", "Route", "Strengths"], compactRows, bodyWidth, {
+      weights: [0.34, 0.34, 0.32],
+      tier,
+    });
+  } else {
+    body = data.routes.flatMap(({ archetype, candidates }) => [
+      archetype,
+      ...candidates.flatMap((candidate, index) => [
+        ...wrap(
+          `  ${index === 0 ? "primary" : `alt ${index}`} · ${candidate.engine} / ${candidate.model} / ${candidate.effort || candidate.variant || "default"}`,
+          bodyWidth,
+        ),
+        ...wrap(
+          `  Strengths: ${candidate.tier_strengths.join(", ") || "No tier metadata"}`,
+          bodyWidth,
+        ),
+      ]),
+      "",
+    ]);
   }
-  return output.map((line) => line.trimEnd()).join("\n");
-}
-
-function routeTable(data, width) {
-  const rows = data.routes.flatMap(({ archetype, candidates }) =>
-    candidates.map((candidate, index) => [
-      index === 0 ? archetype : "",
-      index === 0 ? "primary" : `alt ${index}`,
-      `${candidate.engine} / ${candidate.model}${candidate.effort || candidate.variant ? ` / ${candidate.effort || candidate.variant}` : ""}`,
-      candidate.tier_strengths.join(", ") || "No tier metadata",
-    ]),
-  );
-  if (width < 100)
-    return data.routes
-      .flatMap(({ archetype, candidates }) => [
-        archetype,
-        ...candidates.flatMap((candidate, index) => [
-          ...wrap(
-            `  ${index + 1}. ${candidate.engine} / ${candidate.model} / ${candidate.effort || candidate.variant || "default effort"}`,
-            width,
-          ),
-          ...wrap(`     ${candidate.tier_strengths.join(", ") || "No tier metadata"}`, width),
-        ]),
-        "",
-      ])
-      .join("\n");
-  return table(["Task archetype", "Rank", "Engine / model / effort", "Tier strengths"], rows, [
-    22,
-    7,
-    36,
-    width - 74,
-  ]);
+  return framedLines("Routes", summary, body, width, options);
 }
 
 const percent = (value) =>
   typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : "--";
 
-function telemetryTable(data, width) {
+function telemetryTable(data, width, options = {}) {
+  const tier = options.tier || glyphTier();
   const heading = `${data.runs} runs · ${data.skipped_results} skipped receipts`;
-  if (data.groups.length === 0) return `${heading}\nNo local run receipts found.`;
-  const rows = data.groups.map((group) => [
-    `${group.task_archetype}\n${group.engine} / ${group.model} / ${group.effort}`,
-    String(group.runs),
-    percent(group.accepted_rate),
-    percent(group.first_pass_rate),
-    percent(group.wilson_lb_95),
-    group.median_duration_ms == null ? "--" : `${(group.median_duration_ms / 1000).toFixed(1)}s`,
-  ]);
-  const footer = "95% lower: Wilson lower confidence bound on acceptance.";
-  if (width < 100)
-    return [
-      heading,
-      ...data.groups.flatMap((group) => [
-        ...wrap(
-          `${group.task_archetype} | ${group.engine} / ${group.model} / ${group.effort}`,
-          width,
-        ),
-        ...wrap(
-          `  ${group.runs} runs | accepted ${percent(group.accepted_rate)} | first pass ${percent(group.first_pass_rate)} | 95% lower ${percent(group.wilson_lb_95)}`,
-          width,
-        ),
-        ...wrap(
-          `  Median ${group.median_duration_ms == null ? "--" : `${(group.median_duration_ms / 1000).toFixed(1)}s`}`,
-          width,
-        ),
-      ]),
-      ...wrap(footer, width),
-    ].join("\n");
-  return `${heading}\n${table(["Task / engine / model / effort", "Runs", "Accepted", "First pass", "95% lower", "Median"], rows, [width - 62, 5, 9, 10, 10, 13])}\n${footer}`;
+  const bodyWidth = Math.max(4, width - 6);
+  if (data.groups.length === 0)
+    return framedLines("Telemetry", heading, ["No local run receipts found."], width, options);
+  const footer = "Wilson lower bound gives a conservative 95% acceptance estimate.";
+  let body;
+  if (width >= 80) {
+    const rows = data.groups.map((group) => [
+      `${group.task_archetype} · ${group.engine}/${group.model}/${group.effort}`,
+      String(group.runs),
+      `${progressBar(group.accepted_rate, 5, tier)} ${percent(group.accepted_rate)}`,
+      percent(group.first_pass_rate),
+      `${progressBar(group.wilson_lb_95, 5, tier)} ${percent(group.wilson_lb_95)}`,
+      group.median_duration_ms == null ? "--" : `${(group.median_duration_ms / 1000).toFixed(1)}s`,
+    ]);
+    body = [
+      ...renderTable(
+        ["Task / model", "Runs", "Accepted", "First pass", "95% lower", "Median"],
+        rows,
+        bodyWidth,
+        {
+          weights: [0.29, 0.07, 0.18, 0.16, 0.18, 0.12],
+          tier,
+        },
+      ),
+      ...wrap(footer, bodyWidth),
+    ];
+  } else if (width >= 64) {
+    const rows = data.groups.map((group) => [
+      `${group.task_archetype} · ${group.engine}/${group.model}`,
+      `${progressBar(group.accepted_rate, 4, tier)} ${percent(group.accepted_rate)}`,
+      `${progressBar(group.wilson_lb_95, 4, tier)} ${percent(group.wilson_lb_95)}`,
+    ]);
+    body = [
+      ...renderTable(["Task / model", "Accepted", "95% confidence"], rows, bodyWidth, {
+        weights: [0.52, 0.23, 0.25],
+        tier,
+      }),
+      ...wrap(footer, bodyWidth),
+    ];
+  } else {
+    body = data.groups.flatMap((group) => [
+      ...wrap(
+        `${group.task_archetype} · ${group.engine}/${group.model}/${group.effort}`,
+        bodyWidth,
+      ),
+      ...wrap(
+        `Accepted ${progressBar(group.accepted_rate, 4, tier)} ${percent(group.accepted_rate)} · first pass ${percent(group.first_pass_rate)}`,
+        bodyWidth,
+      ),
+      ...wrap(
+        `95% confidence ${progressBar(group.wilson_lb_95, 4, tier)} ${percent(group.wilson_lb_95)} · ${group.runs} runs · median ${group.median_duration_ms == null ? "--" : `${(group.median_duration_ms / 1000).toFixed(1)}s`}`,
+        bodyWidth,
+      ),
+      "",
+    ]);
+    body.push(...wrap(footer, bodyWidth));
+  }
+  return framedLines("Telemetry", heading, body, width, options);
 }
 
 async function summaryCommand(argv, stdout) {
@@ -226,8 +256,9 @@ async function summaryCommand(argv, stdout) {
   }
   let output;
   if (values.json) output = JSON.stringify(data, null, 2);
-  else if (command === "routes") output = routeTable(data, width);
-  else output = telemetryTable(data, width);
+  else if (command === "routes")
+    output = routeTable(data, width, { color: shouldUseColor(stdout), tier: glyphTier() });
+  else output = telemetryTable(data, width, { color: shouldUseColor(stdout), tier: glyphTier() });
   stdout.write(`${output}\n`);
   return data;
 }
@@ -318,7 +349,7 @@ export async function main(argv = process.argv.slice(2), { stdout = process.stdo
   if (values.json) stdout.write(`${JSON.stringify(room, null, 2)}\n`);
   else if (values.print || !stdout.isTTY)
     stdout.write(
-      `${new StoogesView(room)
+      `${new StoogesView(room, { color: shouldUseColor(stdout), tier: glyphTier() })
         .render(width)
         .map((line) => line.trimEnd())
         .join("\n")}\n`,

@@ -21,7 +21,9 @@ async function sandbox() {
     AGENT_EXECUTOR_CONFIG: config,
     MONITOR_CONFIG: monitor,
     MONITOR_CACHE_DIR: path.join(dir, "monitor-cache"),
+    LANG: "en_US.UTF-8",
     NO_COLOR: "1",
+    TERM: "xterm-256color",
   };
   return { dir, config, run: (args) => exec(process.execPath, [cli, ...args], { env }) };
 }
@@ -59,12 +61,8 @@ describe("ork routes", () => {
         "--width",
         "110",
       ]);
-      const cells = stdout
-        .trimEnd()
-        .split("\n")
-        .slice(2)
-        .map((line) => line.split(" | ").at(-1).trim());
-      expect(cells).toEqual(expected);
+      expect(stdout).toContain("┌ Routes");
+      for (const line of expected) expect(stdout).toContain(line);
     }
   });
 
@@ -120,6 +118,21 @@ describe("ork routes", () => {
     expect(printed).toContain("claude:fast");
     expect(printed).not.toContain("\u{1B}");
   });
+
+  it("frames route summaries at compact, medium and wide widths", async () => {
+    const app = await sandbox();
+    for (const width of [40, 64, 80]) {
+      const { stdout } = await app.run([
+        "routes",
+        "--archetype",
+        "debug-invariants",
+        "--width",
+        String(width),
+      ]);
+      expect(stdout).toContain("Routes");
+      expect(stdout.split("\n").every((line) => line.length <= width)).toBe(true);
+    }
+  });
 });
 
 describe("ork telemetry", () => {
@@ -162,11 +175,15 @@ describe("ork telemetry", () => {
       ],
     });
     const printed = (await app.run(["telemetry", "--runs-dir", runs, "--width", "120"])).stdout;
+    expect(printed).toContain("┌ Telemetry");
     expect(printed).toContain("debug-invariants");
     expect(printed).toMatch(/50(?:\.0)?%/u);
     expect(printed).toContain("2.0s");
     expect(printed.split("\n").every((line) => line.length <= 120)).toBe(true);
     expect(printed).not.toContain("\u{1B}");
+    const narrow = (await app.run(["telemetry", "--runs-dir", runs, "--width", "40"])).stdout;
+    expect(narrow).toContain("95% confidence");
+    expect(narrow.split("\n").every((line) => line.length <= 40)).toBe(true);
   });
 });
 

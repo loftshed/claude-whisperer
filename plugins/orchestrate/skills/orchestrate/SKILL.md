@@ -181,6 +181,9 @@ never substitute another family. If an exact pin is required or no matching alia
 gap and ask before substituting. For other missing models, report the gap and ask rather than silently
 substituting. See [references/runner.md](references/runner.md#model-catalogs).
 
+For the provisional task archetypes, tier-strength hints, telemetry gates, and their evidence limits,
+see [references/archetype-rationale.md](references/archetype-rationale.md).
+
 ## Check quota
 
 ```bash

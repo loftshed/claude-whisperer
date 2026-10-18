@@ -1,3 +1,4 @@
+import { shouldUseColor } from "../../monitor/lib/render.mjs";
 import { cachedQuota } from "../bin/stooges-tui.mjs";
 import {
   addMembers,
@@ -10,7 +11,8 @@ import {
 import { StoogesView } from "./stooges-view.mjs";
 
 const KEY = "stooges-room";
-const HELP = "/stooges <room-id> | new [team] | off | focus <1–9> | pin | next";
+const HELP =
+  "/stooges <room-id> | new [team] | off | focus <1–9> | pin | next · [?] help · [g] logs";
 
 // Pi accepts JSON Schema; no TypeBox runtime is needed for this object of required strings.
 const PARAMETERS = {
@@ -47,7 +49,10 @@ export default function stoogesExtension(pi) {
 
   const attach = (room, ctx, root) => {
     detach();
-    const view = new StoogesView(room, { height: 24 });
+    const view = new StoogesView(room, {
+      height: process.stdout.rows || 24,
+      color: shouldUseColor(process.stdout),
+    });
     const state = { id: room.id, ctx, view };
     active = state;
     ctx.ui.setWidget(KEY, (tui) => {
@@ -65,8 +70,9 @@ export default function stoogesExtension(pi) {
             next.quotaError = error.message;
           }
           if (!isDisposed) {
+            const isChanged = JSON.stringify(next) !== JSON.stringify(view.room);
             view.setRoom(next);
-            tui.requestRender();
+            if (isChanged) tui.requestRender();
           }
         } catch (error) {
           if (!isDisposed) {
@@ -77,7 +83,9 @@ export default function stoogesExtension(pi) {
           isRefreshing = false;
         }
       };
-      const animation = setInterval(() => tui.requestRender(), 200);
+      const animation = setInterval(() => {
+        if (view.needsAnimation) tui.requestRender();
+      }, 200);
       const poll = setInterval(refresh, 1000);
       animation.unref?.();
       poll.unref?.();
@@ -89,7 +97,10 @@ export default function stoogesExtension(pi) {
       };
       Object.assign(state, { dispose, refresh, requestRender: () => tui.requestRender() });
       return {
-        render: (width) => view.render(width),
+        render: (width) => {
+          view.height = process.stdout.rows || 24;
+          return view.render(width);
+        },
         invalidate: () => view.invalidate(),
         handleInput: (data) => {
           view.handleInput(data);

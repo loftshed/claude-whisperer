@@ -16,7 +16,13 @@ import {
   updateRoom,
   validateRoom,
 } from "../../../plugins/orchestrate/lib/stooges-room.mjs";
-import { displayWidth, StoogesView } from "../../../plugins/orchestrate/lib/stooges-view.mjs";
+import {
+  displayWidth,
+  glyphTier,
+  progressBar,
+  StoogesView,
+  wrapText,
+} from "../../../plugins/orchestrate/lib/stooges-view.mjs";
 
 const exec = promisify(execFile);
 const cli = path.resolve("plugins/orchestrate/bin/ork.mjs");
@@ -126,9 +132,13 @@ describe("adaptive view", () => {
   it("uses three columns on a wide terminal and stacked rows when narrow", () => {
     const view = new StoogesView(fixture(), { now: () => 2000 });
     const wide = view.render(120);
-    expect(wide.find((line) => line.includes("[1]"))).toContain("[3]");
+    expect(wide.join("\n")).toContain("Engine / model");
+    expect(wide.join("\n")).toContain("haiku-1");
+    expect(wide.some((line) => line.includes("[?] help"))).toBe(true);
     const narrow = view.render(70);
-    expect(narrow.find((line) => line.includes("[1]"))).not.toContain("[2]");
+    expect(narrow.join("\n")).toContain("Agent");
+    expect(narrow.join("\n")).toContain("Showing 1–3 of 3 agents");
+    expect(narrow.find((line) => line.includes("Rows "))).toContain("Rows 1–3/3");
     expect(narrow.join("\n")).toContain("Which branch should I review?");
     expect(narrow.join("\n")).toContain("haiku-1: Source inspected (×2)");
   });
@@ -179,6 +189,45 @@ describe("adaptive view", () => {
     expect(lines.join("\n")).not.toContain("\u{1B}");
   });
 
+  it("frames responsive layouts within terminal width and uses tone-colored ANSI safely", () => {
+    const room = fixture();
+    room.agents[0].output = ["\u{1B}[31munsafe\u{1B}[0m 👩‍💻 界\nnext line"];
+    const view = new StoogesView(room, { now: () => 2000, height: 28, color: true });
+    for (const width of [40, 47, 48, 63, 64, 79, 80, 120]) {
+      const lines = view.render(width);
+      expect(lines.every((line) => displayWidth(line) <= width)).toBe(true);
+      expect(lines.join("\n")).not.toContain("\u{1B}[31munsafe");
+    }
+    expect(view.render(80).join("\n")).toContain("\u{1B}[36m");
+    expect(view.render(80).join("\n")).toContain("\u{1B}[36;7m");
+    expect(view.render(80).join("\n")).toContain("next line");
+  });
+
+  it("offers explicit glyph tiers, locale-safe fallback, and eighth-step bars", () => {
+    expect(glyphTier({ ORK_GLYPHS: "nerd", LANG: "C" })).toBe("nerd");
+    expect(glyphTier({ TERM: "dumb", LANG: "en_US.UTF-8" })).toBe("ascii");
+    expect(glyphTier({ TERM: "xterm-256color" })).toBe("ascii");
+    expect(progressBar(0.125, 4, "unicode")).toBe("▌░░░");
+    expect(displayWidth("\u{F0000}")).toBe(1);
+    expect(wrapText("界", 1)).toEqual(["?"]);
+    const ascii = new StoogesView(fixture(), { height: 24, tier: "ascii" }).render(40);
+    expect(ascii.join("\n")).toContain("+ ork");
+    expect(ascii.every((line) => displayWidth(line) <= 40)).toBe(true);
+  });
+
+  it("renders an empty room, key help and a coalesced log overlay", () => {
+    const room = fixture();
+    room.agents = [];
+    const view = new StoogesView(room, { height: 24 });
+    expect(view.render(80).join("\n")).toContain("No agents queued for this room");
+    view.handleInput("?");
+    expect(view.render(80).join("\n")).toContain("Key reference");
+    view.handleInput("\u{1B}");
+    view.handleInput("g");
+    expect(view.render(80).join("\n")).toContain("haiku-1: Source inspected (×2)");
+    expect(view.render(80).join("\n")).toContain("Room log");
+  });
+
   it("renders quota pills from monitor account data", () => {
     const room = fixture();
     room.accounts = [
@@ -199,7 +248,10 @@ describe("adaptive view", () => {
         ],
       },
     ];
-    expect(new StoogesView(room, { now: () => 1000 }).render(100).join("\n")).toContain("CX 80");
+    expect(new StoogesView(room, { now: () => 1000 }).render(100).join("\n")).toContain(
+      "CX Weekly",
+    );
+    expect(new StoogesView(room, { now: () => 1000 }).render(100).join("\n")).toContain("80% left");
   });
 });
 
@@ -208,13 +260,21 @@ describe("ork CLI", () => {
     const dir = await directory();
     const file = path.join(dir, "fixture.json");
     await writeFile(file, JSON.stringify(fixture()));
-    const env = { ...process.env, AGENT_EXECUTOR_HOME: dir, NO_COLOR: "1" };
+    const env = {
+      ...process.env,
+      AGENT_EXECUTOR_HOME: dir,
+      LANG: "en_US.UTF-8",
+      NO_COLOR: "1",
+      TERM: "xterm-256color",
+    };
     const printed = await exec(
       process.execPath,
       [cli, "stooges", "--fixture", file, "--print", "--width", "70"],
       { env },
     );
     expect(printed.stdout).toContain("Conductor running · 3 agents");
+    expect(printed.stdout).toContain("┌ ork · sample-room");
+    expect(printed.stdout).toContain("[?] help");
     expect(printed.stdout).not.toContain("\u{1B}");
     const json = await exec(process.execPath, [cli, "stooges", "--fixture", file, "--json"], {
       env,
@@ -331,6 +391,77 @@ describe("terminal lifecycle", () => {
     } finally {
       input.emit("keypress", "q", { name: "q" });
       await running;
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not write the same frame on every timer tick and redraws on resize", async () => {
+    vi.useFakeTimers();
+    // eslint-disable-next-line unicorn/prefer-event-target -- Readline keypress and terminal resize use Node stream events.
+    const input = new EventEmitter();
+    input.isTTY = true;
+    input.isRaw = false;
+    input.setRawMode = vi.fn();
+    input.resume = vi.fn();
+    input.pause = vi.fn();
+    // eslint-disable-next-line unicorn/prefer-event-target -- Readline keypress and terminal resize use Node stream events.
+    const output = new EventEmitter();
+    output.isTTY = true;
+    output.rows = 24;
+    output.columns = 80;
+    output.write = vi.fn();
+    const running = runTui(
+      async () => {
+        const room = fixture();
+        for (const agent of room.agents) agent.status = "completed";
+        return room;
+      },
+      { input, output, quota: false },
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      const initialWrites = output.write.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(600);
+      expect(output.write).toHaveBeenCalledTimes(initialWrites);
+      output.columns = 90;
+      output.emit("resize");
+      expect(output.write).toHaveBeenCalledTimes(initialWrites + 1);
+      input.emit("keypress", "q", { name: "q" });
+      await running;
+      expect(input.setRawMode).toHaveBeenLastCalledWith(false);
+      expect(output.listenerCount("resize")).toBe(0);
+    } finally {
+      input.emit("keypress", "q", { name: "q" });
+      await running;
+      vi.useRealTimers();
+    }
+  });
+
+  it("restores terminal state when painting fails after entering the alternate screen", async () => {
+    vi.useFakeTimers();
+    // eslint-disable-next-line unicorn/prefer-event-target -- Readline keypress uses the Node stream EventEmitter API.
+    const input = new EventEmitter();
+    input.isTTY = true;
+    input.isRaw = false;
+    input.setRawMode = vi.fn((raw) => {
+      input.isRaw = raw;
+    });
+    input.resume = vi.fn();
+    input.pause = vi.fn();
+    const output = { isTTY: true, rows: 24, columns: 80, write: vi.fn() };
+    output.write
+      .mockImplementationOnce(() => {})
+      .mockImplementationOnce(() => {
+        throw new Error("terminal write failed");
+      });
+    try {
+      await expect(runTui(async () => fixture(), { input, output, quota: false })).rejects.toThrow(
+        "terminal write failed",
+      );
+      expect(input.isRaw).toBe(false);
+      expect(input.pause).toHaveBeenCalledOnce();
+      expect(output.write.mock.calls.at(-1)[0]).toContain("\u{1B}[?1049l");
+    } finally {
       vi.useRealTimers();
     }
   });
