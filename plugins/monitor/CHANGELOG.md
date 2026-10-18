@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.0
+
+- feat: migrate to orkest and finish orchestration tooling
+
 ## 0.12.0
 
 - Renamed plugin, CLI, MCP server, skill, macOS menu bar app (`Monitor.app`), and KDE Plasma widget to `monitor` (snapshot schema `monitor.snapshot.v1`).

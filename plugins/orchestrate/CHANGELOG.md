@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.24.0
+
+- feat(orchestrate): refine stooges TUI framing and document task archetype rationale
+- docs: clarify native messaging with external coordinators
+- feat: migrate to orkest and finish orchestration tooling
+- Add task archetype routing telemetry
+
 ## 0.23.1
 
 - fix(orchestrate): clarify peer labels and compact communication commands
