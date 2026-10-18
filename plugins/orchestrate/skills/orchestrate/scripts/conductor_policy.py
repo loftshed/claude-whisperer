@@ -3,9 +3,157 @@
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import hashlib
+import importlib.util
 import json
+import sys
+from pathlib import Path
 from typing import Any
+
+ARCHETYPE_ROLES = frozenset(
+    {
+        "debug-invariants",
+        "structural-refactor",
+        "ui-design-system",
+        "architecture-conductor",
+        "mechanical-sweep",
+        "independent-review",
+    }
+)
+
+
+@functools.cache
+def _sibling_module(name: str) -> Any:
+    path = Path(__file__).with_name(name + ".py")
+    spec = importlib.util.spec_from_file_location("executor_policy_" + name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load policy dependency {name!r}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _quota_order(candidate: dict[str, Any]) -> tuple:
+    quota = candidate.get("quota") or {}
+    return (
+        quota.get("status") == "low",
+        quota.get("status") == "credits",
+        not quota.get("expiring"),
+        not candidate.get("native"),
+        -(quota.get("surplusPts") or 0),
+    )
+
+
+def _route_profile(model: str, registry: dict[str, Any]) -> dict[str, Any] | None:
+    return next(
+        (
+            profile
+            for profile in registry.get("profiles", [])
+            if model in profile.get("selectors", []) or model in profile.get("model_ids", [])
+        ),
+        None,
+    )
+
+
+def _recommend_archetype(
+    packet: dict[str, Any],
+    registry: dict[str, Any],
+    access: list[dict[str, Any]],
+    *,
+    route_config: dict[str, dict[str, Any]] | None = None,
+    telemetry_summary: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    role = packet["role"]
+    routes = _sibling_module("routes")
+    effective_routes = route_config if route_config is not None else routes.load_routes()
+    if role not in effective_routes:
+        return None
+    candidates = routes.route_candidates(role, effective_routes)
+
+    host = packet.get("host")
+    personal_authorized = packet.get("personal_quota_authorized", False)
+    output = []
+    for route in candidates:
+        profile = _route_profile(route["model"], registry)
+        profile_models = set(profile.get("model_ids", [])) if profile else set()
+        matching_access = [
+            observed
+            for observed in access
+            if observed.get("engine") == route["engine"]
+            and (not profile_models or observed.get("model") in profile_models)
+        ]
+        # Some routed tiers have no workload profile yet (for example Gemini Pro). The monitor pool
+        # belongs to the engine family, so any live observation for that engine supplies quota only.
+        if not matching_access and not profile_models:
+            matching_access = [observed for observed in access if observed.get("engine") == route["engine"]]
+
+        seen_pools = set()
+        for observed in matching_access:
+            if not observed.get("available"):
+                continue
+            source = observed.get("source")
+            observed_at = observed.get("observed_at")
+            if not isinstance(source, str) or not source.strip() or not isinstance(observed_at, str):
+                continue
+            try:
+                when = dt.datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if when.tzinfo is None or not 0 <= (dt.datetime.now(dt.UTC) - when).total_seconds() <= 86400:
+                continue
+            billing_mode = observed.get("billing_mode", "unknown")
+            if billing_mode == "personal_subscription" and not personal_authorized:
+                continue
+            quota = observed.get("quota")
+            pool_identity = (source, (quota or {}).get("poolId"), billing_mode)
+            if pool_identity in seen_pools:
+                continue
+            seen_pools.add(pool_identity)
+            output.append(
+                {
+                    **route,
+                    "profile": profile["id"] if profile else None,
+                    "native": route["engine"] == host,
+                    "effort_candidate": route.get("effort") or (profile or {}).get("effort_candidate"),
+                    "prompt_adjustment": (profile or {}).get("prompt_adjustment", ""),
+                    "billing_mode": billing_mode,
+                    "access_source": source,
+                    "quota": quota,
+                    "quota_pace": quota.get("status", "unknown") if isinstance(quota, dict) else "unknown",
+                }
+            )
+
+    if not output:
+        return {
+            "status": "provisional_candidates",
+            "role": role,
+            "candidates": [],
+            "selection_owner": "conductor",
+            "ranking": "No accessible routed candidate has been observed in the current host quota pools.",
+        }
+
+    telemetry = _sibling_module("telemetry")
+    summary = (
+        telemetry_summary if telemetry_summary is not None else telemetry.summarize_runs(telemetry.default_runs_dir())
+    )
+    ordered = telemetry.rank_candidates_by_telemetry(output, role, summary=summary)
+
+    ranking = (
+        "Each candidate reports live quota pace and local outcome evidence; missing evidence is marked "
+        "no_telemetry. Within healthy quota pools, candidates reorder only when both have at least three "
+        "matching runs and their 95% Wilson lower bounds differ by more than 0.05; otherwise configured route "
+        "order is retained. Recovery rate is accepted outcomes after a non-first-pass attempt divided by "
+        "non-first-pass attempts."
+    )
+    return {
+        "status": "provisional_candidates",
+        "role": role,
+        "candidates": ordered,
+        "selection_owner": "conductor",
+        "ranking": ranking,
+    }
 
 
 def invocation_budget(limit: int) -> dict[str, Any]:
@@ -139,12 +287,28 @@ def decision(state: dict[str, Any], packet: dict[str, Any], evidence: dict[str, 
     return entry
 
 
-def recommend(packet: dict[str, Any], registry: dict[str, Any]) -> dict[str, Any]:
+def recommend(
+    packet: dict[str, Any],
+    registry: dict[str, Any],
+    *,
+    route_config: dict[str, dict[str, Any]] | None = None,
+    telemetry_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Filter provisional role candidates by observed access, never API price alone."""
     role = packet.get("role", "implementation")
     access = packet.get("access")
     if not isinstance(access, list):
         raise ValueError("profile recommendation requires observed access records")
+    if role in ARCHETYPE_ROLES:
+        routed = _recommend_archetype(
+            {**packet, "role": role},
+            registry,
+            access,
+            route_config=route_config,
+            telemetry_summary=telemetry_summary,
+        )
+        if routed is not None:
+            return routed
     candidates = []
     for profile in registry["profiles"]:
         if role not in profile["roles"]:
@@ -181,17 +345,7 @@ def recommend(packet: dict[str, Any], registry: dict[str, Any]) -> dict[str, Any
         # then unused capacity. A pool on credits (included quota used up, requests metered against a
         # balance that persists) comes after every pool with free room but before nearly empty ones, which
         # cannot finish a task. This orders otherwise-suitable candidates; it says nothing about quality.
-        def quota_order(candidate: dict[str, Any]) -> tuple:
-            quota = candidate["quota"] or {}
-            return (
-                quota.get("status") == "low",
-                quota.get("status") == "credits",
-                not quota.get("expiring"),
-                not candidate["native"],
-                -(quota.get("surplusPts") or 0),
-            )
-
-        candidates.sort(key=quota_order)
+        candidates.sort(key=_quota_order)
     ranking = (
         "Ordered by quota: pools with room first, then expiring (use it or lose it), then native, then unused "
         "capacity (surplusPts); pools on credits after free quota, nearly empty pools last; not quality; "

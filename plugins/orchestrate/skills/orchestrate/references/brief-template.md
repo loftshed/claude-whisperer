@@ -41,9 +41,13 @@ only when you want a human-readable preview before dispatch.
 
 All fields are required. Arrays may be empty only for `allow_paths`, `track_paths`,
 `pre_existing_changes`, and `development_checks`; an empty allowed/track scope is an explicitly
-read-only brief. Paths in `allow_paths` and `track_paths` must be non-root repository-relative
-paths. The runner derives its effective allowed scope from exactly those two arrays, so scope cannot
-drift from the submitted brief or runner enforcement.
+read-only brief. For read-only tasks, the runner automatically allocates a private per-run scratch
+directory outside the target repository and notes its location in the brief. Artifacts written there
+are collected and retained under `scratch` in the result without triggering scope violations; writes
+inside the repository or symlinks escaping the scratch boundary fail as scope violations. Paths in
+`allow_paths` and `track_paths` must be non-root repository-relative paths. The runner derives its
+effective allowed scope from exactly those two arrays, so scope cannot drift from the submitted
+brief or runner enforcement.
 
 An optional `context_packet` object accepts four string arrays: `decisions`, `failed_attempts`,
 `evidence`, and `versions`. Include only context needed to finish without unrecorded history.

@@ -4,7 +4,7 @@ Guidance for Claude Code in this repository.
 
 ## The repository
 
-`loftshed/claude-whisperer` is a personal Claude Code plugin marketplace. Each plugin is a directory under `plugins/`, an entry in [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json), and a row in the README's plugin table.
+`loftshed/orkest` is a personal Claude Code plugin marketplace. Each plugin is a directory under `plugins/`, an entry in [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json), and a row in the README's plugin table.
 
 Reference: [plugin marketplaces](https://code.claude.com/docs/en/plugin-marketplaces), [plugins reference](https://code.claude.com/docs/en/plugins-reference).
 

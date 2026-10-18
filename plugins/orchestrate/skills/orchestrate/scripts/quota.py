@@ -1,6 +1,6 @@
 """Live subscription quota per executor route, read from monitor at decision time. Nothing is stored.
 
-monitor (claude-whisperer/plugins/monitor) reports each account's rate-limit windows and ranks its
+monitor (orkest/plugins/monitor) reports each account's rate-limit windows and ranks its
 pools. This module maps an engine and model onto the pool that pays for it, so the conductor can see
 whether a route can take a run now and the runner can refuse to launch into an exhausted one.
 

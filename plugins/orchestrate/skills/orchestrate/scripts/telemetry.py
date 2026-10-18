@@ -54,6 +54,14 @@ def _task_archetype(result: dict[str, Any]) -> str:
     return "unspecified"
 
 
+def _requested_model(result: dict[str, Any]) -> str | None:
+    for source in (result, _mapping(result.get("route")), _mapping(result.get("request"))):
+        value = source.get("requested_model")
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
 def _accepted(result: dict[str, Any]) -> bool:
     review = _mapping(result.get("review"))
     outcomes = (review.get("task_outcome"), result.get("task_outcome"), review.get("status"), result.get("status"))
@@ -174,10 +182,13 @@ def summarize_runs(runs_dir: Path | str) -> dict[str, Any]:
                 "model": model,
                 "effort": effort,
                 "runs": run_count,
+                "accepted_runs": accepted_count,
+                "first_pass_runs": first_pass_count,
                 "first_pass_rate": round(first_pass_count / run_count, 6),
                 "accepted_rate": round(accepted_count / run_count, 6),
                 "wilson_lb_95": round(bound, 6) if bound is not None else None,
                 "median_duration_ms": round(statistics.median(durations), 3) if durations else None,
+                "requested_models": sorted({model for value in values if (model := _requested_model(value))}),
             }
         )
     return {
@@ -186,6 +197,94 @@ def summarize_runs(runs_dir: Path | str) -> dict[str, Any]:
         "skipped_results": skipped,
         "groups": rows,
     }
+
+
+def rank_candidates_by_telemetry(
+    candidates: list[dict[str, Any]],
+    task_archetype: str,
+    *,
+    summary: dict[str, Any] | None = None,
+    runs_dir: Path | str | None = None,
+    min_runs: int = 3,
+    min_wilson_delta: float = 0.05,
+) -> list[dict[str, Any]]:
+    """Reorder healthy candidate slots only when sample and Wilson-delta gates are met."""
+    if type(min_runs) is not int or min_runs < 1:
+        raise ValueError("min_runs must be a positive integer")
+    if (
+        type(min_wilson_delta) not in {int, float}
+        or not math.isfinite(min_wilson_delta)
+        or not 0 <= min_wilson_delta <= 1
+    ):
+        raise ValueError("min_wilson_delta must be between zero and one")
+    data = summary if summary is not None else summarize_runs(runs_dir or default_runs_dir())
+    rows = data.get("groups", []) if isinstance(data, dict) else []
+    ranked = []
+    for original_index, candidate in enumerate(candidates):
+        copy = dict(candidate)
+        candidate_models = {str(candidate.get("model", ""))}
+        candidate_models.update(str(value) for value in candidate.get("telemetry_models", []) if value)
+        candidate_models.update(str(value) for value in candidate.get("requested_models", []) if value)
+        candidate_effort = _label(candidate.get("effort")) if candidate.get("effort") is not None else None
+        matches = [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and row.get("task_archetype") == task_archetype
+            and row.get("engine") == candidate.get("engine")
+            and (
+                row.get("model") in candidate_models
+                or bool(candidate_models.intersection(row.get("requested_models", [])))
+            )
+            and (candidate_effort is None or row.get("effort") == candidate_effort)
+        ]
+        trials = sum(row.get("runs", 0) for row in matches if type(row.get("runs")) is int and row["runs"] >= 0)
+        successes = sum(
+            row.get("accepted_runs", round(row.get("accepted_rate", 0) * row.get("runs", 0)))
+            for row in matches
+            if type(row.get("accepted_runs", row.get("accepted_rate"))) in {int, float}
+        )
+        first_pass = sum(
+            row.get("first_pass_runs", round(row.get("first_pass_rate", 0) * row.get("runs", 0)))
+            for row in matches
+            if type(row.get("first_pass_runs", row.get("first_pass_rate"))) in {int, float}
+        )
+        bound = wilson_lower_bound(successes, trials) if trials else None
+        # Recovery is the accepted share of attempts that were not completed on the first pass.
+        recovery_opportunities = max(0, trials - first_pass)
+        recovery_rate = max(0, successes - first_pass) / recovery_opportunities if recovery_opportunities else None
+        copy["sample_count"] = trials if matches else None
+        copy["wilson_lb_95"] = round(bound, 6) if bound is not None else None
+        copy["recovery_rate"] = round(recovery_rate, 6) if recovery_rate is not None else None
+        copy["telemetry_status"] = (
+            "no_telemetry" if not matches else "insufficient_sample" if trials < min_runs else "available"
+        )
+        copy["_telemetry_original_index"] = original_index
+        ranked.append(copy)
+
+    healthy_slots = [
+        index
+        for index, candidate in enumerate(ranked)
+        if candidate.get("quota_pace") in {"available", "credits"}
+        and candidate["sample_count"] is not None
+        and candidate["sample_count"] >= min_runs
+        and candidate["wilson_lb_95"] is not None
+    ]
+    for start in range(len(healthy_slots) - 1):
+        best_offset = max(
+            range(start, len(healthy_slots)),
+            key=lambda offset: (
+                ranked[healthy_slots[offset]]["wilson_lb_95"],
+                -ranked[healthy_slots[offset]]["_telemetry_original_index"],
+            ),
+        )
+        current = ranked[healthy_slots[start]]
+        best = ranked[healthy_slots[best_offset]]
+        if best["wilson_lb_95"] - current["wilson_lb_95"] > min_wilson_delta:
+            ranked[healthy_slots[start]], ranked[healthy_slots[best_offset]] = best, current
+    for candidate in ranked:
+        candidate.pop("_telemetry_original_index", None)
+    return ranked
 
 
 def main(argv: list[str] | None = None) -> int:

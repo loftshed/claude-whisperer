@@ -42,6 +42,7 @@ class TelemetrySummaryTests(unittest.TestCase):
                     "task_archetype": "debug-invariants",
                     "engine": "codex",
                     "model": "gpt-6-sol",
+                    "requested_model": "gpt:sol",
                     "effort": {"bound": "high"},
                     "status": "COMPLETE",
                     "verification": {"passed": True},
@@ -53,7 +54,12 @@ class TelemetrySummaryTests(unittest.TestCase):
                 "two",
                 {
                     "role": "debug-invariants",
-                    "route": {"engine": "codex", "model": "gpt-6-sol", "effort": "high"},
+                    "route": {
+                        "engine": "codex",
+                        "model": "gpt-6-sol",
+                        "requested_model": "gpt:sol",
+                        "effort": "high",
+                    },
                     "review": {"task_outcome": "ACCEPTED", "verification": {"status": "passed"}},
                     "resumed_from": "earlier-result.json",
                     "attempts": 1,
@@ -98,10 +104,13 @@ class TelemetrySummaryTests(unittest.TestCase):
                     "model": "gpt-6-sol",
                     "effort": "high",
                     "runs": 4,
+                    "accepted_runs": 3,
+                    "first_pass_runs": 2,
                     "first_pass_rate": 0.5,
                     "accepted_rate": 0.75,
                     "wilson_lb_95": 0.300642,
                     "median_duration_ms": 2500.0,
+                    "requested_models": ["gpt:sol"],
                 }
             ],
         )
@@ -134,12 +143,130 @@ class TelemetrySummaryTests(unittest.TestCase):
                 "model": "unspecified",
                 "effort": "unspecified",
                 "runs": 1,
+                "accepted_runs": 0,
+                "first_pass_runs": 0,
                 "first_pass_rate": 0.0,
                 "accepted_rate": 0.0,
                 "wilson_lb_95": 0.0,
                 "median_duration_ms": None,
+                "requested_models": [],
             },
         )
+
+    def test_candidate_ranker_uses_requested_selector_and_preserves_unranked_slots(self) -> None:
+        summary = {
+            "groups": [
+                {
+                    "task_archetype": "debug-invariants",
+                    "engine": "codex",
+                    "model": "gpt-6.1-sol",
+                    "effort": "high",
+                    "runs": 5,
+                    "accepted_runs": 2,
+                    "first_pass_runs": 1,
+                    "accepted_rate": 0.4,
+                    "wilson_lb_95": TELEMETRY.wilson_lower_bound(2, 5),
+                    "requested_models": ["gpt:sol"],
+                },
+                {
+                    "task_archetype": "debug-invariants",
+                    "engine": "claude",
+                    "model": "claude-fable-5-1",
+                    "effort": "high",
+                    "runs": 5,
+                    "accepted_runs": 5,
+                    "first_pass_runs": 5,
+                    "accepted_rate": 1.0,
+                    "wilson_lb_95": TELEMETRY.wilson_lower_bound(5, 5),
+                    "requested_models": ["claude:frontier"],
+                },
+            ]
+        }
+        candidates = [
+            {
+                "engine": "codex",
+                "model": "gpt:sol",
+                "effort": "high",
+                "quota_pace": "available",
+            },
+            {"engine": "agy", "model": "gemini:pro", "quota_pace": "available"},
+            {"engine": "claude", "model": "claude:frontier", "effort": "high", "quota_pace": "available"},
+        ]
+
+        ranked = TELEMETRY.rank_candidates_by_telemetry(candidates, "debug-invariants", summary=summary)
+
+        self.assertEqual([candidate["model"] for candidate in ranked], ["claude:frontier", "gemini:pro", "gpt:sol"])
+        self.assertEqual([candidate["sample_count"] for candidate in ranked], [5, None, 5])
+        self.assertGreater(ranked[0]["wilson_lb_95"], ranked[2]["wilson_lb_95"])
+        self.assertEqual(ranked[2]["recovery_rate"], 0.25)
+        self.assertEqual(ranked[1]["telemetry_status"], "no_telemetry")
+
+    def test_candidate_ranker_does_not_mix_archetypes_or_rank_below_three_runs(self) -> None:
+        summary = {
+            "groups": [
+                {
+                    "task_archetype": "structural-refactor",
+                    "engine": "codex",
+                    "model": "gpt:sol",
+                    "effort": "unspecified",
+                    "runs": 100,
+                    "accepted_runs": 100,
+                    "first_pass_runs": 100,
+                    "accepted_rate": 1.0,
+                    "wilson_lb_95": 0.963005,
+                    "requested_models": [],
+                },
+                {
+                    "task_archetype": "debug-invariants",
+                    "engine": "codex",
+                    "model": "gpt:sol",
+                    "effort": "unspecified",
+                    "runs": 2,
+                    "accepted_runs": 2,
+                    "first_pass_runs": 2,
+                    "accepted_rate": 1.0,
+                    "wilson_lb_95": 0.510109,
+                    "requested_models": [],
+                },
+                {
+                    "task_archetype": "debug-invariants",
+                    "engine": "claude",
+                    "model": "claude:frontier",
+                    "effort": "unspecified",
+                    "runs": 3,
+                    "accepted_runs": 2,
+                    "first_pass_runs": 1,
+                    "accepted_rate": 2 / 3,
+                    "wilson_lb_95": TELEMETRY.wilson_lower_bound(2, 3),
+                    "requested_models": [],
+                },
+                {
+                    "task_archetype": "debug-invariants",
+                    "engine": "codex",
+                    "model": "gpt-6.1-sol",
+                    "effort": "unspecified",
+                    "runs": 100,
+                    "accepted_runs": 100,
+                    "first_pass_runs": 100,
+                    "accepted_rate": 1.0,
+                    "wilson_lb_95": 0.963005,
+                    "requested_models": ["gpt:terra"],
+                },
+            ]
+        }
+
+        ranked = TELEMETRY.rank_candidates_by_telemetry(
+            [
+                {"engine": "codex", "model": "gpt:sol", "quota_pace": "available"},
+                {"engine": "claude", "model": "claude:frontier", "quota_pace": "available"},
+            ],
+            "debug-invariants",
+            summary=summary,
+        )
+
+        self.assertEqual([candidate["model"] for candidate in ranked], ["gpt:sol", "claude:frontier"])
+        self.assertEqual(ranked[0]["sample_count"], 2)
+        self.assertEqual(ranked[0]["telemetry_status"], "insufficient_sample")
 
     def test_cli_emits_json_and_default_cache_location_follows_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

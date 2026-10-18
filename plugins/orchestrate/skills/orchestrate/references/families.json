@@ -27,7 +27,11 @@
       "tier_strengths": {
         "fast": ["speed", "cost efficiency", "routine agent tasks"],
         "flash-low": ["low latency", "high-throughput tasks"],
-        "flash-high": ["long-horizon software engineering", "autonomous agents", "complex workflows"],
+        "flash-high": [
+          "long-horizon software engineering",
+          "autonomous agents",
+          "complex workflows"
+        ],
         "pro": ["broad knowledge", "advanced reasoning", "large-context synthesis"]
       }
     },
@@ -36,8 +40,18 @@
       "default_tier": "best",
       "tiers": { "fast": "haiku", "balanced": "sonnet", "best": "opus", "frontier": "fable" },
       "tier_strengths": {
-        "fast": ["low-latency tasks", "high-volume processing", "cost-sensitive work", "subagent tasks"],
-        "balanced": ["everyday coding", "agentic tool use", "data analysis", "visual understanding"],
+        "fast": [
+          "low-latency tasks",
+          "high-volume processing",
+          "cost-sensitive work",
+          "subagent tasks"
+        ],
+        "balanced": [
+          "everyday coding",
+          "agentic tool use",
+          "data analysis",
+          "visual understanding"
+        ],
         "best": ["complex reasoning", "agentic coding", "knowledge work"],
         "frontier": ["demanding reasoning", "long-running agentic coding", "multi-step research"]
       }

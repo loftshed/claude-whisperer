@@ -11,9 +11,9 @@ Private personal plugin marketplace and versioned skill backup.
 orchestrate adds a native `claude` engine, keeps hosted models off OpenRouter, reads routes from `~/.config/agent-executor/config.json` (`routes`, `init`, `doctor`), and installs from a checkout with `plugins/orchestrate/install.sh`, which links every harness to one copy. Routing calibration is still deferred; model profiles remain provisional. See the [checkpoint and resume notes](plugins/orchestrate/skills/orchestrate/references/design-completion.md).
 
 ```text
-/plugin marketplace add loftshed/claude-whisperer
-/plugin install orchestrate@claude-whisperer
-/plugin install monitor@claude-whisperer
+/plugin marketplace add loftshed/orkest
+/plugin install orchestrate@orkest
+/plugin install monitor@orkest
 ```
 
 monitor also has a CLI, a menu bar app and MCP registrations for Codex and agy, installed from a checkout: see [its README](plugins/monitor/README.md#install).

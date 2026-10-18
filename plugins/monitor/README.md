@@ -53,22 +53,22 @@ Pools are the independently limited groups inside an account: Antigravity's Gemi
 
 ## Install
 
-Part of the private [claude-whisperer](../../README.md) marketplace. Requires Node 22+ and the CLIs of the providers you use. Nothing is installed from npm.
+Part of the private [orkest](../../README.md) marketplace. Requires Node 22+ and the CLIs of the providers you use. Nothing is installed from npm.
 
 Everything installs from a checkout. The marketplace is added from the local path, so plugin installs follow the checkout without a push.
 
 ```sh
-gh repo clone loftshed/claude-whisperer ~/Documents/personal/claude-whisperer
-cd ~/Documents/personal/claude-whisperer/plugins/monitor
+gh repo clone loftshed/orkest ~/Documents/personal/orkest
+cd ~/Documents/personal/orkest/plugins/monitor
 ./install.sh    # launcher, config, menu bar app + login agent (macOS), skill links for agy and OpenCode
 
 # Plugin (MCP server + skill) in each Claude Code profile: once plain, once with CLAUDE_CONFIG_DIR=~/.claude-personal
-claude plugin marketplace add ~/Documents/personal/claude-whisperer
-claude plugin install monitor@claude-whisperer --scope user
+claude plugin marketplace add ~/Documents/personal/orkest
+claude plugin install monitor@orkest --scope user
 
 # Plugin (skill) in Codex
-codex plugin marketplace add ~/Documents/personal/claude-whisperer
-codex plugin add monitor@claude-whisperer
+codex plugin marketplace add ~/Documents/personal/orkest
+codex plugin add monitor@orkest
 
 # MCP server in every other harness found
 ~/.local/bin/monitor mcp-install

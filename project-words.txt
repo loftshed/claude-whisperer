@@ -12,14 +12,17 @@ lofstpe
 lstart
 LSUI
 moonshotai
+ork
 osascript
 plaude
 pousr
 pyupgrade
 qwen
+stooges
 swiftc
 udcff
 unstarted
+unstub
 xcrun
 xhigh
 xpzf
@@ -32,3 +35,4 @@ pypirc
 todowrite
 todoread
 multiedit
+orkest

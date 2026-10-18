@@ -36,7 +36,10 @@ function stepsFor(plan, target) {
 }
 
 test("plans the default Claude profile with its normal keychain environment and add command", () => {
-  const [step] = stepsFor(registrationPlan(config(), launcher, { home }), "Claude Code (~/.claude)");
+  const [step] = stepsFor(
+    registrationPlan(config(), launcher, { home }),
+    "Claude Code (~/.claude)",
+  );
 
   expect(step).toMatchObject({
     kind: "cli",
@@ -73,7 +76,10 @@ test("uses the enabled monitor plugin instead of adding a duplicate Claude serve
 
   expect(steps).toHaveLength(1);
   expect(steps[0]).toMatchObject({ kind: "file", note: "provided by the monitor plugin" });
-  expect(steps[0].apply()).toStrictEqual({ changed: false, note: "provided by the monitor plugin" });
+  expect(steps[0].apply()).toStrictEqual({
+    changed: false,
+    note: "provided by the monitor plugin",
+  });
 });
 
 test("deduplicates Claude profiles and skips them when requested", () => {

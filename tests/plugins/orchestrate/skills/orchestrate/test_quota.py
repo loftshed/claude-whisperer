@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import io
 import json
 import os
@@ -14,6 +15,8 @@ import test_run_agent as fixtures
 RUNNER = fixtures.RUNNER
 QUOTA = RUNNER.bundled_module("quota")
 POLICY = RUNNER.bundled_module("conductor_policy")
+ROUTES = RUNNER.bundled_module("routes")
+TELEMETRY = RUNNER.bundled_module("telemetry")
 
 
 def lane(
@@ -395,6 +398,198 @@ class DispatchableRecommendTests(unittest.TestCase):
         current["lanes"][3]["expiring"] = False
         # Nothing expiring: the host's own model (native) comes first.
         self.assertEqual(self.ranked("codex", current), ["gpt-5.6-luna", "gemini-3.8-flash-medium"])
+
+
+class ArchetypeRecommendTests(unittest.TestCase):
+    routes = {
+        "debug-invariants": {
+            "engine": "codex",
+            "model": "gpt:sol",
+            "effort": "high",
+            "alternates": [
+                {"engine": "agy", "model": "gemini:flash-high"},
+                {"engine": "claude", "model": "claude:frontier", "effort": "high"},
+            ],
+        }
+    }
+    registry = {
+        "profiles": [
+            {"id": "sol", "selectors": ["gpt:sol"], "model_ids": ["gpt-6.1-sol"], "roles": []},
+            {
+                "id": "fable",
+                "selectors": ["claude:frontier"],
+                "model_ids": ["claude-fable-5-1"],
+                "roles": [],
+            },
+        ]
+    }
+
+    @staticmethod
+    def access(status_by_engine: dict[str, str] | None = None) -> list[dict]:
+        status_by_engine = status_by_engine or {}
+        return [
+            {
+                "engine": engine,
+                "model": model,
+                "available": status_by_engine.get(engine) != "blocked",
+                "source": f"monitor:{engine}",
+                "observed_at": dt.datetime.now(dt.UTC).isoformat(),
+                "billing_mode": "subscription",
+                "quota": {
+                    "status": status_by_engine.get(engine, "available"),
+                    "poolId": engine,
+                    "surplusPts": 10,
+                },
+            }
+            for engine, model in (
+                ("codex", "gpt-6.1-sol"),
+                ("agy", "gemini-3.8-flash-high"),
+                ("claude", "claude-fable-5-1"),
+            )
+        ]
+
+    @staticmethod
+    def summary(codex: tuple[int, int], claude: tuple[int, int]) -> dict:
+        groups = []
+        for engine, model, selector, effort, (successes, trials) in (
+            ("codex", "gpt-6.1-sol", "gpt:sol", "high", codex),
+            ("claude", "claude-fable-5-1", "claude:frontier", "high", claude),
+        ):
+            groups.append(
+                {
+                    "task_archetype": "debug-invariants",
+                    "engine": engine,
+                    "model": model,
+                    "effort": effort,
+                    "runs": trials,
+                    "accepted_runs": successes,
+                    "first_pass_runs": successes,
+                    "accepted_rate": successes / trials if trials else 0,
+                    "wilson_lb_95": TELEMETRY.wilson_lower_bound(successes, trials),
+                    "requested_models": [selector],
+                }
+            )
+        return {"groups": groups}
+
+    def recommend(self, access: list[dict], summary: dict, *, personal_quota_authorized: bool = False) -> dict:
+        return POLICY.recommend(
+            {
+                "role": "debug-invariants",
+                "host": "codex",
+                "access": access,
+                "personal_quota_authorized": personal_quota_authorized,
+            },
+            self.registry,
+            route_config=self.routes,
+            telemetry_summary=summary,
+        )
+
+    def test_archetype_routes_are_available_even_without_profiles_for_the_role(self) -> None:
+        summary = self.summary((2, 5), (5, 5))
+        result = self.recommend(self.access(), summary)
+
+        self.assertEqual(result["role"], "debug-invariants")
+        self.assertEqual(
+            [candidate["model"] for candidate in result["candidates"]],
+            ["claude:frontier", "gemini:flash-high", "gpt:sol"],
+        )
+        self.assertEqual(result["candidates"][0]["sample_count"], 5)
+        self.assertGreater(result["candidates"][0]["wilson_lb_95"], result["candidates"][2]["wilson_lb_95"])
+
+    def test_low_quota_does_not_reorder_routes_and_blocked_routes_are_removed(self) -> None:
+        access = self.access({"agy": "low", "claude": "blocked"})
+        summary = self.summary((2, 5), (5, 5))
+        result = self.recommend(access, summary)
+
+        self.assertEqual([candidate["model"] for candidate in result["candidates"]], ["gpt:sol", "gemini:flash-high"])
+        self.assertEqual(result["candidates"][0]["quota_pace"], "available")
+        self.assertEqual(result["candidates"][1]["quota"]["status"], "low")
+
+    def test_stale_or_unattributed_access_records_are_hard_filtered(self) -> None:
+        access = self.access()
+        access[0]["observed_at"] = "2000-01-01T00:00:00Z"
+        access[1]["source"] = ""
+        access[2].pop("observed_at")
+        result = self.recommend(access, {"groups": []})
+
+        self.assertEqual([candidate["model"] for candidate in result["candidates"]], [])
+
+    def test_wilson_delta_must_exceed_point_zero_five_to_change_route_priority(self) -> None:
+        summary = self.summary((950, 1000), (940, 1000))
+        result = self.recommend(self.access(), summary)
+
+        self.assertLess(abs(result["candidates"][0]["wilson_lb_95"] - result["candidates"][2]["wilson_lb_95"]), 0.05)
+        self.assertEqual(
+            [candidate["model"] for candidate in result["candidates"]],
+            ["gpt:sol", "gemini:flash-high", "claude:frontier"],
+        )
+
+    def test_personal_pools_remain_excluded_without_authorization(self) -> None:
+        access = self.access()
+        access[2] = {**access[2], "billing_mode": "personal_subscription"}
+        summary = self.summary((2, 5), (5, 5))
+
+        self.assertNotIn("claude:frontier", [c["model"] for c in self.recommend(access, summary)["candidates"]])
+        self.assertIn(
+            "claude:frontier",
+            [c["model"] for c in self.recommend(access, summary, personal_quota_authorized=True)["candidates"]],
+        )
+
+    def test_all_six_default_archetypes_use_their_configured_candidate_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "no-config.json"
+            with mock.patch.dict(os.environ, {"AGENT_EXECUTOR_CONFIG": str(config)}):
+                routes = ROUTES.load_routes()
+                roles = POLICY.ARCHETYPE_ROLES
+                access = self.access()
+                summary = {"groups": []}
+
+                for role in roles:
+                    with self.subTest(role=role):
+                        expected = [candidate["model"] for candidate in ROUTES.route_candidates(role, routes)]
+                        result = POLICY.recommend(
+                            {"role": role, "host": "unknown", "access": access},
+                            {"profiles": []},
+                            telemetry_summary=summary,
+                        )
+                        self.assertEqual([candidate["model"] for candidate in result["candidates"]], expected)
+
+    def test_live_local_receipts_feed_policy_ranking(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            runs = home / "runs-v1"
+            for engine, model, selector, successes in (
+                ("codex", "gpt-6.1-sol", "gpt:sol", 3),
+                ("claude", "claude-fable-5-1", "claude:frontier", 5),
+            ):
+                for index in range(5):
+                    directory = runs / f"{engine}-{index}"
+                    directory.mkdir(parents=True)
+                    (directory / "result.json").write_text(
+                        json.dumps(
+                            {
+                                "task_archetype": "debug-invariants",
+                                "engine": engine,
+                                "model": model,
+                                "requested_model": selector,
+                                "effort": {"bound": "high"},
+                                "status": "COMPLETE" if index < successes else "FAILED",
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+            with mock.patch.dict(os.environ, {"AGENT_EXECUTOR_HOME": temporary}):
+                result = POLICY.recommend(
+                    {"role": "debug-invariants", "host": "unknown", "access": self.access()},
+                    self.registry,
+                    route_config=self.routes,
+                )
+
+        self.assertEqual(
+            [candidate["model"] for candidate in result["candidates"]],
+            ["claude:frontier", "gemini:flash-high", "gpt:sol"],
+        )
+        self.assertEqual([candidate["sample_count"] for candidate in result["candidates"]], [5, None, 5])
 
 
 if __name__ == "__main__":

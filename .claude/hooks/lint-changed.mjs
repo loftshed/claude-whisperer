@@ -26,7 +26,7 @@ const { isAbsolute, relative, resolve, sep } = path;
 
 const LINT_TIMEOUT_MS = 120_000;
 const MAX_FIX_ATTEMPTS = 3;
-const defaultStateDirectory = resolve(tmpdir(), "claude-whisperer-turn-lint");
+const defaultStateDirectory = resolve(tmpdir(), "orkest-turn-lint");
 
 const repositoryPath = (file, projectDirectory) => {
   if (typeof file !== "string" || !file.trim()) {
