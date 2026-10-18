@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.23.0
+
+- feat(orchestrate): show task purpose, model and harness in peer discovery
+
 ## 0.22.0
 
 - Add `run_agent.py consult`: one focused question to a more capable model, with inline context and

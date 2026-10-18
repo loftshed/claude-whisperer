@@ -6,7 +6,7 @@ Private personal plugin marketplace and versioned skill backup.
 | ----------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | [`monitor`](plugins/monitor/README.md)                | 0.12.0  | Remaining quota across Claude Code profiles, Codex and Antigravity, and where to spend it: MCP server, skill, CLI/TUI, macOS menu bar app. |
 | [`bailout`](plugins/bailout/skills/bailout/README.md) | 1.2.0   | Manual handoffs and automatic usage checkpoints that stay inactive until you explicitly arm the session.                                   |
-| `orchestrate`                                         | 0.22.0  | Bounded agent execution, consultation, evidence, and audit across Codex, Antigravity, Claude Code and OpenCode.                            |
+| `orchestrate`                                         | 0.23.0  | Bounded agent execution, consultation, evidence, and audit across Codex, Antigravity, Claude Code and OpenCode.                            |
 
 orchestrate adds a native `claude` engine, keeps hosted models off OpenRouter, reads routes from `~/.config/agent-executor/config.json` (`routes`, `init`, `doctor`), and installs from a checkout with `plugins/orchestrate/install.sh`, which links every harness to one copy. Routing calibration is still deferred; model profiles remain provisional. See the [checkpoint and resume notes](plugins/orchestrate/skills/orchestrate/references/design-completion.md).
 
