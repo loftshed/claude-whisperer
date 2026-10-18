@@ -1,12 +1,18 @@
 {
   "schema": "agent-executor.families.v2",
-  "note": "A selector (`gpt:sol`, `deepseek`) names a family and a tier. A tier value that is an exact catalog ID (Claude Code aliases, OpenRouter's maintained `~vendor/...-latest` aliases) is used as is. In a family with a prefix, any other value is a keyword: among live IDs that start with the prefix and contain the keyword as whole words (separated by `-` or `/`), the highest version (`6.1`, `v4`) wins. A family without a prefix takes exact IDs only. Run `run_agent.py families` to see what each selector resolves to.",
+  "note": "A selector (`gpt:sol`, `deepseek`) names a family and a tier. A tier value that is an exact catalog ID (Claude Code aliases, OpenRouter's maintained `~vendor/...-latest` aliases) is used as is. In a family with a prefix, any other value is a keyword: among live IDs that start with the prefix and contain the keyword as whole words (separated by `-` or `/`), the highest version (`6.1`, `v4`) wins. A family without a prefix takes exact IDs only. Optional tier_strengths describe task fit without changing selector resolution. Run `run_agent.py families` to see what each selector resolves to.",
   "families": {
     "gpt": {
       "engine": "codex",
       "prefix": "gpt-",
       "default_tier": "sol",
-      "tiers": { "luna": "luna", "terra": "terra", "sol": "sol", "astra": "astra" }
+      "tiers": { "luna": "luna", "terra": "terra", "sol": "sol", "astra": "astra" },
+      "tier_strengths": {
+        "sol": ["complex coding", "agentic workflows", "professional software work"],
+        "astra": ["demanding reasoning", "complex coding", "multi-step workflows"],
+        "luna": ["focused tasks", "high-volume work", "low latency", "cost efficiency"],
+        "terra": ["balanced speed", "general-purpose reasoning", "cost efficiency"]
+      }
     },
     "gemini": {
       "engine": "agy",
@@ -17,12 +23,24 @@
         "flash-low": "flash-low",
         "flash-high": "flash-high",
         "pro": "pro-high"
+      },
+      "tier_strengths": {
+        "fast": ["speed", "cost efficiency", "routine agent tasks"],
+        "flash-low": ["low latency", "high-throughput tasks"],
+        "flash-high": ["long-horizon software engineering", "autonomous agents", "complex workflows"],
+        "pro": ["broad knowledge", "advanced reasoning", "large-context synthesis"]
       }
     },
     "claude": {
       "engine": "claude",
       "default_tier": "best",
-      "tiers": { "fast": "haiku", "balanced": "sonnet", "best": "opus", "frontier": "fable" }
+      "tiers": { "fast": "haiku", "balanced": "sonnet", "best": "opus", "frontier": "fable" },
+      "tier_strengths": {
+        "fast": ["low-latency tasks", "high-volume processing", "cost-sensitive work", "subagent tasks"],
+        "balanced": ["everyday coding", "agentic tool use", "data analysis", "visual understanding"],
+        "best": ["complex reasoning", "agentic coding", "knowledge work"],
+        "frontier": ["demanding reasoning", "long-running agentic coding", "multi-step research"]
+      }
     },
     "deepseek": {
       "engine": "opencode",
@@ -30,6 +48,10 @@
       "tiers": {
         "flash": "openrouter/~deepseek/deepseek-flash-latest",
         "pro": "openrouter/~deepseek/deepseek-pro-latest"
+      },
+      "tier_strengths": {
+        "flash": ["high-throughput inference", "agentic coding", "multimodal understanding"],
+        "pro": ["complex reasoning", "high-effort agent workflows"]
       }
     },
     "glm": {
@@ -38,12 +60,19 @@
       "tiers": {
         "flash": "openrouter/~z-ai/glm-flash-latest",
         "full": "openrouter/~z-ai/glm-latest"
+      },
+      "tier_strengths": {
+        "flash": ["fast agentic coding", "multimodal tasks"],
+        "full": ["complex software engineering", "multi-agent collaboration"]
       }
     },
     "kimi": {
       "engine": "opencode",
       "default_tier": "default",
-      "tiers": { "default": "openrouter/~moonshotai/kimi-latest" }
+      "tiers": { "default": "openrouter/~moonshotai/kimi-latest" },
+      "tier_strengths": {
+        "default": ["multimodal understanding", "visual-to-code workflows", "agent swarms"]
+      }
     }
   }
 }

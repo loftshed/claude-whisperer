@@ -42,6 +42,25 @@ def load_routes() -> dict[str, dict[str, Any]]:
     return routes
 
 
+def route_candidates(role: str, routes: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Return a route's primary choice followed by its ranked alternates."""
+    effective_routes = routes if routes is not None else load_routes()
+    try:
+        route = effective_routes[role]
+    except KeyError as error:
+        raise ValueError(f"unknown route {role!r}") from error
+    if not isinstance(route, dict) or not route.get("engine") or not route.get("model"):
+        raise ValueError(f"route {role!r} needs an engine and model")
+    alternates = route.get("alternates", [])
+    if not isinstance(alternates, list) or any(
+        not isinstance(candidate, dict) or not candidate.get("engine") or not candidate.get("model")
+        for candidate in alternates
+    ):
+        raise ValueError(f"route {role!r} alternates must be an array of engine/model objects")
+    primary = {key: value for key, value in route.items() if key != "alternates"}
+    return [primary, *(dict(candidate) for candidate in alternates)]
+
+
 def engine_default(engine: str, routes: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
     """The route an engine uses when only --engine is given: the first role, in a fixed order, on it."""
     routes = routes if routes is not None else load_routes()
