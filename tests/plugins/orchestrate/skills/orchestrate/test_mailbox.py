@@ -70,6 +70,102 @@ class MailboxTests(unittest.TestCase):
         self.assertRegex(self.codex["name"], r"^codex:example-app-[0-9a-f]{2}$")
         self.assertEqual(sorted(peer["harness"] for peer in MAILBOX.peers(self.base)), ["claude", "codex"])
 
+    def test_task_display_name_updates_without_changing_routing(self):
+        original = self.claude["name"]
+        self.assertEqual(MAILBOX.display_name(self.claude), original)
+        focused = MAILBOX.set_focus(self.base, self.claude["session"], "  Designer · translation\n parity ")
+        self.assertEqual(MAILBOX.display_name(focused), "Designer · translation parity")
+        refreshed = self.peer(self.claude["session"], "claude", str(self.repository))
+        self.assertEqual(refreshed["name"], original)
+        self.assertEqual(MAILBOX.display_name(refreshed), "Designer · translation parity")
+        listing = MAILBOX.table([refreshed], refreshed["session"])
+        self.assertTrue(
+            listing.startswith("Designer · translation parity · model unknown · Claude Code  [address: " + original)
+        )
+        self.assertIn(
+            "- Designer · translation parity · model unknown · Claude Code [address: " + original,
+            MAILBOX.describe_colleagues([refreshed], self.codex),
+        )
+        MAILBOX.set_focus(self.base, self.claude["session"], "Mock server · rebase fixes")
+        MAILBOX.set_focus(self.base, self.codex["session"], "Mock server · rebase fixes")
+        MAILBOX.send(self.base, sender=self.codex, to=original, text="alias still works")
+        MAILBOX.send(self.base, sender=self.codex, to=self.claude["session"], text="ID still works")
+        self.assertEqual(
+            [m["text"] for m in MAILBOX.take(self.base, self.claude["session"])],
+            ["alias still works", "ID still works"],
+        )
+
+    def test_shared_branch_and_duplicate_task_names_keep_checkout_and_session_identity(self):
+        repo = self.git_checkout("purpose-repo")
+        other = Path(self.temporary.name) / "purpose-worktree"
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "--detach", str(other)], check=True)
+        first = self.peer("shared-prefix-first", "codex", str(repo))
+        second = self.peer("shared-prefix-second", "claude", str(other))
+        first = MAILBOX.set_focus(self.base, first["session"], "Review parity")
+        second = MAILBOX.set_focus(self.base, second["session"], "Review parity")
+        # Matching branch labels and short ID prefixes must not collapse separate sessions.
+        second["branch"] = first["branch"]
+        listing = MAILBOX.table([first, second], first["session"])
+        self.assertIn("repo: purpose-repo  main  worktree: purpose-repo", listing)
+        self.assertIn("repo: purpose-repo  main  worktree: purpose-worktree", listing)
+        self.assertIn("[id: shared-prefix-first]", listing)
+        self.assertIn("[id: shared-prefix-second]", listing)
+        self.assertNotIn(str(repo), listing)
+        self.assertNotIn(str(other), listing)
+        result = mailbox_cli(
+            self.base,
+            "peers",
+            "--session",
+            first["session"],
+            "--harness",
+            "codex",
+            "--format",
+            "json",
+            cwd=repo,
+            check=True,
+        )
+        peers = json.loads(result.stdout)
+        row = next(p for p in peers if p["session"] == second["session"])
+        self.assertEqual(row["displayName"], "Review parity")
+        self.assertEqual(row["repositoryName"], "purpose-repo")
+        self.assertEqual(row["checkout"], str(other.resolve()))
+
+    def test_models_are_explicit_and_refreshes_preserve_them(self):
+        peer = MAILBOX.set_focus(self.base, self.claude["session"], "Review parity", model="claude-fable-5.1")
+        self.assertEqual(MAILBOX.display_label(peer), "Review parity · claude-fable-5.1 · Claude Code")
+        self.assertEqual(peer["modelSource"], "declared")
+        refreshed = self.peer(self.claude["session"], "claude", str(self.repository))
+        self.assertEqual(refreshed["model"], "claude-fable-5.1")
+        payload = {
+            "hook_event_name": "SessionStart",
+            "session_id": "runtime-model",
+            "cwd": str(self.repository),
+            "model": {"id": "gpt-6-sol"},
+        }
+        with mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]):
+            MAILBOX.hook(payload, harness="codex", base=self.base)
+        observed = MAILBOX.load(MAILBOX.peer_path(self.base, "runtime-model"))
+        self.assertEqual(observed["model"], "gpt-6-sol")
+        self.assertEqual(observed["modelSource"], "runtime")
+        with mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]):
+            MAILBOX.hook({**payload, "model": "gpt-6-astra"}, harness="codex", base=self.base)
+        self.assertEqual(MAILBOX.load(MAILBOX.peer_path(self.base, "runtime-model"))["model"], "gpt-6-astra")
+        result = mailbox_cli(
+            self.base,
+            "focus",
+            "--session",
+            self.claude["session"],
+            "--harness",
+            "claude",
+            "--text",
+            "Rebase fixes",
+            "--model",
+            "claude-fable-5.1",
+            check=True,
+        )
+        self.assertIn("Rebase fixes", result.stdout)
+        self.assertIn("model unknown · Codex", MAILBOX.table([self.codex], self.codex["session"]))
+
     def test_send_delivers_in_order_and_marks_read_once(self):
         first = MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text="one")
         second = MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text="two")

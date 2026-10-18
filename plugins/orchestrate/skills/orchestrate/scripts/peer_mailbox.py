@@ -220,6 +220,37 @@ def peer_name(harness: str, cwd: str, session: str) -> str:
     return name if harness == "claude" else f"{harness}:{name}"
 
 
+def display_name(peer: dict[str, Any]) -> str:
+    """Task label derived from focus; keep the generated name as a routing alias."""
+    return peer.get("focus") or peer["name"]
+
+
+def model_name(peer: dict[str, Any]) -> str:
+    return peer.get("model") or "model unknown"
+
+
+def harness_name(peer: dict[str, Any]) -> str:
+    return {"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode", "gemini": "Gemini / Antigravity"}.get(
+        peer.get("harness"), "harness unknown"
+    )
+
+
+def display_label(peer: dict[str, Any]) -> str:
+    return f"{display_name(peer)} · {model_name(peer)} · {harness_name(peer)}"
+
+
+def model_fields(model: str, source: str = "declared") -> dict[str, str]:
+    if not isinstance(model, str) or not model.strip() or len(model) > 200:
+        raise MailboxError("model must be a nonempty model ID or name of at most 200 characters")
+    return {"model": " ".join(model.split()), "modelSource": source}
+
+
+def repository_name(peer: dict[str, Any]) -> str:
+    """Readable repository context, distinct from the particular checkout."""
+    repo = Path(peer.get("repo") or peer.get("checkout") or peer["cwd"])
+    return repo.parent.name if repo.name == ".git" else repo.name
+
+
 def is_run_peer(peer: dict[str, Any] | None) -> bool:
     return bool(peer and isinstance(peer.get("run"), str) and peer.get("role") in {"worker", "conductor"})
 
@@ -728,20 +759,31 @@ def describe_colleagues(rows: list[dict[str, Any]], me: dict[str, Any]) -> str:
         f"({RULE}). Say what you are working on with the peer mailbox `focus` tool so they can see it too."
     ]
     for peer in rows:
-        where = "same checkout" if peer.get("checkout") == me.get("checkout") else f"worktree {peer.get('checkout')}"
+        checkout = peer.get("checkout") or peer["cwd"]
+        worktree = Path(checkout).name
+        if any(
+            (p.get("checkout") or p["cwd"]) != checkout and Path(p.get("checkout") or p["cwd"]).name == worktree
+            for p in rows
+        ):
+            worktree = checkout
+        where = "same checkout" if peer.get("checkout") == me.get("checkout") else f"worktree {worktree}"
         role = ", a delegated run worker" if peer.get("delegatedRun") else ""
-        line = f"- {peer['name']} ({peer['harness']}, {peer['state']}{role}) on {peer.get('branch', '?')}, {where}"
-        if peer.get("focus"):
-            line += f": {peer['focus']}"
+        line = (
+            f"- {display_label(peer)} [address: {peer['name']}; id: {peer['session']}] "
+            f"({peer['harness']}, {peer['state']}{role}) repo {repository_name(peer)} "
+            f"on {peer.get('branch', '?')}, {where}"
+        )
         lines.append(line)
     return "\n".join(lines)
 
 
-def set_focus(base: Path, session: str, text: str) -> dict[str, Any]:
+def set_focus(base: Path, session: str, text: str, *, model: str | None = None) -> dict[str, Any]:
     """One line on what this session is working on, shown to every agent in the same project."""
     peer = load(peer_path(base, session))
     if valid_peer(peer) and not is_run_peer(peer):
-        peer = annotate(base, session, focus=" ".join(text.split())[:200])
+        peer = annotate(
+            base, session, focus=" ".join(text.split())[:200], **(model_fields(model) if model is not None else {})
+        )
     if not valid_peer(peer) or is_run_peer(peer):  # also when the session ended in between
         raise MailboxError("register this session before setting its focus")
     return peer
@@ -756,6 +798,8 @@ def register(
     pid: int | None = None,
     state: str | None = None,
     cwd_source: str | None = None,
+    model: str | None = None,
+    model_source: str = "declared",
 ) -> dict[str, Any]:
     """Create or refresh presence. A known pid and name survive later refreshes that lack them."""
     if harness not in HARNESSES:
@@ -780,6 +824,8 @@ def register(
             lastSeenAt=moment,
             state=state or peer.get("state") or "idle",
         )
+        if model is not None:
+            peer.update(model_fields(model, model_source))
         peer["name"] = peer_name(peer["harness"], peer["cwd"], session)
         if cwd_source:
             peer["cwdSource"] = cwd_source
@@ -1520,8 +1566,19 @@ def hook(payload: dict[str, Any], *, harness: str | None = None, base: Path | No
     state = {"SessionStart": "idle", "UserPromptSubmit": "busy", "Stop": "idle"}.get(event)
     if state is None:
         return None
+    runtime_model = payload.get("model")
+    if isinstance(runtime_model, dict):
+        runtime_model = runtime_model.get("id")
     me = register(
-        base, session=session, harness=harness, cwd=cwd, pid=harness_pid(harness), state=state, cwd_source="hook"
+        base,
+        session=session,
+        harness=harness,
+        cwd=cwd,
+        pid=harness_pid(harness),
+        state=state,
+        cwd_source="hook",
+        model=runtime_model if isinstance(runtime_model, str) and runtime_model.strip() else None,
+        model_source="runtime",
     )
     me = mark_delegated(base, me)
     identity_hint = ""
@@ -1704,10 +1761,19 @@ def table(
                 )
         mark = f"  ({'; '.join(marks)})" if marks else ""
         branch = f"  {peer['branch']}" if peer.get("branch") else ""
-        focus = f"  -- {peer['focus']}" if peer.get("focus") else ""
-        lines.append(
-            f"{peer['name']} [{peer['session'][:8]}]  {peer['harness']}  {peer['state']}  {peer['cwd']}{branch}{mark}{focus}"
-        )
+        checkout = peer.get("checkout") or peer["cwd"]
+        worktree = Path(checkout).name
+        if any(
+            (p.get("checkout") or p["cwd"]) != checkout and Path(p.get("checkout") or p["cwd"]).name == worktree
+            for p in rows
+        ):
+            worktree = checkout
+        context = f"repo: {repository_name(peer)}{branch}  worktree: {worktree}"
+        identity = peer["session"][:8]
+        if any(p["session"] != peer["session"] and p["session"].startswith(identity) for p in rows):
+            identity = peer["session"]
+        label = f"{display_label(peer)}  [address: {peer['name']}]"
+        lines.append(f"{label} [id: {identity}]  {peer['harness']}  {peer['state']}  {context}{mark}")
     return "\n".join(lines)
 
 
@@ -1754,7 +1820,13 @@ def main(argv: list[str] | None = None) -> int:
         import mailbox_daemon
 
         return mailbox_daemon.main(supplied[1:])
-    parser = argparse.ArgumentParser(prog="run_agent.py mailbox", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="run_agent.py mailbox",
+        description=__doc__,
+        epilog="Name your actual task: mailbox focus --session NATIVE_SESSION_ID --text 'Your actual task'. "
+        "This registers CLI presence automatically; update focus when the task changes. "
+        "Peer lists show task, repo, branch and worktree separately; send to the routing name or session ID.",
+    )
     commands = parser.add_subparsers(dest="action", required=True)
     for name in (
         "peers",
@@ -1803,7 +1875,12 @@ def main(argv: list[str] | None = None) -> int:
         if name == "ack":
             sub.add_argument("ids", nargs="+")
         if name == "focus":
-            sub.add_argument("--text", required=True, help="one line on what this session is working on")
+            sub.add_argument("--model", help="current model ID/name verified from your runtime; omit if unknown")
+            sub.add_argument(
+                "--text",
+                required=True,
+                help="task display name from your actual assignment; update when the task changes (max 200 characters)",
+            )
         if name == "feedback":
             sub.add_argument("--category", choices=feedback_module().CATEGORIES, required=True)
             sub.add_argument("--intent", required=True)
@@ -1838,7 +1915,9 @@ def main(argv: list[str] | None = None) -> int:
             if args.format != "json":
                 print(table(rows, session_arg(args), args.harness or detect_harness(), here=me, scope=args.scope))
                 return 0
-            output = rows
+            output = [
+                {**peer, "displayName": display_name(peer), "repositoryName": repository_name(peer)} for peer in rows
+            ]
         else:
             me = caller(args, base)
             if args.action == "feedback":
@@ -1904,7 +1983,7 @@ def main(argv: list[str] | None = None) -> int:
                 elif args.action == "focus":
                     if is_run_peer(me):
                         raise MailboxError("focus is for interactive sessions")
-                    output = set_focus(base, me["session"], args.text)
+                    output = set_focus(base, me["session"], args.text, model=args.model)
                 elif args.action == "history":
                     if not is_run_peer(me):
                         raise MailboxError("history is only supported for run sessions")
