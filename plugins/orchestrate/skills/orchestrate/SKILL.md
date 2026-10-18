@@ -53,7 +53,20 @@ Always prefer the host harness's built-in way of messaging or spawning other age
 - **Codex:** use Codex's native sub-agent / thread tools for GPT models.
 - **OpenCode:** use OpenCode's native sub-agent tools for OpenCode models.
 
-Use `orchestrate` and `peer-mailbox` only to cross a harness or provider boundary.
+Choose the communication tool for each recipient. Report progress, questions, and completion to an
+outside coordinator through `peer-mailbox`. Communicate with teammates and delegate authorized work
+inside the current harness through its native tools, even when the coordinator uses another harness.
+Native tools do not expand delegation authority. A runner worker instructed to request help through
+its conductor must still do so. Different models, sessions, branches, or worktrees do not by themselves
+create a harness boundary.
+
+For example, a Codex agent reporting to a Gemini coordinator sends that report through the mailbox,
+but uses Codex thread messaging or sub-agent tools with other Codex agents. A missing recipient in one
+native tool is a reason to check the host's other native session/thread tools, not to switch to the mailbox.
+
+Use `orchestrate` for authorized execution across provider boundaries and `peer-mailbox` for messages
+between harnesses. Keep any runner-assigned conductor/worker mailbox limited to that run's reporting
+contract; it does not replace native communication with other teammates.
 
 Every hosted frontier model goes through its own vendor's harness, never through OpenCode/OpenRouter:
 
@@ -73,14 +86,14 @@ and GPT-OSS pool (`agy` models) is a native Antigravity route and stays allowed.
 Say what you need; the smallest mechanism that serves it wins. A question never becomes a job
 because of which harness or model answers it.
 
-| Need                                      | Use                                                                                                                                        |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| "Am I missing something?"                 | `consult` (one question, one answer)                                                                                                       |
-| "What about this detail?"                 | `consult --follow-up <result.json>` (same session, context intact)                                                                         |
-| "Find out why this happens."              | `consult --intent investigate --read <repo>` (reads, returns findings with evidence)                                                       |
-| "Check my work."                          | `consult --intent review --read <repo> --diff` for a fresh reviewer; the peer mailbox to ask a live session that already holds the context |
-| "Implement this."                         | The run below: scope, lease, audit, runner-owned verification                                                                              |
-| "You own this file; I need to change it." | The peer mailbox: `focus`, `peers`, `send`, `wait` between existing sessions                                                               |
+| Need                                      | Use                                                                                                                                           |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| "Am I missing something?"                 | `consult` (one question, one answer)                                                                                                          |
+| "What about this detail?"                 | `consult --follow-up <result.json>` (same session, context intact)                                                                            |
+| "Find out why this happens."              | `consult --intent investigate --read <repo>` (reads, returns findings with evidence)                                                          |
+| "Check my work."                          | Native tools for a reviewer in this harness; `consult --intent review --read <repo> --diff` or peer mailbox for a reviewer in another harness |
+| "Implement this."                         | The run below: scope, lease, audit, runner-owned verification                                                                                 |
+| "You own this file; I need to change it." | Native messaging for an owner in this harness; peer mailbox for an owner in another harness                                                   |
 
 The coordinator's `--kind investigation` and `consultation` remain for work that must count against
 a task's invocation allowance, and for a blocked worker asking its conductor.

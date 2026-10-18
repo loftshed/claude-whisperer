@@ -74,6 +74,9 @@ match the runner path scope exactly, and comply with the report contract.
 - Never place secrets in `--verify-command`; exact command strings are retained in private run artifacts.
 - For a `--task-spec`, treat `allow_paths` and `track_paths` as the one source of truth; do not pass duplicate runner scope flags.
 - Track every ignored deliverable explicitly; Git status cannot prove that it was created.
+- State the reporting recipient and transport. Use the peer mailbox for an outside coordinator and
+  native tools for teammates in the executor's own harness. An external reporting obligation does not
+  make internal communication external. Preserve any runner-assigned reporting endpoints and delegation limits.
 - Prefer one coherent batch over several conversational micro-delegations.
 - Put bulky context in workspace files and point to them rather than pasting it into the brief.
 - Never place a secret in the brief. Its contents are sent to the selected model provider; the agy engine also includes the submitted brief in the local process arguments.
