@@ -1,132 +1,271 @@
-import { execFileSync } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { promisify } from "node:util";
+import { afterEach, describe, expect, test } from "vitest";
 
-import {
-  commandsFor,
-  parseStatus,
-  pinnedRuff,
-  tidy,
-} from "../../../.claude/hooks/lint-changed.mjs";
-
+const { dirname, join, resolve } = path;
+const project = resolve(import.meta.dirname, "../../..");
+const hook = join(project, ".claude/hooks/lint-changed.mjs");
+const execute = promisify(execFile);
 const scratch = [];
-afterEach(() => {
-  for (const directory of scratch.splice(0)) fs.rmSync(directory, { force: true, recursive: true });
+
+const write = (root, file, content) => {
+  mkdirSync(dirname(join(root, file)), { recursive: true });
+  writeFileSync(join(root, file), content);
+};
+
+const eventInput = (root, event, extra = {}) => ({
+  cwd: root,
+  hook_event_name: event,
+  session_id: "first-session",
+  ...extra,
 });
 
-function repository(files) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "stop-hook-"));
-  scratch.push(root);
-  for (const [file, content] of Object.entries(files)) {
-    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
-    fs.writeFileSync(path.join(root, file), content);
-  }
-  return root;
-}
-
-describe("parseStatus", () => {
-  test("keeps staged, modified and untracked paths and drops deletions", () => {
-    const output = [
-      "M  staged.js",
-      " M edited.md",
-      "?? new.py",
-      " D gone.js",
-      "D  removed.js",
-      "R  moved.js",
-      "old.js",
-      "",
-    ].join("\0");
-    expect(parseStatus(output)).toEqual({
-      changed: ["staged.js", "edited.md", "new.py", "moved.js"],
-      staged: ["staged.js", "moved.js"],
-    });
+const send = (root, event, extra = {}) =>
+  spawnSync(process.execPath, [hook], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, CLAUDE_PROJECT_DIR: root },
+    input: JSON.stringify(eventInput(root, event, extra)),
   });
 
-  test("reads a real repository", () => {
-    const root = repository({ "a.js": "1\n", "b.js": "1\n" });
-    const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" });
-    git("init", "--quiet");
-    git(
+const edit = (root, file, sessionId = "first-session") =>
+  send(root, "PostToolUse", {
+    session_id: sessionId,
+    tool_name: "Edit",
+    tool_input: { file_path: resolve(root, file) },
+  });
+
+const repository = (files = {}) => {
+  const root = mkdtempSync(join(tmpdir(), "turn-lint-test-"));
+  scratch.push(root);
+  mkdirSync(join(root, "node_modules/.bin"), { recursive: true });
+  for (const tool of ["eslint", "prettier"]) {
+    symlinkSync(join(project, "node_modules/.bin", tool), join(root, "node_modules/.bin", tool));
+  }
+  write(
+    root,
+    "eslint.config.mjs",
+    `export default [{
+    files: ['**/*.js', '**/*.mjs'],
+    rules: { semi: ['error', 'always'], 'no-unused-vars': 'error' },
+  }];\n`,
+  );
+  for (const [file, content] of Object.entries(files)) {
+    write(root, file, content);
+  }
+  send(root, "UserPromptSubmit");
+  return root;
+};
+
+const read = (root, file) => readFileSync(join(root, file), "utf8");
+const git = (root, ...args) =>
+  execFileSync(
+    "git",
+    [
       "-c",
-      "user.name=t",
+      "user.name=Hook test",
       "-c",
-      "user.email=t@example.invalid",
+      "user.email=hook@example.invalid",
       "-c",
       "commit.gpgsign=false",
       "-c",
       "core.hooksPath=/dev/null",
-      "commit",
-      "--quiet",
-      "--allow-empty",
-      "-m",
-      "start",
-    );
-    git("add", "a.js");
-    fs.writeFileSync(path.join(root, "c.js"), "1\n");
-    const status = git("status", "--porcelain=v1", "-z", "--untracked-files=all");
-    expect(parseStatus(status)).toEqual({ changed: ["a.js", "b.js", "c.js"], staged: ["a.js"] });
-  });
+      ...args,
+    ],
+    { cwd: root, encoding: "utf8" },
+  );
+
+const initializeGit = (root) => {
+  git(root, "init", "--quiet");
+  git(root, "add", "*.js");
+  git(root, "commit", "--quiet", "-m", "Initial fixture");
+};
+
+afterEach(() => {
+  for (const root of scratch.splice(0)) {
+    for (const session_id of ["first-session", "second-session"]) {
+      send(root, "UserPromptSubmit", { session_id });
+    }
+    rmSync(root, { force: true, recursive: true });
+  }
 });
 
-describe("commandsFor", () => {
-  test("lints JavaScript, formats everything and formats Python with the pinned ruff", () => {
-    const commands = commandsFor(["a.mjs", "b.md", "c.py"], {
-      root: "/repo",
-      ruffVersion: "1.2.3",
+describe("Claude turn lint", () => {
+  test("fixes several recorded files and leaves unrelated dirty files alone", () => {
+    const root = repository({
+      "first.js": "export const first = 1\n",
+      "second.js": "export const second = 2\n",
+      "unrelated.js": "export const unrelated = 3\n",
     });
-    expect(commands).toEqual([
-      ["/repo/node_modules/.bin/eslint", ["--fix", "--no-warn-ignored", "a.mjs"]],
-      [
-        "/repo/node_modules/.bin/prettier",
-        ["--write", "--ignore-unknown", "--log-level", "warn", "a.mjs", "b.md", "c.py"],
-      ],
-      ["uvx", ["ruff@1.2.3", "check", "--fix", "--quiet", "c.py"]],
-      ["uvx", ["ruff@1.2.3", "format", "--quiet", "c.py"]],
-    ]);
+    edit(root, "first.js");
+    edit(root, "second.js");
+    edit(root, "first.js");
+    expect(send(root, "Stop").status).toBe(0);
+    expect(read(root, "first.js")).toBe("export const first = 1;\n");
+    expect(read(root, "second.js")).toBe("export const second = 2;\n");
+    expect(read(root, "unrelated.js")).toBe("export const unrelated = 3\n");
   });
 
-  test("the ruff pin comes from scripts/check.sh", () => {
-    expect(pinnedRuff(repository({ "scripts/check.sh": "#!/bin/sh\nRUFF_VERSION=4.5.6\n" }))).toBe(
-      "4.5.6",
-    );
-    expect(pinnedRuff(repository({}))).toBeNull();
-  });
-});
-
-describe("tidy", () => {
-  const status = (stdout) => ({ status: 0, stdout });
-
-  test("runs the tools and restages what was staged", () => {
-    const root = repository({ "a.js": "", "b.md": "" });
-    const run = vi.fn((command) =>
-      command === "git" ? status("M  a.js\0 M b.md\0") : { status: 0 },
-    );
-    expect(tidy({ root, run })).toEqual({ code: 0, message: "Tidied 2 changed file(s)." });
-    expect(run.mock.calls.at(-1).slice(0, 2)).toEqual(["git", ["add", "--", "a.js"]]);
-  });
-
-  test("a failing tool blocks the first stop but not the retry", () => {
-    const root = repository({ "a.js": "" });
-    const run = (command) => (command === "git" ? status("?? a.js\0") : { status: 1 });
-    expect(tidy({ root, run }).code).toBe(2);
-    expect(tidy({ isRetry: true, root, run }).code).toBe(0);
-  });
-
-  test("a machine without uv skips ruff instead of failing", () => {
-    const root = repository({ "a.py": "", "scripts/check.sh": "RUFF_VERSION=1.0.0\n" });
-    const run = (command) => {
-      if (command === "git") return status("?? a.py\0");
-      return command === "uvx" ? { error: { code: "ENOENT" } } : { status: 0 };
-    };
-    expect(tidy({ root, run }).code).toBe(0);
-  });
-
-  test("nothing to do when nothing changed", () => {
-    expect(tidy({ root: repository({}), run: () => status("") })).toEqual({
-      code: 0,
-      message: "Nothing changed.",
+  test("keeps different sessions separate in the same checkout", () => {
+    const root = repository({
+      "first.js": "export const first = 1\n",
+      "second.js": "export const second = 2\n",
     });
+    edit(root, "first.js");
+    edit(root, "second.js", "second-session");
+    send(root, "UserPromptSubmit");
+    edit(root, "first.js");
+    expect(send(root, "Stop").status).toBe(0);
+    expect(read(root, "first.js")).toBe("export const first = 1;\n");
+    expect(read(root, "second.js")).toBe("export const second = 2\n");
+    expect(send(root, "Stop", { session_id: "second-session" }).status).toBe(0);
+    expect(read(root, "second.js")).toBe("export const second = 2;\n");
   });
+
+  test("a new prompt discards the interrupted turn", () => {
+    const root = repository({
+      "old.js": "export const old = 1\n",
+      "current.js": "export const current = 2\n",
+    });
+    edit(root, "old.js");
+    send(root, "UserPromptSubmit");
+    edit(root, "current.js");
+    expect(send(root, "Stop").status).toBe(0);
+    expect(read(root, "current.js")).toBe("export const current = 2;\n");
+    expect(read(root, "old.js")).toBe("export const old = 1\n");
+  });
+
+  test("parallel edit notifications preserve both files", async () => {
+    const root = repository({
+      "first.js": "export const first = 1\n",
+      "second.js": "export const second = 2\n",
+    });
+    await Promise.all(
+      ["first.js", "second.js"].map(async (file) => {
+        const input = JSON.stringify(
+          eventInput(root, "PostToolUse", {
+            tool_name: "Write",
+            tool_input: { file_path: resolve(root, file) },
+          }),
+        );
+        const child = execute(process.execPath, [hook], {
+          cwd: root,
+          env: { ...process.env, CLAUDE_PROJECT_DIR: root },
+        });
+        // execFile's promise exposes the actual child, so each process gets stdin.
+        child.child.stdin.end(input);
+        await child;
+      }),
+    );
+    expect(send(root, "Stop").status).toBe(0);
+    expect(read(root, "first.js")).toBe("export const first = 1;\n");
+    expect(read(root, "second.js")).toBe("export const second = 2;\n");
+  });
+
+  test("still fixes files committed earlier in the turn", () => {
+    const root = repository({ "first.js": "export const first = 1;\n" });
+    initializeGit(root);
+    write(root, "first.js", "export const first = 2\n");
+    edit(root, "first.js");
+    git(root, "add", "first.js");
+    git(root, "commit", "--quiet", "-m", "Edited during the turn");
+    expect(send(root, "Stop").status).toBe(0);
+    expect(read(root, "first.js")).toBe("export const first = 2;\n");
+    expect(git(root, "show", "HEAD:first.js")).toBe("export const first = 2\n");
+  });
+
+  test("does not add unstaged changes to a partially staged file", () => {
+    const root = repository({ "first.js": "export const first = 1;\n" });
+    initializeGit(root);
+    write(root, "first.js", "export const first = 2;\n");
+    git(root, "add", "first.js");
+    write(root, "first.js", "export const first = 2\nexport const unstaged = 3\n");
+    edit(root, "first.js");
+    expect(send(root, "Stop").status).toBe(0);
+    expect(read(root, "first.js")).toBe("export const first = 2;\nexport const unstaged = 3;\n");
+    expect(git(root, "show", ":first.js")).toBe("export const first = 2;\n");
+  });
+
+  test("a Stop continuation checks files changed after a successful batch", () => {
+    const root = repository({ "first.js": "export const first = 1\n" });
+    edit(root, "first.js");
+    expect(send(root, "Stop").status).toBe(0);
+    expect(read(root, "first.js")).toBe("export const first = 1;\n");
+    // Without another edit notification, a background write still changes the fingerprint.
+    write(root, "first.js", "export const first = 2\n");
+    expect(send(root, "Stop", { stop_hook_active: true }).status).toBe(0);
+    expect(read(root, "first.js")).toBe("export const first = 2;\n");
+  });
+
+  test("reports unfixable errors, retries once, and recovers after a repair", () => {
+    const root = repository({ "broken.js": "const unused = 1;\n" });
+    edit(root, "broken.js");
+    const first = send(root, "Stop");
+    expect(first.status).toBe(2);
+    expect(first.stderr).toContain("no-unused-vars");
+    const retry = send(root, "Stop", { stop_hook_active: true });
+    expect(retry.status).toBe(0);
+    expect(JSON.parse(retry.stdout).systemMessage).toBe(
+      "Turn lint stopped retrying; files still need linting: broken.js",
+    );
+    write(root, "broken.js", "export const repaired = 2\n");
+    expect(send(root, "Stop", { stop_hook_active: true }).status).toBe(0);
+    expect(read(root, "broken.js")).toBe("export const repaired = 2;\n");
+  });
+
+  test("skips an unchanged successful batch but checks new content", () => {
+    const root = repository({ "first.js": "export const first = 1\n" });
+    edit(root, "first.js");
+    expect(send(root, "Stop").status).toBe(0);
+    expect(read(root, "first.js")).toBe("export const first = 1;\n");
+    rmSync(join(root, "node_modules/.bin/eslint"));
+    expect(send(root, "Stop", { stop_hook_active: true }).status).toBe(0);
+    write(root, "first.js", "export const first = 2\n");
+    const missingTool = send(root, "Stop", { stop_hook_active: true });
+    expect(missingTool.status).toBe(2);
+    expect(missingTool.stderr).toContain("ENOENT");
+  });
+
+  test("ignores deleted and outside paths without losing a valid edit", () => {
+    const root = repository({
+      "kept.js": "export const kept = 1\n",
+      "deleted.js": "export const deleted = 2\n",
+    });
+    const outside = repository({ "outside.js": "export const outside = 3\n" });
+    edit(root, "kept.js");
+    edit(root, "deleted.js");
+    edit(root, join(outside, "outside.js"));
+    rmSync(join(root, "deleted.js"));
+    expect(send(root, "Stop").status).toBe(0);
+    expect(read(root, "kept.js")).toBe("export const kept = 1;\n");
+    expect(read(outside, "outside.js")).toBe("export const outside = 3\n");
+  });
+
+  test("formats only recorded documents with the existing Prettier rules", () => {
+    const root = repository({
+      "settings.json": '{"answer":42}\n',
+      "unrelated.json": '{"keep":true}\n',
+    });
+    edit(root, "settings.json");
+    expect(send(root, "Stop").status).toBe(0);
+    expect(read(root, "settings.json")).toBe('{ "answer": 42 }\n');
+    expect(read(root, "unrelated.json")).toBe('{"keep":true}\n');
+  });
+  test.skipIf(spawnSync("uvx", ["--version"]).status !== 0)(
+    "keeps Python fixes and formatting on recorded files",
+    () => {
+      const root = repository({
+        "edited.py": "import os\nanswer=42\n",
+        "unrelated.py": "import os\nuntouched=7\n",
+      });
+      write(root, "scripts/check.sh", read(project, "scripts/check.sh"));
+      edit(root, "edited.py");
+      expect(send(root, "Stop").status).toBe(0);
+      expect(read(root, "edited.py")).toBe("answer = 42\n");
+      expect(read(root, "unrelated.py")).toBe("import os\nuntouched=7\n");
+    },
+  );
 });
