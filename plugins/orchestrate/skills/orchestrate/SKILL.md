@@ -287,6 +287,28 @@ For needed coordination across projects, explicitly pass `scope: "cross-project"
 `send`, `inbox` or `wait` call, or CLI `--scope cross-project`. Each call defaults back to `project`;
 automatic hooks always stay within the project. Declare your work with `focus` and agree on a split
 before editing shared files.
+
+### Name your task for peers
+
+At task start, set `focus` to a short display name from your actual assignment, such as
+`Designer · translation parity` or `Mock server · rebase fixes`. Update it when your task changes.
+Do not infer or invent a purpose from the checkout or branch. Hooks register presence automatically;
+hookless MCP callers use `register` with `cwd`, `harness`, and optional `focus`, or call `focus` afterward.
+CLI calls register the supplied session automatically:
+
+```bash
+python3 <skill-directory>/scripts/run_agent.py mailbox focus --session NATIVE_SESSION_ID --harness codex --text 'Your actual task'
+python3 <skill-directory>/scripts/run_agent.py mailbox peers --session NATIVE_SESSION_ID
+```
+
+Peer listings lead with this display name, stored once as `focus`. The separate `name` is a generated
+routing alias: checkout basename plus two hexadecimal characters from a session-ID hash, prefixed
+with the harness except for Claude. Those suffixes are not checkpoints. Use `name` or the stable
+`session` ID to send; display names may repeat. Older unnamed sessions retain their routing alias as
+the display fallback. Branch names provide broader context; focus describes this agent's specific
+responsibility. Lists show repo and branch, with a compact worktree name; structured output retains
+the full checkout path and session ID for disambiguation. Never rename another session to guess its task.
+
 When communication causes real friction, submit one `feedback` report with your intent, the problem and
 what you needed instead. Include wrong context, routing trouble, unnecessary interruptions, repeated
 polling or wasted effort. Keep reports short and omit task payloads, source code, paths and secrets.
@@ -341,3 +363,11 @@ Remaining risks: <none or concise list>
 python3 -m py_compile plugins/orchestrate/skills/orchestrate/scripts/*.py
 python3 -m unittest discover -s tests/plugins/orchestrate/skills/orchestrate -p 'test_*.py'
 ```
+
+Task listings show purpose, model, and harness separately. Model defaults to `model unknown`;
+never infer it from the harness or branch. A hook's explicit `model` string (or `model.id`) is
+recorded as runtime metadata. Otherwise pass a model ID/name verified from your current runtime:
+MCP `register` or `focus` accepts optional `model`; CLI `mailbox focus --text 'Your actual task'
+--model ACTUAL_MODEL_ID` updates it. Explicit declarations have `modelSource: declared`, hook
+observations have `modelSource: runtime`; these are metadata provenance, not provider attestation.
+Update the declaration when switching models. Missing metadata never prevents discovery or routing.

@@ -176,6 +176,14 @@ project. Run-scoped workers and conductors still communicate only with their cou
 
 ## Who else is in this project
 
+Set `focus` at task start to a short human-readable name from the actual assignment, and update it
+when the task changes. MCP `register` accepts optional `focus`; already registered callers use the
+`focus` tool. CLI: `run_agent.py mailbox focus --session NATIVE_SESSION_ID --text 'Your actual task'`.
+Listings lead with this task display name (`displayName` in structured peer output), derived from
+`focus`. Routing `name`, stable `session` ID, harness, checkout and branch remain separate. Send to the
+routing name or session ID, since display names may repeat. Unnamed sessions fall back to the existing
+routing alias; its two-character hexadecimal suffix is a session-ID hash, not a checkpoint.
+
 Every peer record carries its Git directory, remote identities, checkout and branch. At session
 start the Claude Code and Codex hooks list the other live sessions in the same project, any harness, with
 branch, state and declared `focus`, and repeat it on a later prompt only when that set changes. Hosts without
@@ -380,3 +388,11 @@ resource/context costs and the scope of native-client and synthetic evaluation e
   outside the sandbox's write allowlist. The MCP server and hooks are not sandboxed.
 - **`no live peer`.** The target's session ended, or it never registered: it has no hooks and has not
   called a mailbox tool yet.
+
+Task listings show purpose, model, and harness separately. Model defaults to `model unknown`;
+never infer it from the harness or branch. A hook's explicit `model` string (or `model.id`) is
+recorded as runtime metadata. Otherwise pass a model ID/name verified from your current runtime:
+MCP `register` or `focus` accepts optional `model`; CLI `mailbox focus --text 'Your actual task'
+--model ACTUAL_MODEL_ID` updates it. Explicit declarations have `modelSource: declared`, hook
+observations have `modelSource: runtime`; these are metadata provenance, not provider attestation.
+Update the declaration when switching models. Missing metadata never prevents discovery or routing.
