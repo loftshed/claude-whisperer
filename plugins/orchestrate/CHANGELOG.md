@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.24.1
+
+- fix(orchestrate): receive explicitly addressed cross-project mail (#10)
+
 ## 0.24.0
 
 - feat(orchestrate): refine stooges TUI framing and document task archetype rationale
