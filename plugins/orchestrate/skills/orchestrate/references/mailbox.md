@@ -142,9 +142,8 @@ Mail is saved before activation is attempted, and the result includes a
 `wake` status: `scheduled` (queue accepted it), `queued` (busy Codex), `unsupported`, or
 `unavailable`. A wake failure leaves the message unread for normal delivery.
 
-Automatic activation stays within the project boundary. Cross-project mail remains queued until
-the receiver explicitly reads it with `scope: "cross-project"`; sending it never widens their
-automatic context or wakes an unrelated project.
+An explicit cross-project send follows the same delivery and wake rules. Use `wake: false`
+for an informational message. Receiving it does not authorize work outside the recipient's task.
 
 Codex uses the existing daemon's local Unix socket and native task queue. It starts only a thread
 already loaded there; it never resumes a second copy of a terminal session. Busy threads keep
@@ -185,24 +184,27 @@ messaging check uses an ephemeral thread and does not create a new project.
 
 ## Project scope and cross-project coordination
 
-`peers`, `send`, `inbox` and `wait` default to `scope: "project"`. Sessions match if they share a Git common
+`peers` and `send` default to `scope: "project"`. Sessions match if they share a Git common
 directory or a normalized fetch remote. Separate clones and sibling worktrees can communicate; a matching
 directory name alone does not count. Remote identities ignore SSH versus HTTPS, login, and a trailing `.git`;
 only hashes are stored. Outside Git, the default exposes no other sessions. Old queued mail from another
-project stays unread and out of automatic context, including after a session changes projects.
+project stays unread and out of automatic context after a session changes projects, unless the sender
+explicitly sent it with cross-project scope to that session.
 
 For coordination between interconnected repositories, such as different parts of the same application, explicitly use
-`scope: "cross-project"` on the needed MCP calls, or CLI `--scope cross-project`:
+`scope: "cross-project"` on discovery and send calls, or CLI `--scope cross-project`:
 
 ```bash
 python3 scripts/run_agent.py mailbox peers --scope cross-project
 python3 scripts/run_agent.py mailbox send --scope cross-project --session MY_SESSION --to PEER --text 'Which API contract does the client consume?'
-python3 scripts/run_agent.py mailbox wait --scope cross-project --session MY_SESSION --reply-to MESSAGE_ID
+python3 scripts/run_agent.py mailbox wait --session MY_SESSION --reply-to MESSAGE_ID
 ```
 
-The receiving agent must also use a cross-project `inbox` or `wait` call to read that message. Scope applies
-to one call only. Later calls default to `project`, and automatic hooks always stay within the current
-project. Run-scoped workers and conductors still communicate only with their counterpart in either mode.
+Explicitly addressed cross-project messages appear in the recipient's normal `inbox`, `wait` and
+automatic hooks, and can be acknowledged without a scope override. Replies across projects still
+require `send` with cross-project scope. This does not broaden peer discovery or authorize unrelated
+work. A cross-project read can also retrieve older project mail. Run-scoped workers and conductors
+still communicate only with their counterpart in either mode.
 
 ## Who else is in this project
 

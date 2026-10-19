@@ -549,7 +549,7 @@ class MailboxTests(unittest.TestCase):
             ["Old project context"],
         )
 
-    def test_cross_project_cli_calls_are_explicit_and_do_not_change_defaults(self):
+    def test_cross_project_cli_send_is_explicit_and_receipt_is_automatic(self):
         elsewhere = self.git_checkout("separate")
         other = self.peer("cross-project-peer", "claude", str(elsewhere))
         for format_name in ("text", "json"):
@@ -574,14 +574,12 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(refused.returncode, 4)
         sent = mailbox_cli(self.base, *args, "--scope", "cross-project", cwd=self.repository, check=True)
         self.assertEqual(json.loads(sent.stdout)["to"], other["name"])
-        self.assertIsNone(self.hook(other["session"], "claude", elsewhere, "Stop"))
-        read_args = ("inbox", "--session", other["session"], "--harness", "claude", "--format", "json")
+        read_args = ("inbox", "--session", other["session"], "--harness", "claude", "--format", "json", "--peek")
         narrow = mailbox_cli(self.base, *read_args, cwd=elsewhere, check=True)
-        self.assertEqual(json.loads(narrow.stdout), {"messages": []})
-        broad = mailbox_cli(self.base, *read_args, "--scope", "cross-project", "--peek", cwd=elsewhere, check=True)
-        self.assertEqual([m["text"] for m in json.loads(broad.stdout)["messages"]], ["Cross-project question"])
-        narrow = mailbox_cli(self.base, *read_args, cwd=elsewhere, check=True)
-        self.assertEqual(json.loads(narrow.stdout), {"messages": []})
+        self.assertEqual([m["text"] for m in json.loads(narrow.stdout)["messages"]], ["Cross-project question"])
+        delivered = self.hook(other["session"], "claude", elsewhere, "Stop")
+        self.assertIn("Cross-project question", delivered["reason"])
+        mailbox_cli(self.base, *args, "--scope", "cross-project", cwd=self.repository, check=True)
         waited = mailbox_cli(
             self.base,
             "wait",
@@ -589,8 +587,6 @@ class MailboxTests(unittest.TestCase):
             other["session"],
             "--harness",
             "claude",
-            "--scope",
-            "cross-project",
             "--timeout",
             "0.1",
             cwd=elsewhere,
@@ -1899,7 +1895,7 @@ class McpServerTests(unittest.TestCase):
         base = Path(self.temporary.name) / "mailbox-v1"
         self.assertEqual(MAILBOX.load(MAILBOX.peer_path(base, "codex-focus"))["focus"], "fixing the parser")
 
-    def test_mcp_cross_project_coordination_requires_explicit_scope_on_each_call(self):
+    def test_mcp_cross_project_send_requires_explicit_scope_but_receipt_does_not(self):
         base = Path(self.temporary.name) / "mailbox-v1"
         other_project = Path(self.temporary.name) / "other-project"
         subprocess.run(["git", "init", "-q", str(other_project)], check=True)
@@ -1940,10 +1936,10 @@ class McpServerTests(unittest.TestCase):
         received = self.exchange(
             "claude-code",
             [
-                self.call("inbox", session=other["session"]),
+                self.call("inbox", {"markRead": False}, session=other["session"]),
                 self.call("inbox", {"scope": "cross-project", "markRead": False}, session=other["session"]),
-                self.call("inbox", session=other["session"]),
-                self.call("wait", {"scope": "cross-project", "timeoutSeconds": 0.1}, session=other["session"]),
+                self.call("inbox", {"markRead": False}, session=other["session"]),
+                self.call("wait", {"timeoutSeconds": 0.1}, session=other["session"]),
                 self.call(
                     "send",
                     {
@@ -1957,14 +1953,18 @@ class McpServerTests(unittest.TestCase):
             ],
         )
         received.sort(key=lambda reply: reply["id"])
-        self.assertEqual(received[1]["result"]["content"][0]["text"], "no unread peer messages")
+        self.assertIn("Contract question", received[1]["result"]["content"][0]["text"])
         self.assertIn("Contract question", received[2]["result"]["content"][0]["text"])
-        self.assertEqual(received[3]["result"]["content"][0]["text"], "no unread peer messages")
+        self.assertIn("Contract question", received[3]["result"]["content"][0]["text"])
         self.assertIn("Contract question", received[4]["result"]["content"][0]["text"])
         waited = self.exchange(
             "codex-mcp-client",
             [
-                self.call("wait", {"timeoutSeconds": 0.01, "replyTo": question["id"]}, session="mode-caller"),
+                self.call(
+                    "wait",
+                    {"timeoutSeconds": 0.01, "replyTo": question["id"], "markRead": False},
+                    session="mode-caller",
+                ),
                 self.call(
                     "wait",
                     {"scope": "cross-project", "timeoutSeconds": 0.1, "replyTo": question["id"]},
@@ -1973,7 +1973,7 @@ class McpServerTests(unittest.TestCase):
             ],
         )
         waited.sort(key=lambda reply: reply["id"])
-        self.assertIn("timed_out", waited[1]["result"]["content"][0]["text"])
+        self.assertIn("Contract answer", waited[1]["result"]["content"][0]["text"])
         self.assertIn("Contract answer", waited[2]["result"]["content"][0]["text"])
 
     def test_invalid_mcp_scope_is_rejected_before_registering_or_sending(self):

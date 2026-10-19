@@ -281,6 +281,11 @@ class MailboxFeedbackTests(unittest.TestCase):
             text="Unrelated confidential context",
             scope="cross-project",
         )
+        # Model old project mail, which has no explicit cross-project delivery intent.
+        path = next(MAILBOX.inbox_dir(self.base, self.peer["session"]).glob("*.json"))
+        message = MAILBOX.load(path)
+        message["scope"] = "project"
+        MAILBOX.write(path, message)
         for _ in range(5):
             self.assertEqual(MAILBOX.take(self.base, self.peer["session"], mark=False), [])
         self.assertEqual(len(self.reports()), 1)
