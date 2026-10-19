@@ -268,7 +268,7 @@ d.serve(base)
         self.assertEqual(
             self.body(self.call("ack", {"ids": [sent["id"]]}, session="receiver")), {"acknowledged": [sent["id"]]}
         )
-        self.assertEqual(self.body(self.call("inbox", session="receiver"))["status"], "messages")
+        self.assertEqual(self.body(self.call("inbox", session="receiver"))["status"], "empty")
 
     def test_register_bootstraps_and_never_uses_daemon_context(self):
         self.start()
