@@ -1939,7 +1939,7 @@ class McpServerTests(unittest.TestCase):
                 self.call("inbox", {"markRead": False}, session=other["session"]),
                 self.call("inbox", {"scope": "cross-project", "markRead": False}, session=other["session"]),
                 self.call("inbox", {"markRead": False}, session=other["session"]),
-                self.call("wait", {"timeoutSeconds": 0.1}, session=other["session"]),
+                self.call("wait", {"timeoutSeconds": 0.1, "markRead": False}, session=other["session"]),
                 self.call(
                     "send",
                     {
@@ -1967,7 +1967,7 @@ class McpServerTests(unittest.TestCase):
                 ),
                 self.call(
                     "wait",
-                    {"scope": "cross-project", "timeoutSeconds": 0.1, "replyTo": question["id"]},
+                    {"scope": "cross-project", "timeoutSeconds": 0.1, "replyTo": question["id"], "markRead": False},
                     session="mode-caller",
                 ),
             ],
