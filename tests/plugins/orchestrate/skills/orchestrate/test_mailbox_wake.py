@@ -230,19 +230,17 @@ class MailboxWakeTests(unittest.TestCase):
                     self.assertEqual(native.pending, [])
                     self.assertEqual([m["text"] for m in peer_mailbox.take(base, session)], ["Retained question"])
 
-    def test_cross_project_delivery_does_not_activate_unrelated_work(self):
+    def test_explicit_cross_project_delivery_uses_normal_wake_and_inbox(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             sender = peer_mailbox.register(base, session="sender", harness="gemini", cwd=str(SCRIPTS))
             peer_mailbox.register(base, session="target", harness="codex", cwd=temporary)
-            with patch.object(mailbox_wake, "wake", side_effect=AssertionError("must not wake another project")):
+            with patch.object(mailbox_wake, "CodexSocket", return_value=NativeQueue()):
                 sent = peer_mailbox.send(
                     base, sender=sender, to="target", text="Coordination request", scope="cross-project", wake=True
                 )
-            self.assertEqual(sent["wake"]["status"], "queued")
-            self.assertEqual(
-                [m["text"] for m in peer_mailbox.take(base, "target", scope="cross-project")], ["Coordination request"]
-            )
+            self.assertEqual(sent["wake"]["status"], "scheduled")
+            self.assertEqual([m["text"] for m in peer_mailbox.take(base, "target")], ["Coordination request"])
 
     def test_idle_receiver_starts_existing_thread_without_policy_or_model_overrides(self):
         native = NativeQueue()

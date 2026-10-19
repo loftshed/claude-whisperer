@@ -1237,8 +1237,7 @@ def delivery_result(message: dict[str, Any], target: dict[str, Any]) -> dict[str
 
 
 def delivery_wake(base: Path, target: dict[str, Any], identifier: str, scope: str) -> dict[str, Any]:
-    if scope != "project":
-        return {"status": "queued", "reason": "cross-project mail requires the recipient's explicit inbox opt-in"}
+    check_scope(scope)
     import mailbox_wake
 
     return mailbox_wake.wake(target, identifier, base=base)
@@ -1293,13 +1292,18 @@ def messages(base: Path, session: str, *, unread_only: bool = True) -> list[dict
 def allowed_message(peer: dict[str, Any], message: dict[str, Any], scope: str) -> bool:
     if is_run_peer(peer):
         return message.get("run") == peer["run"]
-    return not message.get("run") and (scope == "cross-project" or same_project(peer, message["from"]))
+    explicitly_addressed = (
+        message.get("scope") == "cross-project" and message.get("to", {}).get("session") == peer["session"]
+    )
+    return not message.get("run") and (
+        explicitly_addressed or scope == "cross-project" or same_project(peer, message["from"])
+    )
 
 
 def iter_incoming(
     base: Path, session: str, *, unread_only: bool = True, scope: str = "project", operation: str = "inbox"
 ) -> Iterator[dict[str, Any]]:
-    """Stream accepted bodies; unseen cross-project messages stay unread."""
+    """Include explicitly addressed cross-project mail without widening peer discovery."""
     check_scope(scope)
     peer = load(peer_path(base, session))
     if not valid_peer(peer):

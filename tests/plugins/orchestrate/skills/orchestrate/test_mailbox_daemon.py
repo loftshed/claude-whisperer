@@ -304,20 +304,17 @@ d.serve(base)
         self.assertTrue(stale["result"]["isError"])
         self.assertEqual(mailbox.load(mailbox.peer_path(self.base, "native"))["pid"], 2147483647)
 
-    def test_native_first_and_project_filters_hold_for_reads_and_ack(self):
+    def test_native_first_and_explicit_cross_project_delivery_and_ack(self):
         self.start()
         self.peer("sender")
         self.peer("receiver", "claude", self.other)
         self.assertTrue(self.send()[1]["result"]["isError"])
         sent = self.body(self.send(scope="cross-project"))
-        self.assertEqual(self.body(self.call("inbox", session="receiver"))["status"], "empty")
+        self.assertEqual(self.body(self.call("inbox", session="receiver"))["status"], "messages")
         seen = self.body(self.call("inbox", {"scope": "cross-project"}, session="receiver"))
         self.assertEqual([m["id"] for m in seen["messages"]], [sent["id"]])
-        self.assertTrue(self.call("ack", {"ids": [sent["id"]]}, session="receiver")[1]["result"]["isError"])
         self.assertEqual(
-            self.body(self.call("ack", {"ids": [sent["id"]], "scope": "cross-project"}, session="receiver"))[
-                "acknowledged"
-            ],
+            self.body(self.call("ack", {"ids": [sent["id"]]}, session="receiver"))["acknowledged"],
             [sent["id"]],
         )
         self.peer("claude-sender", "claude", self.other)
