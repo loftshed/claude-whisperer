@@ -5,6 +5,7 @@ cmbak
 evals
 glab
 glpat
+herdr
 killpg
 kimi
 Löfstedt

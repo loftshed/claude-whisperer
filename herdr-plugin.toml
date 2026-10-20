@@ -1,0 +1,32 @@
+id = "orkest.swarms"
+name = "Orkest swarms"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "Group, inspect, and manage Orkest swarms"
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "overview"
+title = "Open Orkest swarms"
+contexts = ["workspace"]
+command = ["node", "plugins/orchestrate/bin/herdr-open-overview.mjs"]
+
+[[panes]]
+id = "overview"
+title = "Orkest swarms"
+placement = "tab"
+command = ["node", "plugins/orchestrate/bin/herdr.mjs", "overview"]
+
+[[panes]]
+id = "room"
+title = "Orkest swarm"
+placement = "split"
+command = ["node", "plugins/orchestrate/bin/herdr.mjs", "room"]
+
+[[panes]]
+id = "form"
+title = "Manage Orkest swarm"
+placement = "popup"
+width = "90%"
+height = "80%"
+command = ["node", "plugins/orchestrate/bin/herdr.mjs", "form"]

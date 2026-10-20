@@ -18,6 +18,9 @@ orchestrate adds a native `claude` engine, keeps hosted models off OpenRouter, r
 
 monitor also has a CLI, a menu bar app and MCP registrations for Codex and agy, installed from a checkout: see [its README](plugins/monitor/README.md#install).
 
+The optional [Herdr extension](docs/herdr-swarms.md) groups Orkest swarms into
+workspaces and tabs, with an overview, session navigation, and coordinator-backed dispatch.
+
 ## Development
 
 ```sh

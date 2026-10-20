@@ -66,6 +66,19 @@ export function validateRoom(room) {
   )
     throw new Error("Invalid swarm room: expected agent-executor.room.v1, id and agents");
   if (room.agents.length > 64) throw new Error("A room supports at most 64 members");
+  if (room.cwd !== undefined && (typeof room.cwd !== "string" || !path.isAbsolute(room.cwd)))
+    throw new Error("Room checkout must be an absolute path");
+  for (const key of ["group", "title", "machine"])
+    if (
+      room[key] !== undefined &&
+      (typeof room[key] !== "string" ||
+        !room[key].trim() ||
+        room[key].length > 160 ||
+        [...room[key]].some(
+          (character) => character.codePointAt(0) < 32 || character.codePointAt(0) === 127,
+        ))
+    )
+      throw new Error(`Invalid room ${key}`);
   const ids = new Set();
   for (const agent of room.agents) {
     if (
@@ -78,6 +91,28 @@ export function validateRoom(room) {
     )
       throw new Error("Invalid or duplicate room member");
     ids.add(agent.id);
+  }
+  for (const member of [room.conductor, ...room.agents]) {
+    if (!member) continue;
+    if (
+      member.session &&
+      (typeof member.session.id !== "string" ||
+        !member.session.id ||
+        !ENGINES.has(member.session.engine) ||
+        typeof member.session.machine !== "string" ||
+        !path.isAbsolute(member.session.cwd || ""))
+    )
+      throw new Error("Invalid member session binding");
+    if (
+      member.dispatch &&
+      (!path.isAbsolute(member.dispatch.taskDir || "") ||
+        typeof member.dispatch.taskId !== "string" ||
+        !member.dispatch.taskId ||
+        typeof member.dispatch.requestId !== "string" ||
+        !ID.test(member.dispatch.requestId) ||
+        !["native", "executor"].includes(member.dispatch.transport))
+    )
+      throw new Error("Invalid member dispatch binding");
   }
   return room;
 }
