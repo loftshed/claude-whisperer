@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.24.2
+
+- fix(orchestrate): harden cross-harness wakes, mailbox ergonomics, and model routing (#12)
+
 ## 0.24.1
 
 - fix(orchestrate): receive explicitly addressed cross-project mail (#10)
