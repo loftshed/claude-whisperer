@@ -295,6 +295,7 @@ class ConsultTests(unittest.TestCase):
         self.assertIn("## Context\n\nWe use flock on macOS.", prompt)
         self.assertIn("### lock.py\n\n````\ndef lock():", prompt, "a fence longer than the content's backticks")
         self.assertNotIn(str(attachment), prompt, "host paths stay out of the prompt")
+        self.assertIn("trusted specialist consultant", prompt)
         self.assertIn("no permission to edit files", prompt)
         self.assertIn("### UNCERTAINTY", prompt)
         self.assertIn("AGENT_CONSULT_STATUS=answered", summary)
@@ -741,6 +742,59 @@ class ConsultTests(unittest.TestCase):
         self.assertEqual(sections["UNCERTAINTY"], "none")
         sections, shape = CONSULT.parse_sections(FINDINGS, "review")
         self.assertEqual((shape, list(sections)), ("structured", ["FINDINGS", "EVIDENCE", "UNCERTAINTY"]))
+
+    def test_codex_consult_disables_configured_mcp_servers_and_strips_host_session_env(self) -> None:
+        codex_home = self.root / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            '[mcp_servers.peer-mailbox]\ncommand = "python3"\n[mcp_servers."my.srv"]\ncommand = "python3"\n',
+            encoding="utf-8",
+        )
+        proj_codex = self.repository / ".codex"
+        proj_codex.mkdir()
+        (proj_codex / "config.toml").write_text('[mcp_servers.repo-srv]\ncommand = "python3"\n', encoding="utf-8")
+        env = self.environment(
+            CODEX_HOME=str(codex_home),
+            ANTIGRAVITY_CONVERSATION_ID="host-conv",
+            ANTIGRAVITY_LS_ADDRESS="127.0.0.1:9999",
+            ANTIGRAVITY_CSRF_TOKEN="secret",
+            CODEX_THREAD_ID="host-thread",
+            OPENCODE_SESSION_ID="host-opencode",
+            CLAUDE_CODE_SESSION_ID="host-claude",
+        )
+        code, result, _summary = self.consult(
+            "--question",
+            "Check MCP isolation",
+            "--read",
+            str(self.repository),
+            "--model",
+            "gpt-5.6-luna",
+            "--transport",
+            "executor",
+            env=env,
+        )
+        self.assertEqual(code, 0, result.get("error"))
+        argv = self.capture()["argv"]
+        self.assertIn("features.plugins=false", argv)
+        self.assertIn("features.apps=false", argv)
+        self.assertIn(
+            'mcp_servers={"my.srv"={enabled=false},"peer-mailbox"={enabled=false},"repo-srv"={enabled=false}}',
+            argv,
+        )
+        exec_env = RUNNER.executor_environment("codex", self.repository)
+        with mock.patch.dict(os.environ, env):
+            filtered = RUNNER.executor_environment("codex", self.repository)
+        for leaked in (
+            "ANTIGRAVITY_CONVERSATION_ID",
+            "ANTIGRAVITY_LS_ADDRESS",
+            "ANTIGRAVITY_CSRF_TOKEN",
+            "CODEX_THREAD_ID",
+            "OPENCODE_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ID",
+        ):
+            self.assertNotIn(leaked, filtered)
+        self.assertEqual(filtered.get("CODEX_HOME"), str(codex_home))
+        del exec_env
 
 
 if __name__ == "__main__":

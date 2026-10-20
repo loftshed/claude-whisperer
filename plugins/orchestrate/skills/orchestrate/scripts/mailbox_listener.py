@@ -51,9 +51,16 @@ class StreamingSession:
 
     def observe(self, event: dict) -> None:
         if self.engine == "agy":
-            initialized = event.get("event") == "init"
-            finished = event.get("event") == "result"
-            native = event.get("conversation_id") or event.get("result", {}).get("conversation_id")
+            kind = event.get("type") or event.get("event")
+            initialized = kind == "init"
+            finished = kind == "result"
+            inner = event.get(kind) if isinstance(kind, str) else None
+            result = event.get("result")
+            native = (
+                event.get("conversation_id")
+                or (inner.get("conversation_id") if isinstance(inner, dict) else None)
+                or (result.get("conversation_id") if isinstance(result, dict) else None)
+            )
         else:
             initialized = event.get("type") == "system" and event.get("subtype") == "init"
             finished = event.get("type") == "result"

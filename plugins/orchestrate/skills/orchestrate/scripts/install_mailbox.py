@@ -23,6 +23,7 @@ import peer_mailbox as mailbox
 from check_mailbox import RpcClient, check, initialize_codex
 
 EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")
+AGY_EVENTS = ("SessionStart", "PreInvocation", "Stop")
 TOOLS = ("peers", "send", "inbox", "wait", "ack", "focus", "register", "feedback")
 
 
@@ -72,7 +73,7 @@ def configuration_status(
             "mcp_servers",
             Path(os.environ.get("CODEX_HOME", str(home / ".codex"))) / "hooks.json",
         ),
-        "agy": (home / ".gemini/config/mcp_config.json", "mcpServers", None),
+        "agy": (home / ".gemini/config/mcp_config.json", "mcpServers", home / ".gemini/config/hooks.json"),
         "opencode": (
             Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config"))) / "opencode/opencode.jsonc",
             "mcp",
@@ -151,7 +152,18 @@ def configuration_status(
                         issues.append(f"Codex mailbox {tool} needs scoped tool permission")
         except (OSError, ValueError):
             issues.append("mailbox configuration could not be read")
-        if hooks_path:
+        if hooks_path and harness == "agy":
+            try:
+                group = json.loads(hooks_path.read_text()).get("peer-mailbox", {})
+                for event in AGY_EVENTS:
+                    command = agy_command(expected.with_name("peer_mailbox.py"), event)
+                    if not any(
+                        isinstance(entry, dict) and entry.get("command") == command for entry in group.get(event, [])
+                    ):
+                        issues.append(f"{event} mailbox hook missing or stale")
+            except (OSError, ValueError, AttributeError):
+                issues.append("mailbox turn hooks missing or unreadable")
+        elif hooks_path:
             try:
                 hooks = json.loads(hooks_path.read_text()).get("hooks", {})
                 command = shlex.join(
@@ -184,6 +196,30 @@ def ensure_hub(hub: Path, skill: Path, *, dry_run: bool = False) -> None:
     if hub.exists() or hub.is_symlink():
         hub.rename(hub.with_name(f"{hub.name}.mailbox-bak.{time.time_ns()}"))
     hub.symlink_to(skill, target_is_directory=True)
+
+
+def agy_command(script: Path, event: str) -> str:
+    return shlex.join(["python3", str(script), "hook", "--harness", "gemini", "--event", event])
+
+
+def install_agy_hooks(path: Path, script: Path, *, dry_run: bool = False) -> bool:
+    """Antigravity hooks.json: named groups of flat handler lists; other groups stay untouched."""
+    settings = json.loads(path.read_text()) if path.exists() else {}
+    before = json.dumps(settings, sort_keys=True)
+    settings["peer-mailbox"] = {
+        event: [{"type": "command", "command": agy_command(script, event), "timeout": 10}] for event in AGY_EVENTS
+    }
+    if before == json.dumps(settings, sort_keys=True):
+        print(f"• hooks already installed: {path}")
+        return False
+    if dry_run:
+        print(f"would install Antigravity turn hooks: {path}")
+        return True
+    backup(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    configuration.write_private(path, json.dumps(settings, indent=2) + "\n")
+    print(f"✓ Antigravity turn hooks: {path}")
+    return True
 
 
 def install_hooks(path: Path, script: Path, harness: str, *, dry_run: bool = False) -> bool:
@@ -532,9 +568,16 @@ def install(
         if trust_codex_hooks:
             trust_codex(hub / "peer_mailbox.py", codex, dry_run=dry_run)
         else:
-            print(
-                "Codex automatic delivery needs hook trust: use /hooks, or rerun with --trust-codex-hooks after review."
+            trusted_state = (
+                tomllib.loads(config.read_text()).get("hooks", {}).get("state", {}) if config.exists() else {}
             )
+            trusted_count = sum(
+                isinstance(entry, dict) and bool(entry.get("trusted_hash")) for entry in trusted_state.values()
+            )
+            if trusted_count < len(EVENTS):
+                print(
+                    "Codex automatic delivery needs hook trust: use /hooks, or rerun with --trust-codex-hooks after review."
+                )
 
     if shutil.which("agy"):
         register(
@@ -547,6 +590,7 @@ def install(
             daemon_url=daemon_url,
             daemon_token=daemon_token,
         )
+        install_agy_hooks(home / ".gemini/config/hooks.json", hub / "peer_mailbox.py", dry_run=dry_run)
 
     if shutil.which("opencode"):
         directory = Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config"))) / "opencode"

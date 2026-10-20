@@ -28,6 +28,25 @@ class InstallMailboxTests(unittest.TestCase):
             installer.read_json_config(path), {"url": "https://example.test/a/*b*/", "literal": ",}", "items": [1]}
         )
 
+    def test_antigravity_hooks_are_flat_named_group_and_preserve_other_groups(self):
+        self.path.write_text('{"vibe-island":{"Stop":[{"type":"command","command":"keep"}]}}\n')
+        self.assertTrue(installer.install_agy_hooks(self.path, self.script))
+        settings = json.loads(self.path.read_text())
+        self.assertEqual(settings["vibe-island"], {"Stop": [{"type": "command", "command": "keep"}]})
+        self.assertEqual(set(settings["peer-mailbox"]), set(installer.AGY_EVENTS))
+        self.assertEqual(
+            settings["peer-mailbox"]["PreInvocation"],
+            [
+                {
+                    "type": "command",
+                    "command": "python3 '/home/example/skill hub/peer_mailbox.py' hook --harness gemini --event PreInvocation",
+                    "timeout": 10,
+                }
+            ],
+        )
+        self.assertFalse(installer.install_agy_hooks(self.path, self.script))
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
     def test_hooks_preserve_other_settings_and_back_up_the_previous_contents(self):
         original = '{"permissions":{"deny":["Bash(rm *)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"bailout stop"}]}]}}\n'
         self.path.write_text(original)

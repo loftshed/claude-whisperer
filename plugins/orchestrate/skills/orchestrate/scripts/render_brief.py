@@ -35,7 +35,7 @@ COMMON_CONSTRAINTS = (
     "Do not edit checklists, completion plans, or status claims unless an exact file and evidence requirement appear in the approved scope.",
     "Do not commit, push, merge, reset, clean, stash, checkout, switch branches, create worktrees, or share/publish the session.",
     "The allowed paths constrain writes, not relevant read-only investigation. Follow evidence across repository files and applicable documentation within the objective.",
-    "Ask the conductor about missing context or needed scope changes; continue independent work when possible. Report BLOCKED only when the missing answer prevents useful progress.",
+    "Bring senior-specialist craft and independent judgment to the objective; keep communication with the conductor or peers relaxed, friendly, and natural when asking about missing context or needed scope changes, and continue independent work when possible. Report BLOCKED only when the missing answer prevents useful progress.",
 )
 
 

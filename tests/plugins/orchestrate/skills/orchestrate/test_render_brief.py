@@ -51,6 +51,9 @@ class BriefRendererTests(unittest.TestCase):
     def test_renders_complete_runner_compliant_brief(self) -> None:
         rendered = RENDERER.render_brief(brief_spec())
         self.assertIn("# Objective\n\nAdd the bounded implementation.", rendered)
+        self.assertIn("senior-specialist craft", rendered)
+        self.assertIn("relaxed, friendly, and natural", rendered)
+        self.assertIn("trusted senior specialist", RUNNER.REPORT_CONTRACT)
         self.assertEqual(
             RENDERER.REPORT_HEADINGS, ("STATUS", "FILES CHANGED", "COMMANDS RUN", "VERIFICATION", "RISKS OR BLOCKERS")
         )

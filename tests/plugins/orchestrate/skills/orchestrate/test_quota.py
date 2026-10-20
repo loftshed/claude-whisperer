@@ -186,6 +186,19 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(
             QUOTA.check_quota("claude", "opus", current, claude_config_dir="~/.claude")["accountId"], "claude-work"
         )
+        # Inherited CLAUDE_CONFIG_DIR does not redirect a default check (claude_config_dir=None),
+        # because executor_environment("claude") strips CLAUDE_CONFIG_DIR unless --claude-config-dir is passed.
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "/Users/example/.claude-personal"}):
+            default_result = QUOTA.check("claude", "opus", current, claude_config_dir=None)
+        self.assertEqual((default_result["accountId"], default_result["status"]), ("claude-work", "blocked"))
+        # Parent path segments containing "personal" or "work" do not shadow the profile directory basename.
+        nested_work = QUOTA.check("claude", "opus", current, claude_config_dir="/Users/example/personal/.claude-work")
+        self.assertEqual(nested_work["accountId"], "claude-work")
+        # A lane with availableNowPct=None is unknown, not low, and never crashes blocked_message.
+        missing_pct = view()
+        missing_pct["lanes"][3]["availableNowPct"] = None
+        self.assertEqual(QUOTA.check("agy", "gemini-3.8-flash-medium", missing_pct)["status"], "unknown")
+        self.assertIn("quota is exhausted", QUOTA.blocked_message("claude", "opus", work_result, missing_pct))
 
 
 class RecommendTests(unittest.TestCase):

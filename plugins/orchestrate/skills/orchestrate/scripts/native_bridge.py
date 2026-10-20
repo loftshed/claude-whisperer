@@ -28,7 +28,13 @@ def process_identity(pid: int) -> str | None:
             return "proc-start-ticks:" + fields[19]
         except (OSError, IndexError):
             return None
-    result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "lstart="],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "TZ": "UTC", "LC_ALL": "C"},
+    )
     return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
 
 

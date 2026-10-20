@@ -63,6 +63,9 @@ create a harness boundary.
 For example, a Codex agent reporting to a Gemini coordinator sends that report through the mailbox,
 but uses Codex thread messaging or sub-agent tools with other Codex agents. A missing recipient in one
 native tool is a reason to check the host's other native session/thread tools, not to switch to the mailbox.
+If a Codex peer thread cannot send a native reply back because the originating thread is not loaded in its
+app-server host, read the completed peer thread's output directly (or let the peer return its answer
+through `peer-mailbox` when the two threads live in separate host processes).
 
 Use `orchestrate` for authorized execution across provider boundaries and `peer-mailbox` for messages
 between harnesses. Keep any runner-assigned conductor/worker mailbox limited to that run's reporting
@@ -225,7 +228,7 @@ never blocks OpenCode.
 ## Run
 
 1. Record `git status --short`, branch and `HEAD`. Plan completely.
-2. Write a task spec per [references/brief-template.md](references/brief-template.md), outside the repo.
+2. Write a task spec per [references/brief-template.md](references/brief-template.md), outside the repo. Frame the objective with a confidence-boosting specialist role suited to the experiment or task (affirming why the agent's judgment fits the problem while making clear that evidence-backed `BLOCKED` reporting is valued just as highly as completion).
 3. Launch:
 
    ```bash
@@ -375,7 +378,10 @@ model metadata stays unknown; a declared model is not provider attestation.
 
 Read inbox once at a turn boundary, then block with `wait` (MCP `wait(replyTo=...)`) for a needed
 answer rather than repeatedly calling inbox/peers or waking the model on short timers. Waiting is
-local; a timeout is not an answer and does not justify endless retries. Use `--no-wake` / `wake:false`
+local; a timeout is not an answer and does not justify endless retries. Keep peer communication relaxed,
+friendly, and natural—talk like chill, supportive teammates without stiff formality, credit helpful
+findings, and keep review notes constructive—while folding appreciation into substantive replies rather
+than sending standalone "thanks / got it" messages. Use `--no-wake` / `wake:false`
 for FYI and progress. Do not send acknowledgement-only replies. Delivery acceptance is not proof that
 an agent read or considered a message. These reduce avoidable interactions; no token savings are measured.
 

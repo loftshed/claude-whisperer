@@ -735,7 +735,16 @@ def start_daemon_process(base: Path, port: int) -> None:
     with os.fdopen(descriptor, "ab", buffering=0) as output:
         env = {
             key: os.environ[key]
-            for key in ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "CODEX_HOME")
+            for key in (
+                "PATH",
+                "HOME",
+                "LANG",
+                "LC_ALL",
+                "TMPDIR",
+                "CODEX_HOME",
+                "AGENT_EXECUTOR_FEEDBACK_DIR",
+                "AGENT_EXECUTOR_CONFIG",
+            )
             if key in os.environ
         }
         child = subprocess.Popen(

@@ -219,6 +219,13 @@ class ContractTests(unittest.TestCase):
         result = self.tool("send", {"to": self.sender["name"], "text": "valid", "wake": False})["result"]
         self.assertEqual(result["structuredContent"]["to"], self.sender["name"])
         self.assertEqual([m["text"] for m in MAILBOX.messages(self.base, self.sender["session"])], ["valid"])
+        aliased = self.tool("send", {"to": self.sender["name"], "message": "via alias", "wake": False})["result"]
+        self.assertFalse(aliased.get("isError", False))
+        waited = self.tool(
+            "wait",
+            {"timeout": 0.05, "reply_to": aliased["structuredContent"]["id"], "mark_read": False},
+        )["result"]
+        self.assertEqual(waited["structuredContent"]["status"], "timed_out")
 
     def test_inbox_pages_and_read_only_offsets_preserve_every_message(self):
         ids = [self.send_fixture(text)["id"] for text in ["alpha", "beta", "gamma"]]

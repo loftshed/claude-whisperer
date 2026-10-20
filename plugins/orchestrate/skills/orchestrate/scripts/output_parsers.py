@@ -107,6 +107,16 @@ def parse_agy_output(text: str) -> tuple[str, str | None, str | None]:
     events = _bundled_module("usage").agy_events(text)
     results = [event for event in events if event.get("type") == "result"]
     if not results:
+        if events:
+            session_id = next(
+                (
+                    event["conversation_id"]
+                    for event in reversed(events)
+                    if isinstance(event.get("conversation_id"), str)
+                ),
+                None,
+            )
+            return "", session_id, "unknown"
         # Retain compatibility with older plain-output adapters. Malformed JSON
         # without a terminal report still fails the ordinary report contract.
         return text, None, None
@@ -158,7 +168,8 @@ def parse_claude_output(text: str) -> tuple[str, str | None, str, str | None]:
     if isinstance(final.get("session_id"), str):
         session_id = final["session_id"]
     result = claude_result_text(final.get("result"))
-    if final.get("is_error"):
+    subtype = final.get("subtype")
+    if final.get("is_error") or (isinstance(subtype, str) and subtype.startswith("error")):
         details = [result] if result.strip() else []
         if isinstance(final.get("error"), str) and final["error"].strip():
             details.append(final["error"].strip())
@@ -173,7 +184,7 @@ def parse_claude_output(text: str) -> tuple[str, str | None, str, str | None]:
                 details.append("; ".join(error_items))
         if final.get("api_error_status") is not None:
             details.append(f"api error status {final['api_error_status']}")
-        return "", session_id, "error", "\n".join(details) or final.get("subtype") or "error"
+        return "", session_id, "error", "\n".join(details) or (subtype if isinstance(subtype, str) else None) or "error"
     extract_raw_final_report = _bundled_module("report_contract").extract_raw_final_report
     if not extract_raw_final_report(result)[1]:
         # A post-report Stop-hook reply or follow-up turn can overwrite the final result event's text.
@@ -204,6 +215,8 @@ def codex_terminal_error(text: str) -> str | None:
                 message = error["message"]
             elif isinstance(error, str):
                 message = error
+        elif event.get("type") == "turn.completed":
+            message = None
     return message.strip() if message and message.strip() else None
 
 

@@ -111,32 +111,41 @@ def assess(lane: dict[str, Any]) -> str:
     status = lane.get("status")
     if status in ("blocked", "credits"):
         return status
-    if (lane.get("availableNowPct") or 0) < LOW_USABLE_PCT:
+    usable = lane.get("availableNowPct")
+    if usable is None or not isinstance(usable, (int, float)) or isinstance(usable, bool):
+        return "unknown"
+    if usable < LOW_USABLE_PCT:
         return "low"
     return "available"
 
 
 def _match_claude_lane(lanes: list[dict[str, Any]], claude_config_dir: str | Path | None) -> dict[str, Any]:
-    effective = str(claude_config_dir) if claude_config_dir else os.environ.get("CLAUDE_CONFIG_DIR")
+    # executor_environment("claude") strips inherited CLAUDE_CONFIG_DIR unless --claude-config-dir is passed.
+    effective = str(claude_config_dir) if claude_config_dir else None
     if len(lanes) > 1:
         if effective:
-            lower = effective.lower()
+            name = Path(effective).name.lower()
             for lane in lanes:
                 if (
                     lane.get("config_dir")
                     and Path(str(lane["config_dir"])).expanduser() == Path(effective).expanduser()
                 ):
                     return lane
-            is_personal = "personal" in lower or "plaude" in lower
-            is_work = "work" in lower or Path(effective).name == ".claude"
+            is_personal = "personal" in name or "plaude" in name
+            is_work = "work" in name or name == ".claude"
+            profile_name = name.lstrip(".")
+            short_profile = profile_name.removeprefix("claude-")
             for lane in lanes:
                 haystack = " ".join(str(lane.get(k) or "") for k in ("accountId", "label", "billing", "name")).lower()
                 if is_personal and ("personal" in haystack or "plaude" in haystack):
                     return lane
                 if is_work and not is_personal and ("work" in haystack or "personal" not in haystack):
                     return lane
-                profile_name = Path(effective).name.lstrip(".").lower()
-                if profile_name and profile_name != "claude" and profile_name in haystack:
+                if (
+                    profile_name
+                    and profile_name != "claude"
+                    and (profile_name in haystack or (short_profile and short_profile in haystack))
+                ):
                     return lane
         else:
             # Unset CLAUDE_CONFIG_DIR runs against Claude Code's default profile (~/.claude), not personal.

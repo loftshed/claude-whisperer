@@ -98,8 +98,29 @@ def result_text(result: dict[str, Any]) -> str:
     return "\n".join(block["text"] for block in result.get("content", []) if block.get("type") == "text")
 
 
+def _verify_codex_hook_trust(native: RpcClient, config: Path) -> None:
+    from install_mailbox import mailbox_hook_updates
+
+    hooks = native.request("hooks/list", {"cwds": [str(Path.home())]})
+    expected_hooks = mailbox_hook_updates(
+        hooks,
+        Path.home() / ".agents/skills/agent-executor/scripts/peer_mailbox.py",
+        config.with_name("hooks.json"),
+    )
+    trusted = {
+        hook["key"]: hook.get("trustStatus")
+        for entry in hooks.get("data", [])
+        for hook in entry.get("hooks", [])
+        if hook["key"] in expected_hooks
+    }
+    if trusted != dict.fromkeys(expected_hooks, "trusted"):
+        raise RuntimeError(
+            "Codex mailbox hooks need review: use /hooks or doctor --repair-messaging --trust-codex-hooks"
+        )
+
+
 def check() -> dict[str, Any]:
-    from install_mailbox import configuration_status, mailbox_hook_updates
+    from install_mailbox import configuration_status
 
     configuration = configuration_status()
     missing = {name: row["issues"] for name, row in configuration.items() if not row["configured"]}
@@ -133,22 +154,7 @@ def check() -> dict[str, Any]:
                 native = RpcClient(["codex", "app-server", "--stdio"], env)
                 initialize_codex(native)
                 config = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "config.toml"
-                hooks = native.request("hooks/list", {"cwds": [str(Path.home())]})
-                expected_hooks = mailbox_hook_updates(
-                    hooks,
-                    Path.home() / ".agents/skills/agent-executor/scripts/peer_mailbox.py",
-                    config.with_name("hooks.json"),
-                )
-                trusted = {
-                    hook["key"]: hook.get("trustStatus")
-                    for entry in hooks.get("data", [])
-                    for hook in entry.get("hooks", [])
-                    if hook["key"] in expected_hooks
-                }
-                if trusted != dict.fromkeys(expected_hooks, "trusted"):
-                    raise RuntimeError(
-                        "Codex mailbox hooks need review: use /hooks or doctor --repair-messaging --trust-codex-hooks"
-                    )
+                _verify_codex_hook_trust(native, config)
                 installed = tomllib.loads(config.read_text())
                 # Only the installed mailbox is exercised; no remote servers or providers are contacted.
                 overrides = {
@@ -303,6 +309,7 @@ def check_http() -> dict[str, Any]:
             native = RpcClient(["codex", "app-server", "--stdio"], env)
             initialize_codex(native)
             installed_path = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "config.toml"
+            _verify_codex_hook_trust(native, installed_path)
             installed = tomllib.loads(installed_path.read_text()) if installed_path.exists() else {}
             overrides = {f"mcp_servers.{key}.enabled": False for key in installed.get("mcp_servers", {})}
             overrides.update({f"plugins.{key}.enabled": False for key in installed.get("plugins", {})})
@@ -359,6 +366,7 @@ def check_http() -> dict[str, Any]:
             "round_trips": exchanges,
             "evidence": str(evidence),
             "native_codex": bool(native),
+            "codex_hook_trust": "verified" if native else "not applicable",
             "model_generation_calls": 0,
         }
         (evidence / "result.json").write_text(json.dumps(report, indent=2) + "\n")

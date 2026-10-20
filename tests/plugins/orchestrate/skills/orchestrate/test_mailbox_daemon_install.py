@@ -122,6 +122,14 @@ class TestMailboxDaemonInstall(unittest.TestCase):
         self.assertEqual(daemon.get_mode(self.base), "http")
         rows = installer.configuration_status(self.home, {"claude", "codex", "agy", "opencode"}, base=self.base)
         self.assertTrue(all(row["configured"] for row in rows.values()), rows)
+        hooks = json.loads((self.home / ".gemini/config/hooks.json").read_text())["peer-mailbox"]
+        self.assertEqual(set(hooks), set(installer.AGY_EVENTS))
+        (self.home / ".gemini/config/hooks.json").write_text("{}")
+        stale = installer.configuration_status(self.home, {"agy"}, base=self.base)["agy"]
+        self.assertIn("Stop mailbox hook missing or stale", stale["issues"])
+        installer.install_agy_hooks(
+            self.home / ".gemini/config/hooks.json", self.home / ".agents/skills/agent-executor/scripts/peer_mailbox.py"
+        )
         before_again = {key: path.read_bytes() for key, path in self.paths.items()}
         self.install()
         self.assertEqual(daemon.owned_state(self.base)["pid"], state["pid"])

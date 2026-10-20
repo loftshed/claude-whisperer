@@ -70,6 +70,8 @@ def timestamp(value: str) -> dt.datetime:
 def native(host: str, engine: str, model_id: str) -> bool:
     if host == engine and host in {"codex", "agy", "claude", "opencode"}:
         return True
+    if engine in {"codex", "agy", "claude"}:
+        return False
     families = RUNNER.load_model_families()
     selector = RUNNER.families_module().parse_selector(model_id, families)
     if selector:

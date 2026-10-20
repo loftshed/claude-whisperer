@@ -60,6 +60,10 @@ class FamilyResolutionTests(unittest.TestCase):
     def test_tier_keyword_matches_whole_words_only(self) -> None:
         self.assertEqual(self.resolve("gpt:luna", CODEX), "gpt-6-luna")
         self.assertEqual(self.resolve("gemini:pro", AGY), "gemini-3.1-pro-high")
+        self.assertEqual(
+            self.resolve("gemini:pro", ["gemini-3.8-flash-medium", "gemini-4-argon-high", "gemini-4-argon-medium"]),
+            "gemini-4-argon-high",
+        )
         with self.assertRaises(FAMILIES.SelectorError):
             self.resolve("gpt:sol", ["gpt-6-solar", "gpt-oss-120b-medium"])
 
@@ -223,6 +227,9 @@ class CoordinatorSelectorTests(unittest.TestCase):
         for alias in ("opus", "sonnet", "haiku", "fable"):
             self.assertTrue(COORDINATOR.native("claude", "claude", alias))
             self.assertFalse(COORDINATOR.native("codex", "claude", alias))
+        # Explicit cross-harness first-party dispatches (e.g. Antigravity's Claude/GPT pool) are not native to the host.
+        self.assertFalse(COORDINATOR.native("claude", "agy", "claude-opus-4-6-thinking"))
+        self.assertFalse(COORDINATOR.native("codex", "agy", "gpt-oss-120b-medium"))
 
     def test_profiles_resolve_selectors_and_keep_exact_ids(self) -> None:
         registry = {
