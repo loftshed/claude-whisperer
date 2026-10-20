@@ -32,10 +32,25 @@ class FeedbackError(ValueError):
     pass
 
 
+def _default_mailbox_base() -> Path:
+    cache = os.environ.get("XDG_CACHE_HOME")
+    root = (Path(cache).expanduser() if cache else Path.home() / ".cache") / "agent-executor"
+    return root / "mailbox-v1"
+
+
+def _uses_default_store(base: Path) -> bool:
+    if os.environ.get("AGENT_EXECUTOR_HOME"):
+        return False
+    try:
+        return base.expanduser().resolve() == _default_mailbox_base().resolve()
+    except OSError:
+        return False
+
+
 def directory(base: Path) -> Path | None:
     """An explicit local destination, otherwise beside this mailbox's cache. No project-specific default."""
     explicit = os.environ.get("AGENT_EXECUTOR_FEEDBACK_DIR")
-    if explicit is None:
+    if explicit is None and ("AGENT_EXECUTOR_CONFIG" in os.environ or _uses_default_store(base)):
         config_root = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))).expanduser()
         config = Path(os.environ.get("AGENT_EXECUTOR_CONFIG", str(config_root / "agent-executor" / "config.json")))
         try:
@@ -131,7 +146,9 @@ def record(base: Path, payload: dict[str, Any], *, repeat: bool = True) -> dict[
     identifier = "feedback-" + digest(payload)
     destination.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = destination / f"{identifier}.json"
-    descriptor = os.open(destination / f"{identifier}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    lock_key = hashlib.sha256(f"{os.getuid()}:{destination.resolve()}:{identifier}".encode()).hexdigest()[:24]
+    lock_path = Path(tempfile.gettempdir()) / f".agent-executor-feedback-{lock_key}.lock"
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         existing = read(path)

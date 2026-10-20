@@ -156,6 +156,26 @@ class ListenerTests(unittest.TestCase):
         self.assertEqual(server.session({}), "owned-session")
         self.assertEqual(server.session({"sessionId": "other-id"}), "owned-session")
 
+    def test_agy_type_init_and_result_events_update_ready_busy_and_native_session(self):
+        import mailbox_listener
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary) / "mailbox-v1"
+            dummy = subprocess.Popen([sys.executable, "-c", "pass"])
+            dummy.wait()
+            session = mailbox_listener.StreamingSession(dummy, "agy", base, "agy-session-1")
+            session.busy = True
+            session.observe({"type": "init", "conversation_id": "conv-type-init"})
+            self.assertTrue(session.ready)
+            self.assertTrue(session.busy)
+            self.assertEqual(session.native_session, "conv-type-init")
+            session.observe({"type": "result", "status": "success", "result": "done"})
+            self.assertFalse(session.busy)
+            peer = mailbox.load(mailbox.peer_path(base, "agy-session-1"))
+            self.assertEqual((peer["state"], peer["nativeSession"]), ("idle", "conv-type-init"))
+            session.observe({"event": "init", "init": {"conversation_id": "conv-nested-init"}})
+            self.assertEqual(session.native_session, "conv-nested-init")
+
 
 if __name__ == "__main__":
     unittest.main()

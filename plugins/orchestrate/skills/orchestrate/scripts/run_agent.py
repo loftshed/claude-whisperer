@@ -48,9 +48,15 @@ PREFERRED_MODELS = {
 # `claude-*` IDs are passed through and recorded as unverified.
 CLAUDE_MODEL_ALIASES = ("opus", "sonnet", "haiku", "fable")
 CLAUDE_MODEL_ID = re.compile(r"^claude-[a-z0-9][a-z0-9.\-]*(\[1m\])?$")
-# Host session state that must not leak into an executor: Claude Code messaging tokens and the host's
-# account profile (an executor could otherwise act inside, or bill to, the host session).
-HOST_SESSION_ENV = re.compile(r"^(CLAUDECODE|CLAUDE_CODE_.*|CLAUDE_CONFIG_DIR|AI_AGENT)$")
+# Host session state that must not leak into an executor: harness session IDs, control endpoints,
+# messaging tokens, and the host's account profile (an executor could otherwise act inside, or bill to,
+# the host session).
+HOST_SESSION_ENV = re.compile(
+    r"^(CLAUDECODE|CLAUDE_CODE_(?!OAUTH_TOKEN$|USE_BEDROCK$|USE_VERTEX$).*|CLAUDE_CONFIG_DIR|CLAUDE_PID|AI_AGENT"
+    r"|CODEX_SANDBOX|CODEX_SANDBOX_.*|CODEX_THREAD_ID|CODEX_MANAGED_BY_NPM|CODEX_CI"
+    r"|OPENCODE|OPENCODE_SESSION|OPENCODE_SESSION_ID"
+    r"|ANTIGRAVITY|ANTIGRAVITY_.*|GEMINI_CLI)$"
+)
 # Provider error messages that mean the account is out of quota or credits, not that the task failed.
 # They are matched only against provider error channels (stderr, structured CLI error fields), never
 # against the model's content or tool output, and they are anchored: a bare "quota" or "rate limit"
@@ -110,50 +116,6 @@ EXIT_STEER_JOB_FINISHED = 30
 EXIT_STEER_OTHER_WORKTREE = 31
 EXIT_STEER_PROCESS_NOT_FOUND = 32
 EXIT_STEER_REJECTED = 33
-REPORT_HEADINGS = (
-    "STATUS",
-    "FILES CHANGED",
-    "COMMANDS RUN",
-    "VERIFICATION",
-    "RISKS OR BLOCKERS",
-)
-REPORT_CONTRACT = """
-
-EXECUTION AND REPORT CONTRACT
-- Work directly in the provided workspace and follow the approved brief exactly.
-- You have full tool permissions for this run. That capability does not authorize broader scope.
-- Preserve all pre-existing and unrelated user changes.
-- Do not start nested peer CLI runners inside this audited job. Request needed consultation and stop so the conductor can finish the audit first.
-- Do not commit, push, merge, reset, clean, stash, checkout, or switch branches.
-- Do not access secrets or unrelated private files.
-- If correct completion requires destructive action, external publication, credentials, or scope beyond the brief, stop and report the blocker.
-- Run every verification command named in the brief. Do not claim a command passed unless you observed its exit status.
-- Do not edit plans, checklists, status ledgers, or completion claims unless the brief explicitly names the exact file and required evidence.
-- A passing command proves only its named verification scope. Do not infer or declare broader project completion.
-- Do not narrate tool calls or repeat the plan in the final response.
-- End with a compact report using exactly these headings:
-  STATUS
-  FILES CHANGED
-  COMMANDS RUN
-  VERIFICATION
-  RISKS OR BLOCKERS
-- Under STATUS, put exactly one canonical outcome on the first non-empty line:
-  COMPLETE, BLOCKED, or FAILED.
-- Use BLOCKED when correct completion needs authority, information, credentials, or scope
-  that the brief does not provide. Use FAILED when the attempted work is incomplete for
-  another reason. Never label either condition COMPLETE.
-- For a technical blocker, you may put one optional fenced block tagged exactly
-  ```consultation-request under RISKS OR BLOCKERS. Its JSON object has exactly these fields:
-  question and decision_needed are nonempty strings; observations, attempts, versions,
-  and hypotheses are arrays of strings. Include observations and at least one hypothesis.
-  Do not use a generic ```json tag or add approval/verified fields. This only requests advice.
-- Keep the report concise. Do not paste complete files, large diffs, or raw logs.
-""".strip()
-AGY_ONESHOT_GUARDRAIL = (
-    "\n- In one-shot `--print` mode, never stop calling tools to wait for a background task or timer "
-    "(`WaitMsBeforeAsync`), because ending a turn terminates the session immediately; run commands "
-    "synchronously to completion."
-)
 
 
 class RunnerError(Exception):
@@ -165,7 +127,9 @@ class RunnerError(Exception):
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__,
-        epilog="Peer communication: mailbox peers lists task/model/harness labels; mailbox focus sets your actual "
+        epilog="Subcommands: consult, mailbox, events, steer, listen, probe, stooges, models, routes, families, "
+        "quota, doctor, prune, init (run `<subcommand> --help`). "
+        "Peer communication: mailbox peers lists task/model/harness labels; mailbox focus sets your actual "
         "task and optional verified model/host metadata. mailbox send --to SESSION --message TEXT sends; "
         "--text and --body are aliases. mailbox wait --reply-to MESSAGE_ID --timeout 300 blocks locally "
         "without model polling. mailbox feedback records friction. Run mailbox --help for details.",
@@ -1487,6 +1451,9 @@ def bundled_module(name: str) -> Any:
 
 
 _REPORT_CONTRACT_MOD = bundled_module("report_contract")
+REPORT_HEADINGS = _REPORT_CONTRACT_MOD.REPORT_HEADINGS
+REPORT_CONTRACT = _REPORT_CONTRACT_MOD.REPORT_CONTRACT
+AGY_ONESHOT_GUARDRAIL = _REPORT_CONTRACT_MOD.AGY_ONESHOT_GUARDRAIL
 read_brief = _REPORT_CONTRACT_MOD.read_brief
 brief_renderer_module = _REPORT_CONTRACT_MOD.brief_renderer_module
 read_task_spec = _REPORT_CONTRACT_MOD.read_task_spec

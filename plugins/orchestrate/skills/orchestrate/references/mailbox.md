@@ -28,7 +28,9 @@ sessions, branches, or worktrees do not make communication external.
 Claude Code uses `SendMessage` and `ListAgents`; Antigravity/Gemini uses `send_message` and
 `invoke_subagent`; Codex uses native agent or thread tools; OpenCode uses its native agent tools.
 Check other native session/thread tools if one cannot reach a teammate. Do not route around that
-failure through the mailbox.
+failure through the mailbox, except when a Codex peer thread's native reply is rejected because the
+originating thread is not loaded in its app-server host (in which case the caller can read the
+completed peer thread's output or accept the reply over `peer-mailbox`).
 
 Runner-assigned conductor and worker sessions retain their dedicated mailbox for the run's reporting
 contract, including when both sessions use the same harness. This exception applies only to those two
@@ -135,8 +137,9 @@ See the [MCP audit](../../../../../docs/mailbox-mcp-audit.md) for verification a
 
 ## Wake an idle peer
 
-MCP `send` wakes the receiver by default. Use `wake: false` for FYI and progress updates.
-Do not send acknowledgement-only replies. Requests and completions that unblock work should still wake
+MCP `send` wakes the receiver by default. Keep peer messages relaxed, friendly, and natural—no stiff
+formality needed; fold any appreciation or context into substantive messages and replies—and use `wake: false`
+for FYI and progress updates. Do not send acknowledgement-only replies. Requests and completions that unblock work should still wake
 the recipient. The CLI equivalent is `mailbox send --no-wake`.
 Mail is saved before activation is attempted, and the result includes a
 `wake` status: `scheduled` (queue accepted it), `queued` (busy Codex), `unsupported`, or

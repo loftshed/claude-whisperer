@@ -78,15 +78,15 @@ OPENCODE_ACTING_TOOLS = (
 # only Claude Code can be held to no tools at all, the others keep their read tools.
 TOOL_POLICIES = {
     "question": {
-        "codex": "codex exec in an empty workspace with sandbox_mode=read-only and approval_policy=never: no writes; "
-        "read tools and read-only shell remain",
+        "codex": "codex exec in an empty workspace with sandbox_mode=read-only, approval_policy=never and MCP/plugins disabled: "
+        "no writes; read tools and read-only shell remain",
         "claude": "claude -p with --tools '' (no built-in tools) and --strict-mcp-config (no MCP servers)",
         "agy": "agy --mode plan in an empty workspace without --dangerously-skip-permissions: no writes; read tools remain",
         "opencode": "opencode run on a private server with every tool and MCP server disabled: no tools at all",
     },
     "read": {
-        "codex": "codex exec in the repository with sandbox_mode=read-only and approval_policy=never: read tools and "
-        "read-only shell, no writes",
+        "codex": "codex exec in the repository with sandbox_mode=read-only, approval_policy=never and MCP/plugins disabled: "
+        "read tools and read-only shell, no writes",
         "claude": "claude -p in the repository with --tools Read,Grep,Glob and --strict-mcp-config: read tools only",
         "agy": "agy --mode plan in the repository without --dangerously-skip-permissions: read tools, no writes",
         "opencode": "opencode run in the repository on a private server with only glob, grep and read enabled and no MCP servers",
@@ -300,9 +300,11 @@ def _intent_rules(request: dict[str, Any]) -> list[str]:
     repository = request.get("read")
     if intent == "question":
         return [
-            "You are a consultant answering one focused question for another agent. You have no permission "
-            "to edit files, run commands with side effects, publish anything, or take actions: answer from "
-            "the question, context and attachments below. Do not ask the caller to run anything for you.",
+            "You are a trusted specialist consultant brought in for your sharp judgment on one focused question for a "
+            "colleague agent. Take a clear, rigorous stance—your candid analysis and honest flagging of uncertainty "
+            "are equally valued. You have no permission to edit files, run commands with side effects, publish "
+            "anything, or take actions: answer from the question, context and attachments below. Do not ask the "
+            "caller to run anything for you.",
         ]
     # Only Codex gets a read-only shell. Claude Code has file tools only, and Antigravity's headless plan
     # mode denies a command and then ends the turn with no answer, so the prompt must not invite one.
@@ -313,14 +315,14 @@ def _intent_rules(request: dict[str, Any]) -> list[str]:
     )
     if intent == "investigate":
         return [
-            f"You are investigating why something happens in the repository at {repository}. {access} "
-            "You cannot change anything and must not try. Follow the evidence, revise hypotheses as you go, "
-            "and distinguish what you observed from what you infer.",
+            f"You are a trusted root-cause specialist investigating why something happens in the repository at {repository}. {access} "
+            "You cannot change anything and must not try. Trust your diagnostic instincts, follow the evidence wherever "
+            "it leads, revise hypotheses as you go, and distinguish what you observed from what you infer.",
         ]
     return [
-        f"You are reviewing a change in the repository at {repository}. {access} "
+        f"You are a trusted senior reviewer examining a change in the repository at {repository}. {access} "
         "You cannot change anything and must not try: report findings, do not fix them. "
-        "Judge correctness first, then safety and clarity; cite the file and line for every finding.",
+        "Bring a constructive, rigorous eye—judge correctness first, then safety and clarity; cite the file and line for every finding.",
     ]
 
 
@@ -626,6 +628,32 @@ def prepare_consult_dir(requested: Path | None, repository: str | None = None) -
     return directory
 
 
+def codex_mcp_server_names(workspace: Path) -> list[str]:
+    """Configured Codex MCP server names across user and repository config files."""
+    import tomllib
+
+    home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+    paths = [home / "config.toml"]
+    with contextlib.suppress(OSError):
+        resolved = workspace.resolve()
+        paths.extend(directory / ".codex/config.toml" for directory in (resolved, *resolved.parents))
+    names: set[str] = set()
+    for path in paths:
+        with contextlib.suppress(OSError, ValueError):
+            if not path.is_file():
+                continue
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+            servers = data.get("mcp_servers")
+            if isinstance(servers, dict):
+                names.update(key for key in servers if isinstance(key, str))
+            profiles = data.get("profiles")
+            if isinstance(profiles, dict):
+                for profile in profiles.values():
+                    if isinstance(profile, dict) and isinstance(profile.get("mcp_servers"), dict):
+                        names.update(key for key in profile["mcp_servers"] if isinstance(key, str))
+    return sorted(names)
+
+
 def consult_command(
     *,
     executable: str,
@@ -648,7 +676,21 @@ def consult_command(
     if engine == "codex":
         command = [executable, "exec"]
         command += ["resume", session_id] if session_id else ["-C", str(workspace)]
-        command += ["--skip-git-repo-check", "-c", 'sandbox_mode="read-only"', "-c", 'approval_policy="never"']
+        command += [
+            "--skip-git-repo-check",
+            "-c",
+            'sandbox_mode="read-only"',
+            "-c",
+            'approval_policy="never"',
+            "-c",
+            "features.plugins=false",
+            "-c",
+            "features.apps=false",
+        ]
+        mcp_names = codex_mcp_server_names(workspace)
+        if mcp_names:
+            entries = ",".join(f"{json.dumps(name)}={{enabled=false}}" for name in mcp_names)
+            command += ["-c", f"mcp_servers={{{entries}}}"]
         if effort is not None:
             command += ["-c", "model_reasoning_effort=" + json.dumps(effort)]
         command += ["--model", model, "--json", "--output-last-message", str(final_output_path), "-"]

@@ -24,7 +24,15 @@ SERVER = SCRIPTS / "mailbox_mcp.py"
 def mailbox_cli(base, *args, cwd=None, check=False, timeout=20):
     """`run_agent.py mailbox ARGS` against the store at BASE, outside any run."""
     environment = {**os.environ, "AGENT_EXECUTOR_HOME": str(base.parent)}
-    environment.pop("AGENT_MAILBOX_SESSION", None)
+    for variable in (
+        "AGENT_MAILBOX_SESSION",
+        "CLAUDE_CODE_SESSION_ID",
+        "ANTIGRAVITY_CONVERSATION_ID",
+        "ANTIGRAVITY_AGENT",
+        "ANTIGRAVITY_LS_ADDRESS",
+        "ANTIGRAVITY_CSRF_TOKEN",
+    ):
+        environment.pop(variable, None)
     return subprocess.run(
         [sys.executable, "-B", str(SCRIPTS / "run_agent.py"), "mailbox", *args],
         capture_output=True,
@@ -150,6 +158,61 @@ class MailboxTests(unittest.TestCase):
         with mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]):
             MAILBOX.hook({**payload, "model": "gpt-6-astra"}, harness="codex", base=self.base)
         self.assertEqual(MAILBOX.load(MAILBOX.peer_path(self.base, "runtime-model"))["model"], "gpt-6-astra")
+        transcript = Path(self.temporary.name) / "claude-session.jsonl"
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": "<local-command-stdout>Set model to `Sonnet 5.5` and saved</local-command-stdout>",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        subdir = self.repository / "scripts"
+        subdir.mkdir(exist_ok=True)
+        with mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]):
+            MAILBOX.hook(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": self.claude["session"],
+                    "cwd": str(subdir),
+                    "transcript_path": str(transcript),
+                },
+                harness="claude",
+                base=self.base,
+            )
+        after_slash = MAILBOX.load(MAILBOX.peer_path(self.base, self.claude["session"]))
+        self.assertEqual(after_slash["model"], "Sonnet 5.5")
+        self.assertRegex(after_slash["name"], r"^example-app-[0-9a-f]{2}$")
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "isSidechain": False,
+                        "message": {"role": "assistant", "model": "claude-sonnet-5-5"},
+                    }
+                )
+                + "\n"
+            )
+        with mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]):
+            MAILBOX.hook(
+                {
+                    "hook_event_name": "Stop",
+                    "session_id": self.claude["session"],
+                    "cwd": str(subdir),
+                    "transcript_path": str(transcript),
+                },
+                harness="claude",
+                base=self.base,
+            )
+        after_turn = MAILBOX.load(MAILBOX.peer_path(self.base, self.claude["session"]))
+        self.assertEqual(after_turn["model"], "claude-sonnet-5-5")
+        self.assertRegex(after_turn["name"], r"^example-app-[0-9a-f]{2}$")
         result = mailbox_cli(
             self.base,
             "focus",
@@ -762,6 +825,50 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(result["status"], "timed_out")
         self.assertGreaterEqual(time.monotonic() - started, 0.3)
 
+    def test_wait_reply_timeout_reports_recipient_state_and_interactive_history_works(self):
+        MAILBOX.annotate(self.base, self.codex["session"], state="busy")
+        question = MAILBOX.send(self.base, sender=self.claude, to=self.codex["name"], text="Still working?")
+        timed_out = MAILBOX.wait(self.base, self.claude["session"], timeout=0.02, reply_to=question["id"], poll=0.01)
+        self.assertEqual(timed_out["status"], "timed_out")
+        self.assertEqual(
+            timed_out["recipient"],
+            {
+                "name": self.codex["name"],
+                "session": self.codex["session"],
+                "state": "busy",
+                "messageRead": False,
+            },
+        )
+        server = RUNNER.bundled_module("mailbox_mcp").Server(base=self.base, environ={})
+        server.identify({"name": "claude-code"})
+        mcp_text = server.call(
+            "wait",
+            {"timeoutSeconds": 0.02, "replyTo": question["id"]},
+            {"sessionId": self.claude["session"]},
+        )
+        self.assertIn(f"recipient {self.codex['name']} is busy, message unread", mcp_text)
+        MAILBOX.take(self.base, self.codex["session"])
+        history = json.loads(
+            mailbox_cli(
+                self.base,
+                "history",
+                "--session",
+                self.codex["session"],
+                "--harness",
+                "codex",
+                "--format",
+                "json",
+                cwd=self.repository,
+                check=True,
+            ).stdout
+        )
+        self.assertEqual([m["id"] for m in history["messages"]], [question["id"]])
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        exited = self.peer("exited-peer-1234", "opencode", str(self.repository), pid=child.pid)
+        with self.assertRaisesRegex(MAILBOX.MailboxError, "session ended"):
+            MAILBOX.send(self.base, sender=self.claude, to=exited["name"], text="are you there?")
+
     def test_concurrent_marking_keeps_every_message_intact(self):
         for index in range(20):
             MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text=f"m{index}")
@@ -785,6 +892,7 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(text.count("</peer-message>"), 1)
         self.assertIn('harness="codex"', text)
         self.assertIn("not from the user", text)
+        self.assertIn("relaxed, friendly, natural teammate tone", text)
         self.assertIn("native way of messaging", text)
 
     def test_hooks_register_deliver_and_block_stop_only_with_new_mail(self):
@@ -812,6 +920,67 @@ class MailboxTests(unittest.TestCase):
             self.assertEqual(blocked["decision"], "block")
             self.assertIsNone(MAILBOX.hook({**payload, "hook_event_name": "SessionEnd"}, base=self.base))
         self.assertFalse(MAILBOX.peer_path(self.base, "claude-session-5555").exists())
+
+    def test_antigravity_environment_and_payloads_are_detected(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(MAILBOX.detect_harness(), "unknown")
+            self.assertEqual(MAILBOX.detect_harness({"conversationId": "c"}), "gemini")
+            self.assertEqual(MAILBOX.detect_harness({"transcriptPath": "/u/antigravity-cli/t.jsonl"}), "gemini")
+        for name in ("ANTIGRAVITY_AGENT", "ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_LS_ADDRESS"):
+            with mock.patch.dict(os.environ, {name: "1"}, clear=True):
+                self.assertEqual(MAILBOX.detect_harness(), "gemini")
+        with mock.patch.dict(os.environ, {"ANTIGRAVITY_CONVERSATION_ID": "agy-conv-1"}, clear=True):
+            args = mock.Mock(session=None)
+            self.assertEqual(MAILBOX.session_arg(args), "agy-conv-1")
+
+    def test_antigravity_control_endpoint_is_private_and_not_in_the_peer_record(self):
+        environment = {
+            "ANTIGRAVITY_CONVERSATION_ID": "agy-conv-2",
+            "ANTIGRAVITY_LS_ADDRESS": "localhost:4555",
+            "ANTIGRAVITY_CSRF_TOKEN": "secret-token",
+        }
+        with mock.patch.dict(os.environ, environment):
+            peer = MAILBOX.register(
+                self.base, session="agy-conv-2", harness="gemini", cwd=str(self.repository), pid=os.getpid()
+            )
+            MAILBOX.register(self.base, session="other-session", harness="gemini", cwd=str(self.repository))
+        control = self.base / "wakes" / MAILBOX.session_key("agy-conv-2") / "agy-control.json"
+        self.assertEqual(control.stat().st_mode & 0o777, 0o600)
+        saved = json.loads(control.read_text())
+        self.assertEqual((saved["lsAddress"], saved["csrfToken"]), ("localhost:4555", "secret-token"))
+        self.assertEqual(saved["pid"], os.getpid())
+        self.assertNotIn("secret-token", MAILBOX.peer_path(self.base, "agy-conv-2").read_text())
+        self.assertNotIn("csrfToken", peer)
+        self.assertFalse((self.base / "wakes" / "other-session" / "agy-control.json").exists())
+
+    def test_antigravity_hooks_inject_context_and_continue_only_for_new_mail(self):
+        payload = {
+            "conversationId": "agy-conv-3",
+            "workspacePaths": [str(self.repository)],
+            "transcriptPath": "/u/antigravity/t.jsonl",
+            "modelName": "auto",
+        }
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch.object(MAILBOX, "harness_pid", return_value=os.getpid()),
+        ):
+            start = MAILBOX.hook(payload, event="SessionStart", base=self.base)
+            self.assertIn("codex", start["injectSteps"][0]["ephemeralMessage"])
+            me = MAILBOX.resolve(self.base, "agy-conv-3", sender=self.codex)
+            self.assertEqual((me["harness"], me["state"], me["cwd"]), ("gemini", "idle", str(self.repository)))
+            MAILBOX.send(self.base, sender=self.codex, to=me["name"], text="review my diff?")
+            step = MAILBOX.hook({**payload, "invocationNum": 1}, event="PreInvocation", base=self.base)
+            self.assertIn("review my diff?", step["injectSteps"][0]["ephemeralMessage"])
+            self.assertEqual(MAILBOX.resolve(self.base, me["name"], sender=self.codex)["state"], "busy")
+            self.assertEqual(MAILBOX.hook(payload, event="PreInvocation", base=self.base), {})
+            self.assertEqual(MAILBOX.hook({**payload, "terminationReason": "NO_TOOL_CALL"}, base=self.base), {})
+            MAILBOX.send(self.base, sender=self.codex, to=me["name"], text="also check tests")
+            canceled = MAILBOX.hook({**payload, "terminationReason": "USER_CANCELED"}, event="Stop", base=self.base)
+            self.assertEqual(canceled, {})
+            self.assertEqual(len(MAILBOX.incoming(self.base, "agy-conv-3")), 1)
+            stopped = MAILBOX.hook({**payload, "terminationReason": "NO_TOOL_CALL"}, event="Stop", base=self.base)
+            self.assertEqual(stopped["decision"], "continue")
+            self.assertIn("also check tests", stopped["reason"])
 
     def test_hook_cli_never_fails_the_host_turn(self):
         result = subprocess.run(

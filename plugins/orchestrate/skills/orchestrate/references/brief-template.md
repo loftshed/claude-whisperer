@@ -64,6 +64,7 @@ match the runner path scope exactly, and comply with the report contract.
 ## Brief-writing checks
 
 - Name real paths, symbols, and commands after inspecting the repository.
+- Give the objective a confidence-boosting specialist role framing tailored to the experiment or task (affirming the agent's capability and domain craft while reinforcing that honest, evidence-backed `BLOCKED` reporting is valued over guessing).
 - State what must remain unchanged; execution agents otherwise tend to broaden cleanup.
 - Separate command-level evidence from broader completion claims; a passing focused check does not complete unrelated gates.
 - Keep deterministic acceptance gates in runner `--verify-command` arguments. The executor may use narrower development checks; the runner observes final gate exit codes outside the model.

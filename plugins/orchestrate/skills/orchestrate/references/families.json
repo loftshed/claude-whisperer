@@ -22,7 +22,10 @@
         "fast": "flash-medium",
         "flash-low": "flash-low",
         "flash-high": "flash-high",
-        "pro": "pro-high"
+        "pro": "pro-high|argon-high",
+        "argon": "argon-medium",
+        "argon-low": "argon-low",
+        "argon-high": "argon-high"
       },
       "tier_strengths": {
         "fast": ["speed", "cost efficiency", "routine agent tasks"],
@@ -32,7 +35,10 @@
           "autonomous agents",
           "complex workflows"
         ],
-        "pro": ["broad knowledge", "advanced reasoning", "large-context synthesis"]
+        "pro": ["broad knowledge", "advanced reasoning", "large-context synthesis"],
+        "argon": ["balanced reasoning", "coding", "agentic workflows"],
+        "argon-low": ["fast reasoning", "low latency", "routine tasks"],
+        "argon-high": ["deep reasoning", "complex coding", "multi-step synthesis"]
       }
     },
     "claude": {

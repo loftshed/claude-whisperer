@@ -2431,6 +2431,20 @@ class ClaudeOutputParsingTests(unittest.TestCase):
         report, _session, status, error = RUNNER.parse_claude_output(text)
         self.assertEqual((report, status), ("", "error"))
         self.assertIn("API Error: 500", error)
+        # Error subtypes (e.g. error_max_turns) with is_error=False still parse as error.
+        max_turns = json.dumps([self.result_event("", is_error=False, subtype="error_max_turns")])
+        self.assertEqual(RUNNER.parse_claude_output(max_turns), ("", "s-1", "error", "error_max_turns"))
+
+    def test_truncated_agy_stream_and_recovered_codex_error(self) -> None:
+        truncated_agy = json.dumps({"event": "init", "init": {"conversation_id": "conv-99", "model": "gemini"}})
+        self.assertEqual(RUNNER.parse_agy_output(truncated_agy), ("", "conv-99", "unknown"))
+        recovered_codex = "\n".join(
+            [
+                json.dumps({"type": "error", "message": "Reconnecting... 1/5 (stream reading error)"}),
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}),
+            ]
+        )
+        self.assertIsNone(RUNNER.codex_terminal_error(recovered_codex))
 
 
 class ProviderQuotaDetectionTests(unittest.TestCase):
@@ -3353,6 +3367,23 @@ class ProcessAndResumeRegressionTests(unittest.TestCase):
             self.assertNotIn(key, env)
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(Path("~/.claude-personal").expanduser()))
         self.assertEqual(env["CLAUDE_CODE_SESSION_ID"], "ses-1234")
+        # Without --claude-config-dir, auth/provider overrides are preserved while session markers are scrubbed.
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CLAUDE_CODE_OAUTH_TOKEN": "oauth-default",
+                "CLAUDE_CODE_USE_BEDROCK": "1",
+                "CLAUDE_CODE_USE_VERTEX": "1",
+                "CLAUDE_CODE_SESSION_ID": "host-session",
+                "CLAUDE_CODE_ENTRYPOINT": "cli",
+            },
+        ):
+            default_env = RUNNER.executor_environment("claude")
+        self.assertEqual(default_env.get("CLAUDE_CODE_OAUTH_TOKEN"), "oauth-default")
+        self.assertEqual(default_env.get("CLAUDE_CODE_USE_BEDROCK"), "1")
+        self.assertEqual(default_env.get("CLAUDE_CODE_USE_VERTEX"), "1")
+        self.assertNotIn("CLAUDE_CODE_SESSION_ID", default_env)
+        self.assertNotIn("CLAUDE_CODE_ENTRYPOINT", default_env)
 
     def test_classify_model_availability_failure_gates_catalog_refresh(self) -> None:
         self.assertIsNotNone(RUNNER.classify_model_availability_failure("Error: model not found: gpt-99", None))

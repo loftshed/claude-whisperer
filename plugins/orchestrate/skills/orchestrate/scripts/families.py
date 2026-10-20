@@ -75,17 +75,20 @@ def resolve(family_name: str, tier: str | None, families: dict[str, dict[str, An
     if tier not in family["tiers"]:
         raise SelectorError(f"{family_name} has no tier {tier!r}; tiers: {', '.join(family['tiers'])}")
     value = family["tiers"][tier]
-    if value in available:
-        return value
+    candidates = [item.strip() for item in value.split("|")] if isinstance(value, str) else list(value)
+    for candidate in candidates:
+        if candidate in available:
+            return candidate
     prefix = family.get("prefix")
     if not prefix:
         # Without a prefix a keyword would match across vendors, so tier values must be exact IDs.
-        raise SelectorError(f"{value} ({family_name}:{tier}) is not in the live {family['engine']} catalog")
-    keyword = f"-{'-'.join(words(value))}-"
-    matches = [i for i in available if i.startswith(prefix) and keyword in f"-{'-'.join(words(i[len(prefix) :]))}-"]
-    if not matches:
-        raise SelectorError(f"no {family_name}:{tier} model in the live {family['engine']} catalog")
-    return max(matches, key=version_of)
+        raise SelectorError(f"{candidates[0]} ({family_name}:{tier}) is not in the live {family['engine']} catalog")
+    for candidate in candidates:
+        keyword = f"-{'-'.join(words(candidate))}-"
+        matches = [i for i in available if i.startswith(prefix) and keyword in f"-{'-'.join(words(i[len(prefix) :]))}-"]
+        if matches:
+            return max(matches, key=version_of)
+    raise SelectorError(f"no {family_name}:{tier} model in the live {family['engine']} catalog")
 
 
 def resolve_selector(selector: str, families: dict[str, dict[str, Any]], available: list[str]) -> str:

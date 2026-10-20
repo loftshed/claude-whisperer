@@ -57,6 +57,7 @@ class MailboxFeedbackTests(unittest.TestCase):
         self.assertEqual(first["status"], "recorded")
         self.assertEqual(second, {"id": first["id"], "status": "already_recorded", "occurrences": 1})
         self.assertEqual(len(self.reports()), 1)
+        self.assertEqual(list(self.collector.glob("*.lock")), [])
         report = self.reports()[0]
         self.assertEqual(report["kind"], "agent-report")
         self.assertEqual(report["needed"], "A bounded wait for the matching reply")
@@ -393,3 +394,23 @@ class MailboxFeedbackTests(unittest.TestCase):
             with self.assertRaisesRegex(FEEDBACK.FeedbackError, "disabled"):
                 self.submit()
         self.assertEqual(self.reports(), [])
+
+    def test_disposable_stores_do_not_leak_diagnostics_into_default_user_collector(self):
+        xdg_config = self.directory / "xdg-config"
+        config_file = xdg_config / "agent-executor" / "config.json"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text(json.dumps({"mailbox_feedback": {"directory": str(self.collector)}}))
+        xdg_cache = self.directory / "xdg-cache"
+        default_base = xdg_cache / "agent-executor" / "mailbox-v1"
+        with mock.patch.dict(
+            os.environ,
+            {"XDG_CONFIG_HOME": str(xdg_config), "XDG_CACHE_HOME": str(xdg_cache)},
+        ):
+            os.environ.pop("AGENT_EXECUTOR_FEEDBACK_DIR", None)
+            os.environ.pop("AGENT_EXECUTOR_CONFIG", None)
+            os.environ.pop("AGENT_EXECUTOR_HOME", None)
+            self.assertEqual(FEEDBACK.directory(self.base), self.base.parent / "mailbox-feedback-v1")
+            self.assertEqual(FEEDBACK.directory(default_base), self.collector)
+            MAILBOX.wait(self.base, self.peer["session"], timeout=0.01, reply_to="abc-123456")
+            self.assertEqual(self.reports(), [])
+            self.assertEqual(len(list((self.base.parent / "mailbox-feedback-v1").glob("feedback-*.json"))), 1)
