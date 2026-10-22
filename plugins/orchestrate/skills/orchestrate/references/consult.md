@@ -159,6 +159,8 @@ scope, or verify evidence.
 | 15   | —                          | Quota pool exhausted at launch                                  |
 | 16   | `provider_quota_exhausted` | The provider said quota, credits or rate limit; retry elsewhere |
 | 17   | —                          | Hosted model sent to OpenCode; use its native engine            |
+| 18   | —                          | Pool on credits; `--allow-credits` only with the user's say-so  |
+| 19   | `stopped_credits`          | The Codex account started spending credits mid-answer           |
 | 27   | —                          | An implementation run holds the `--read` repository             |
 
 ## Follow-up questions

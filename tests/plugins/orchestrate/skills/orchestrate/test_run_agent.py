@@ -2828,6 +2828,26 @@ class SteerTests(unittest.TestCase):
             self.steer(reference, message, *extra)
         return caught.exception
 
+    def test_a_codex_run_stops_when_its_account_starts_spending_credits(self) -> None:
+        codex_home = self.external_path / "codex-home"
+        job = self.launch(extra_env={"CODEX_HOME": str(codex_home)})
+        log = codex_home / "sessions" / "2026" / "10" / "22" / "rollout-2026-10-22T00-00-00-codex-thread-1.jsonl"
+        log.parent.mkdir(parents=True)
+
+        def line(balance: str) -> str:
+            stamp = RUNNER.utc_now().replace("+00:00", "Z")
+            limits = {"primary": {"used_percent": 30.0}, "credits": {"has_credits": True, "balance": balance}}
+            return json.dumps({"timestamp": stamp, "payload": {"type": "token_count", "rate_limits": limits}}) + "\n"
+
+        log.write_text(line("250.0") + line("249.5"), encoding="utf-8")
+        self.assertTrue(self.wait_until(job["result_path"].exists, timeout=40))
+        result = json.loads(job["result_path"].read_text())
+        self.assertEqual(result["status"], "stopped_credits")
+        self.assertEqual(result["exit_code"], RUNNER.EXIT_STOPPED_CREDITS)
+        self.assertEqual(result["credits_stop"]["reason"], "account_balance_falling")
+        self.assertEqual(result["verification"]["status"], "skipped")
+        self.assertEqual(len(result["executor_attempts"]), 1)
+
     def wait_event(self, event_reference: str) -> dict:
         with mock.patch.dict(os.environ, self.environment()):
             path = RUNNER.completion_event_path_from_reference(event_reference)

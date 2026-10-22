@@ -5,6 +5,7 @@ import datetime as dt
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -132,7 +133,7 @@ class CheckTests(unittest.TestCase):
         self.assertIn("--engine agy (claude-* / gpt-oss-*): Antigravity · Claude & GPT, 27% usable now", message)
         self.assertNotIn("--engine codex", message)
 
-    def test_a_pool_on_credits_is_usable_and_named_as_an_alternative(self) -> None:
+    def test_a_pool_on_credits_is_not_available_and_is_named_as_needing_permission(self) -> None:
         current = view()
         current["lanes"][4] = CODEX_ON_CREDITS
         result = QUOTA.check("codex", "gpt-5.6-luna", current)
@@ -149,10 +150,15 @@ class CheckTests(unittest.TestCase):
         )
         gemini = QUOTA.check("agy", "gemini-3.8-flash-medium", current)
         message = QUOTA.blocked_message("agy", "gemini-3.8-flash-medium", gemini, current)
-        self.assertIn("--engine codex (gpt-*): Codex · ChatGPT, on credits, 62,168.59 cr left", message)
+        self.assertIn(
+            "On credits, only with the user's permission (--allow-credits): "
+            "--engine codex: Codex · ChatGPT, on credits, 62,168.59 cr left",
+            message,
+        )
+        self.assertNotIn("--engine codex (gpt-*)", message)
         registry = {"profiles": [{"id": "luna", "model_ids": ["gpt-5.6-luna"], "roles": ["implementation"]}]}
         [record] = QUOTA.access_records(current, registry)
-        self.assertEqual((record["available"], record["billing_mode"]), (True, "credits"))
+        self.assertEqual((record["available"], record["billing_mode"]), (False, "credits"))
         self.assertEqual(record["quota"]["status"], "credits")
 
     def test_an_account_monitor_could_not_read_is_unknown_not_low(self) -> None:
@@ -235,20 +241,11 @@ class RecommendTests(unittest.TestCase):
         )
         return [(candidate["model"], candidate["access_source"]) for candidate in result["candidates"]]
 
-    def test_a_pool_on_credits_ranks_after_free_room_and_before_nearly_empty_pools(self) -> None:
+    def test_a_pool_on_credits_is_never_recommended(self) -> None:
         current = view()
         current["lanes"][4] = CODEX_ON_CREDITS
-        # Gemini has 6% usable (low): Codex on credits can finish a task, so it comes first.
-        self.assertEqual(
-            self.recommend(current),
-            [("gpt-5.6-luna", "monitor:codex"), ("gemini-3.8-flash-medium", "monitor:antigravity")],
-        )
-        current["lanes"][3] = lane("antigravity", "gemini", "Antigravity · Gemini", usable=60, surplus=2)
-        # Free quota with room goes first: it is lost at the rollover, credits are not.
-        self.assertEqual(
-            self.recommend(current),
-            [("gemini-3.8-flash-medium", "monitor:antigravity"), ("gpt-5.6-luna", "monitor:codex")],
-        )
+        # Even a nearly empty free pool comes before billing credits the user has not allowed.
+        self.assertEqual(self.recommend(current), [("gemini-3.8-flash-medium", "monitor:antigravity")])
 
     def test_live_access_drops_blocked_pools_and_personal_quota_by_default(self) -> None:
         # Codex has room; Gemini is low (6% usable), so it ranks after despite more unused capacity.
@@ -333,14 +330,22 @@ class RunnerGateTests(unittest.TestCase):
                 RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=True)
                 RUNNER.quota_gate("agy", "claude-opus-4-6-thinking", ignore=False)
 
-    def test_gate_lets_a_pool_on_credits_through_and_says_so(self) -> None:
+    def test_gate_refuses_a_pool_on_credits_unless_credits_are_allowed(self) -> None:
         current = view()
         current["lanes"][4] = CODEX_ON_CREDITS
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.dict(os.environ, {"MONITOR_BIN": self.fake_monitor(directory, current)}):
+                with self.assertRaises(RUNNER.RunnerError) as caught:
+                    RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=False)
+                self.assertEqual(caught.exception.exit_code, RUNNER.EXIT_POOL_ON_CREDITS)
+                self.assertIn("--allow-credits only when the user allows spending credits", str(caught.exception))
+                # Launching into an exhausted pool on the user's say-so is not permission to bill credits.
+                with self.assertRaises(RUNNER.RunnerError):
+                    RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=True)
+                RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=True, allow_credits=True)
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
-                    RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=False)
+                    RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=False, allow_credits=True)
                 self.assertEqual(
                     out.getvalue().strip(),
                     'AGENT_LIFECYCLE=quota_credits pool="Codex \\u00b7 ChatGPT" balance="62,168.59 cr" '
@@ -357,6 +362,136 @@ class RunnerGateTests(unittest.TestCase):
     def test_gate_lets_runs_through_when_quota_is_unknown(self) -> None:
         with mock.patch.dict(os.environ, {"MONITOR_BIN": "/nonexistent/monitor"}):
             RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=False)
+
+
+def rate_limits(*, used=40.0, weekly=None, balance="100.0", has_credits=True, reached=None, spend=None):
+    return {
+        "primary": {"used_percent": used, "window_minutes": 300},
+        "secondary": {"used_percent": weekly, "window_minutes": 10080} if weekly is not None else None,
+        "credits": {"has_credits": has_credits, "unlimited": False, "balance": balance},
+        "spend_control_reached": spend,
+        "rate_limit_reached_type": reached,
+    }
+
+
+def rollout_line(limits: dict, at: dt.datetime | None = None) -> str:
+    stamp = (at or dt.datetime.now(dt.UTC)).isoformat().replace("+00:00", "Z")
+    payload = {"type": "token_count", "info": {}, "rate_limits": limits}
+    return json.dumps({"timestamp": stamp, "type": "event_msg", "payload": payload}) + "\n"
+
+
+class CreditSpendTests(unittest.TestCase):
+    def test_holding_a_balance_with_allowance_left_is_not_spending(self) -> None:
+        self.assertIsNone(QUOTA.credit_spend(None, rate_limits()))
+        self.assertIsNone(QUOTA.credit_spend(rate_limits(), rate_limits(used=80.0)))
+
+    def test_spending_signals(self) -> None:
+        self.assertEqual(
+            QUOTA.credit_spend(rate_limits(balance="100.5"), rate_limits(balance="99.25")), "account_balance_falling"
+        )
+        self.assertEqual(QUOTA.credit_spend(None, rate_limits(used=100.0)), "allowance_used_up_on_credits")
+        # The weekly window used up spends credits even with the five-hour window healthy.
+        self.assertEqual(QUOTA.credit_spend(None, rate_limits(used=10.0, weekly=100.0)), "allowance_used_up_on_credits")
+        self.assertEqual(QUOTA.credit_spend(None, rate_limits(reached="primary")), "allowance_used_up_on_credits")
+        self.assertEqual(QUOTA.credit_spend(None, rate_limits(spend=True)), "spend_control_reached")
+
+    def test_used_up_without_a_balance_is_blocked_not_a_credits_stop(self) -> None:
+        self.assertIsNone(QUOTA.credit_spend(None, rate_limits(used=100.0, has_credits=False, balance="0")))
+
+    def test_snapshots_are_read_from_rollout_lines_and_history_is_skipped(self) -> None:
+        start = dt.datetime.now(dt.UTC)
+        old = rollout_line(rate_limits(balance="500"), start - dt.timedelta(minutes=5))
+        new = rollout_line(rate_limits(balance="400"), start + dt.timedelta(seconds=1))
+        text = old + "not json\n" + json.dumps({"type": "turn_context"}) + "\n" + new
+        self.assertEqual([s["credits"]["balance"] for s in QUOTA.rate_limit_snapshots(text)], ["500", "400"])
+        self.assertEqual([s["credits"]["balance"] for s in QUOTA.rate_limit_snapshots(text, since=start)], ["400"])
+
+    def test_stale_room_is_unknown_but_stale_exhaustion_is_kept(self) -> None:
+        self.assertEqual(QUOTA.assess({"status": "ok", "availableNowPct": 80, "stale": True}), "unknown")
+        self.assertEqual(QUOTA.assess({"status": "credits", "stale": True}), "credits")
+        self.assertEqual(QUOTA.assess({"status": "blocked", "stale": True}), "blocked")
+
+
+class CodexCreditsWatchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.home = tempfile.TemporaryDirectory()
+        self.log = (
+            Path(self.home.name) / "sessions" / "2026" / "10" / "22" / "rollout-2026-10-22T00-00-00-thread-9.jsonl"
+        )
+        self.log.parent.mkdir(parents=True)
+        self.process = subprocess.Popen(["sleep", "30"], start_new_session=True)
+
+    def tearDown(self) -> None:
+        if self.process.poll() is None:
+            self.process.kill()
+        self.process.wait()
+        self.home.cleanup()
+
+    def watch(self) -> object:
+        return RUNNER.CodexCreditsWatch({"CODEX_HOME": self.home.name}, lambda: "thread-9", check_seconds=0)
+
+    def test_a_run_with_allowance_left_is_not_stopped(self) -> None:
+        watch = self.watch()
+        self.log.write_text(rollout_line(rate_limits()) + rollout_line(rate_limits(used=60.0)), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(watch.poll(self.process))
+        self.assertIsNone(watch.stopped)
+        self.assertIsNone(self.process.poll())
+
+    def test_a_run_whose_session_log_never_appears_says_the_watch_is_unavailable(self) -> None:
+        watch = RUNNER.CodexCreditsWatch(
+            {"CODEX_HOME": self.home.name}, lambda: "missing-thread", check_seconds=0, grace_seconds=0
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertFalse(watch.poll(self.process))
+        self.assertIn("no session log under", watch.unavailable)
+        self.assertIn("AGENT_LIFECYCLE=credits_watch_unavailable", out.getvalue())
+
+    def test_the_watch_reads_the_codex_rollout_record_shape(self) -> None:
+        # Mirrors a token_count line written by codex-cli 0.163.0 (numbers made up), at the path Codex uses:
+        # CODEX_HOME/sessions/YYYY/MM/DD/rollout-<local time>-<thread id>.jsonl, the thread id from thread.started.
+        watch = self.watch()
+        line = {
+            "timestamp": RUNNER.utc_now().replace("+00:00", "Z"),
+            "ordinal": 18,
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {"total_token_usage": {"input_tokens": 1}},
+                "rate_limits": {
+                    "limit_id": "codex",
+                    "limit_name": None,
+                    "primary": {"used_percent": 100.0, "window_minutes": 10080, "resets_at": 1793102877},
+                    "secondary": None,
+                    "credits": {"has_credits": True, "unlimited": False, "balance": "1000.0000000000"},
+                    "individual_limit": None,
+                    "spend_control_reached": None,
+                    "plan_type": "pro",
+                    "rate_limit_reached_type": None,
+                },
+            },
+        }
+        self.log.write_text(json.dumps(line) + "\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(watch.poll(self.process))
+
+    def test_a_falling_balance_stops_the_run(self) -> None:
+        watch = self.watch()
+        history = rollout_line(rate_limits(balance="900"), dt.datetime.now(dt.UTC) - dt.timedelta(minutes=10))
+        self.log.write_text(history + rollout_line(rate_limits(balance="100")), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            # The older line predates the run, so its higher balance is not a fall.
+            self.assertFalse(watch.poll(self.process))
+            with self.log.open("a", encoding="utf-8") as handle:
+                handle.write(rollout_line(rate_limits(balance="99")))
+                handle.write('{"timestamp": "partial')
+            self.assertTrue(watch.poll(self.process))
+        self.assertEqual(watch.stopped["reason"], "account_balance_falling")
+        self.assertEqual(watch.stopped["scope"], "account")
+        self.assertIsNotNone(self.process.poll())
+        self.assertIn("AGENT_LIFECYCLE=credits_stop", out.getvalue())
 
 
 class DispatchableRecommendTests(unittest.TestCase):

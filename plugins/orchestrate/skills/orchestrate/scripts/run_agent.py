@@ -76,6 +76,12 @@ PROVIDER_QUOTA_PATTERNS = re.compile(
 CLAUDE_QUOTA_ERROR_KINDS = frozenset({"rate_limit", "billing_error"})
 EXIT_PROVIDER_QUOTA = 16
 EXIT_ROUTE_NOT_ALLOWED = 17
+# Codex credits are billed to the user's balance: refused at launch and stopped mid-run unless allowed.
+EXIT_POOL_ON_CREDITS = 18
+EXIT_STOPPED_CREDITS = 19
+CREDITS_CHECK_SECONDS = 5.0
+# Without a session log after this long, the credits watch says it cannot protect the run.
+CREDITS_WATCH_GRACE_SECONDS = 120.0
 
 DEFAULT_OPENCODE_VARIANT = "high"
 OPENCODE_RUNTIME_CONFIG = {
@@ -182,6 +188,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--ignore-quota",
         action="store_true",
         help="Launch even when monitor reports the route's subscription quota as exhausted",
+    )
+    parser.add_argument(
+        "--allow-credits",
+        action="store_true",
+        help="Let a Codex run bill the account's credit balance once its included quota is used up. "
+        "Only when the user allows spending credits",
     )
     parser.add_argument(
         "--variant",
@@ -1819,6 +1831,78 @@ def interrupt_process(
     process.wait()
 
 
+class CodexCreditsWatch:
+    """Stop a Codex run once its account starts spending credits, which the user has not allowed.
+
+    Codex writes every rate-limit update into its session log (CODEX_HOME/sessions/.../rollout-*-<id>.jsonl).
+    The watch follows that log from the moment the run started; quota.credit_spend decides what counts as
+    spending. A stop interrupts the executor like a user's Ctrl-C and ends the run as stopped_credits.
+    """
+
+    def __init__(
+        self,
+        environment: dict[str, str],
+        session_of: Any,
+        *,
+        check_seconds: float = CREDITS_CHECK_SECONDS,
+        grace_seconds: float = CREDITS_WATCH_GRACE_SECONDS,
+    ):
+        self.sessions = Path(environment.get("CODEX_HOME") or Path.home() / ".codex").expanduser() / "sessions"
+        self.session_of = session_of
+        self.check_seconds = check_seconds
+        self.give_up_at = time.monotonic() + grace_seconds
+        self.unavailable: str | None = None
+        self.since = dt.datetime.now(dt.UTC)
+        self.path: Path | None = None
+        self.offset = 0
+        self.previous: dict[str, Any] | None = None
+        self.next_check = 0.0
+        self.stopped: dict[str, Any] | None = None
+
+    def poll(self, process: subprocess.Popen[bytes]) -> bool:
+        """True when the run was stopped for spending credits."""
+        if self.stopped is not None or time.monotonic() < self.next_check:
+            return False
+        self.next_check = time.monotonic() + self.check_seconds
+        if self.path is None:
+            session = self.session_of()
+            found = sorted(self.sessions.glob(f"*/*/*/rollout-*-{session}.jsonl")) if session else []
+            if not found:
+                if self.unavailable is None and time.monotonic() >= self.give_up_at:
+                    # Fail visibly: the run goes on, but nothing stops it from spending credits.
+                    self.unavailable = "no session id" if not session else "no session log under " + str(self.sessions)
+                    emit_lifecycle("credits_watch_unavailable", reason=self.unavailable)
+                return False
+            self.path = found[-1]
+            self.unavailable = None
+        try:
+            with self.path.open("rb") as handle:
+                handle.seek(self.offset)
+                chunk = handle.read()
+        except OSError:
+            return False
+        whole = chunk[: chunk.rfind(b"\n") + 1]  # a line still being written is read next time
+        self.offset += len(whole)
+        quota = bundled_module("quota")
+        for snapshot in quota.rate_limit_snapshots(whole.decode("utf-8", errors="replace"), since=self.since):
+            reason = quota.credit_spend(self.previous, snapshot)
+            self.previous = snapshot
+            if reason is None:
+                continue
+            credits = snapshot.get("credits") if isinstance(snapshot.get("credits"), dict) else {}
+            self.stopped = {
+                "reason": reason,
+                "scope": "account",
+                "balance": credits.get("balance"),
+                "detected_at": utc_now(),
+                "session_log": str(self.path),
+            }
+            emit_lifecycle("credits_stop", reason=reason, balance=credits.get("balance"))
+            interrupt_process(process)
+            return True
+        return False
+
+
 def wait_with_heartbeats(
     process: subprocess.Popen[bytes],
     *,
@@ -2533,6 +2617,8 @@ def detached_runner_command(
         command.append("--refresh-models")
     if args.ignore_quota:
         command.append("--ignore-quota")
+    if args.allow_credits:
+        command.append("--allow-credits")
     if args.claude_config_dir:
         command.extend(["--claude-config-dir", str(args.claude_config_dir.expanduser())])
     for extra in args.add_dir:
@@ -2586,7 +2672,13 @@ def launch_detached(args: argparse.Namespace) -> int:
         support.bind_effort(args.engine, model, effort, catalog)
     except support.ContractError as error:
         raise RunnerError(str(error), 4) from error
-    quota_gate(args.engine, model, ignore=args.ignore_quota, claude_config_dir=args.claude_config_dir)
+    quota_gate(
+        args.engine,
+        model,
+        ignore=args.ignore_quota,
+        claude_config_dir=args.claude_config_dir,
+        allow_credits=args.allow_credits,
+    )
     try:
         with support.workspace_lease(repo, default_agent_cache_dir(), read_only=not enforced_paths):
             pass
@@ -3454,18 +3546,31 @@ def doctor_main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def quota_gate(engine: str, model: str, *, ignore: bool, claude_config_dir: Path | str | None = None) -> None:
+def quota_gate(
+    engine: str,
+    model: str,
+    *,
+    ignore: bool,
+    claude_config_dir: Path | str | None = None,
+    allow_credits: bool = False,
+) -> None:
     """Refuse to launch into an exhausted subscription pool and warn when little is usable now.
 
     Quota is read live from monitor and never stored. Missing monitor means unknown quota, which
-    does not block a run. A pool whose included allowance is used up but that has a credit balance
-    (Codex) is not exhausted: the run goes ahead, metered against the balance, and says so.
+    does not block a run (the in-run credits watch still applies). A pool whose included allowance is
+    used up but that has a credit balance (Codex) would bill that balance: refused unless the user
+    allows credits, and then the run goes ahead and says so.
     """
-    if ignore:
+    if ignore and allow_credits:
         return
     quota = bundled_module("quota")
     view = quota.snapshot()
     result = quota.check(engine, model, view, claude_config_dir=claude_config_dir)
+    # --ignore-quota launches into an exhausted pool; it never implies permission to bill credits.
+    if result["status"] == "credits" and not allow_credits:
+        raise RunnerError(quota.credits_message(engine, model, result), EXIT_POOL_ON_CREDITS)
+    if ignore:
+        return
     if result["status"] == "blocked":
         raise RunnerError(quota.blocked_message(engine, model, result, view), quota.EXIT_QUOTA_EXHAUSTED)
     if result["status"] == "credits":
@@ -3971,6 +4076,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
             model,
             ignore=args.ignore_quota or args.dry_run,
             claude_config_dir=args.claude_config_dir,
+            allow_credits=args.allow_credits or args.dry_run,
         )
         support = bundled_module("execution_support")
         try:
@@ -4187,6 +4293,17 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
             log_path=log_path,
             session_hint=segment_session,
         )
+    credits_watch = (
+        CodexCreditsWatch(environment, lambda: executor_session_so_far("codex", stdout_path, log_path) or args.session)
+        if args.engine == "codex" and not args.allow_credits
+        else None
+    )
+
+    def poll_executor(process: subprocess.Popen[bytes]) -> bool:
+        if credits_watch is not None and credits_watch.poll(process):
+            return True
+        return steering.poll(process) if steering is not None else False
+
     while True:
         attempt_number += 1
         attempt_start = time.monotonic()
@@ -4236,7 +4353,9 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
                         else timeout_seconds + 60,
                         heartbeat_seconds=args.heartbeat_seconds,
                         monotonic_start=monotonic_start,
-                        poll=functools.partial(steering.poll, process) if steering is not None else None,
+                        poll=functools.partial(poll_executor, process)
+                        if steering is not None or credits_watch is not None
+                        else None,
                     )
         finally:
             if stdin_handle is not subprocess.DEVNULL:
@@ -4305,8 +4424,10 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
             and transient_provider_failure(stderr_text, terminal_error)
         )
         steered = steering is not None and steering.pending is not None
+        credits_stopped = credits_watch is not None and credits_watch.stopped is not None
         retry_eligible = (
             not steered
+            and not credits_stopped
             and args.retry_read_only > len(executor_attempts) - segment_attempts_start
             and transient_failure
             and not attempt_workspace_changed
@@ -4589,6 +4710,14 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         report_contract_valid=report_contract_valid,
     )
 
+    if (
+        credits_watch is not None
+        and credits_watch.stopped is not None
+        and preliminary_status not in {"history_violation", "scope_violation"}
+    ):
+        # The partial work stays audited and preserved but is never verified or accepted as complete.
+        preliminary_status, preliminary_exit_code = "stopped_credits", EXIT_STOPPED_CREDITS
+
     if preliminary_status == "completed":
         emit_lifecycle(
             "verification_started",
@@ -4691,6 +4820,12 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         "reported_outcome": reported_outcome,
         "provider_terminal_status": agy_status,
         "provider_error": provider_error,
+        "credits_stop": credits_watch.stopped if credits_watch is not None else None,
+        "credits_watch": (
+            {"status": "unavailable", "reason": credits_watch.unavailable}
+            if credits_watch is not None and credits_watch.unavailable
+            else {"status": "watching" if credits_watch is not None else "off"}
+        ),
         "exit_code": exit_code,
         "executor_exit_code": process.returncode,
         "executor_attempts": executor_attempts,

@@ -200,13 +200,13 @@ It reads live [monitor](https://github.com/loftshed/orkest/tree/main/plugins/mon
 The route table decides which models fit the task; quota only chooses among fitting routes and never
 justifies a weaker model. Prefer pools marked expiring (capacity lost at the weekly rollover), then the
 most unused capacity. The runner refuses a blocked pool (exit 15; `--ignore-quota` only on the user's
-say-so). A pool on `credits` (Codex once its weekly allowance is used up, with a credit balance) is not
-blocked: the run goes ahead, metered against the balance, and prints `AGENT_LIFECYCLE=quota_credits`
-with the balance. When the user asked for that route, launch it and note the credits in one line of
-the report ("on credits, 62,168 cr left"), nothing more; only choose it yourself when no fitting route
-has free quota, since it ranks after pools with free quota. Never switch billing context (work vs
-personal account) on quota grounds without the user. Without monitor, quota is unknown and runs
-proceed.
+say-so). A pool on `credits` (Codex once an included allowance is used up, with a credit balance) would
+bill that balance, so it is refused too (exit 18) and never recommended. Pass `--allow-credits` (runner,
+`consult` or coordinator `dispatch`) only when the user allows spending credits. A Codex run without it
+stops as soon as its account starts spending credits mid-run: `stopped_credits` (exit 19), with the
+partial work audited and preserved but never verified; report it and ask the user. Never switch billing
+context (work vs personal account) on quota grounds without the user. Without monitor, quota is unknown
+and runs proceed; the in-run credits stop still applies.
 The `opencode` row is the OpenRouter account's remaining dollar credit (key from `OPENROUTER_API_KEY` or
 OpenCode's `auth.json`; the sandbox needs `openrouter.ai` allowed). It is informational: the launch gate
 never blocks OpenCode.
@@ -429,6 +429,8 @@ Install and identity: [references/mailbox.md](references/mailbox.md).
 | 15                | —                                               | Quota pool exhausted at launch and no credit balance; pick another fitting route or wait for refill                                                           |
 | 16                | `provider_quota_exhausted`                      | The provider's own error says quota, credits or rate limit (e.g. 429); retry later or elsewhere                                                               |
 | 17                | —                                               | Hosted model sent to OpenCode; use the native engine named in the error                                                                                       |
+| 18                | —                                               | Pool on credits at launch; pick another fitting route, or `--allow-credits` only with the user's permission                                                   |
+| 19                | `stopped_credits`                               | The Codex account started spending credits mid-run; partial work kept, never verified; report it to the user                                                  |
 | 20                | `no_changes`                                    | `--expect-changes` but nothing changed                                                                                                                        |
 | 21                | `history_violation`                             | This worktree's branch/HEAD/reflog changed                                                                                                                    |
 | 22                | `scope_violation`                               | Changes outside the allowed paths                                                                                                                             |
