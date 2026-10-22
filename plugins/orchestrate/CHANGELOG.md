@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.28.0
+
+- feat(orchestrate): one accountable team lead with fenced, verified succession (#17)
+
+## 0.27.0
+
+- feat(orchestrate)!: stop Codex runs from spending credits unless allowed (#16)
+
+## 0.26.0
+
+- feat(orchestrate): name peers person-repo-model-effort (#15)
+
+## 0.25.0
+
+- feat(orchestrate): route mailbox by account, hand native work to the host, add ork rooms (#14)
+
 ## 0.24.2
 
 - fix(orchestrate): harden cross-harness wakes, mailbox ergonomics, and model routing (#12)
