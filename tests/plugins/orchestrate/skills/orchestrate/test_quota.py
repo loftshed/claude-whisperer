@@ -339,6 +339,10 @@ class RunnerGateTests(unittest.TestCase):
                     RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=False)
                 self.assertEqual(caught.exception.exit_code, RUNNER.EXIT_POOL_ON_CREDITS)
                 self.assertIn("--allow-credits only when the user allows spending credits", str(caught.exception))
+                # Launching into an exhausted pool on the user's say-so is not permission to bill credits.
+                with self.assertRaises(RUNNER.RunnerError):
+                    RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=True)
+                RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=True, allow_credits=True)
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
                     RUNNER.quota_gate("codex", "gpt-5.6-luna", ignore=False, allow_credits=True)
@@ -433,6 +437,44 @@ class CodexCreditsWatchTests(unittest.TestCase):
             self.assertFalse(watch.poll(self.process))
         self.assertIsNone(watch.stopped)
         self.assertIsNone(self.process.poll())
+
+    def test_a_run_whose_session_log_never_appears_says_the_watch_is_unavailable(self) -> None:
+        watch = RUNNER.CodexCreditsWatch(
+            {"CODEX_HOME": self.home.name}, lambda: "missing-thread", check_seconds=0, grace_seconds=0
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertFalse(watch.poll(self.process))
+        self.assertIn("no session log under", watch.unavailable)
+        self.assertIn("AGENT_LIFECYCLE=credits_watch_unavailable", out.getvalue())
+
+    def test_the_watch_reads_the_codex_rollout_record_shape(self) -> None:
+        # Mirrors a token_count line written by codex-cli 0.163.0 (numbers made up), at the path Codex uses:
+        # CODEX_HOME/sessions/YYYY/MM/DD/rollout-<local time>-<thread id>.jsonl, the thread id from thread.started.
+        watch = self.watch()
+        line = {
+            "timestamp": RUNNER.utc_now().replace("+00:00", "Z"),
+            "ordinal": 18,
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {"total_token_usage": {"input_tokens": 1}},
+                "rate_limits": {
+                    "limit_id": "codex",
+                    "limit_name": None,
+                    "primary": {"used_percent": 100.0, "window_minutes": 10080, "resets_at": 1793102877},
+                    "secondary": None,
+                    "credits": {"has_credits": True, "unlimited": False, "balance": "1000.0000000000"},
+                    "individual_limit": None,
+                    "spend_control_reached": None,
+                    "plan_type": "pro",
+                    "rate_limit_reached_type": None,
+                },
+            },
+        }
+        self.log.write_text(json.dumps(line) + "\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(watch.poll(self.process))
 
     def test_a_falling_balance_stops_the_run(self) -> None:
         watch = self.watch()
