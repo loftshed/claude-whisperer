@@ -758,6 +758,38 @@ class MailboxTests(unittest.TestCase):
         successor = MAILBOX.load(MAILBOX.peer_path(self.base, "claude-session-after-clear"))
         self.assertEqual(successor["clearedFrom"], self.claude["session"])
 
+    def test_requests_from_senders_that_ended_are_not_carried(self):
+        MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text="Read, sender gone")
+        MAILBOX.take(self.base, self.claude["session"])
+        MAILBOX.unregister(self.base, self.codex["session"])
+        self.lifecycle(self.claude["session"], "SessionEnd", reason="clear")
+        context = self.lifecycle("claude-session-after-clear", "SessionStart", source="clear")
+        text = context["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("Read, sender gone", text)
+        self.assertIn("1 request(s) you had read came from sessions that have since ended", text)
+
+    def test_a_cleared_lead_never_redirects_a_handover_it_already_offered(self):
+        authority = MAILBOX_AUTHORITY()
+        with mock.patch.dict(os.environ, {"AGENT_EXECUTOR_HOME": str(self.base.parent / "executor")}):
+            authority.appoint("team", authority.member(self.claude["session"], "claude"))
+            authority.offer("team", self.claude["session"], 1, authority.member("deputy-session", "codex"))
+            self.lifecycle(self.claude["session"], "SessionEnd", reason="clear")
+            output = self.lifecycle("claude-session-after-clear", "SessionStart", source="clear")
+            record = authority.load(authority.team_dir("team"))
+        self.assertEqual(record["offer"]["to"]["session"], "deputy-session")
+        self.assertIn("That offer stands", output["hookSpecificOutput"]["additionalContext"])
+
+    def test_a_cleared_pending_successor_is_told_only_the_user_can_re_appoint(self):
+        authority = MAILBOX_AUTHORITY()
+        with mock.patch.dict(os.environ, {"AGENT_EXECUTOR_HOME": str(self.base.parent / "executor")}):
+            authority.appoint("team", authority.member("old-lead", "codex"), deputy={"harness": "claude"})
+            authority.takeover("team", authority.member(self.claude["session"], "claude"), 1, user_approved=True)
+            self.lifecycle(self.claude["session"], "SessionEnd", reason="clear")
+            output = self.lifecycle("claude-session-after-clear", "SessionStart", source="clear")
+            record = authority.load(authority.team_dir("team"))
+        self.assertEqual((record["status"], record["lead"]["session"]), ("pending", self.claude["session"]))
+        self.assertIn("only the user can re-appoint", output["hookSpecificOutput"]["additionalContext"])
+
     def test_a_cleared_lead_has_its_role_offered_not_given(self):
         authority = MAILBOX_AUTHORITY()
         with mock.patch.dict(os.environ, {"AGENT_EXECUTOR_HOME": str(self.base.parent / "executor")}):

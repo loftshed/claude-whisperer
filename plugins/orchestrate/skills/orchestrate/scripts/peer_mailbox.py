@@ -2083,14 +2083,20 @@ def end_session(base: Path, session: str, *, reason: str, pid: int | None) -> No
     unregister(base, session)
 
 
-def answered(base: Path, session: str, message_id_: str) -> bool:
-    """Whether `session` sent any message replying to `message_id_`."""
-    return any(
-        (message := load(path))
-        and message.get("replyTo") == message_id_
-        and (message.get("from") or {}).get("session") == session
+def replied_to(base: Path, session: str) -> set[str]:
+    """IDs of the messages `session` replied to, from one pass over the retained mail."""
+    return {
+        message["replyTo"]
         for path in (base / "inbox").glob("*/*.json")
-    )
+        if (message := load(path))
+        and isinstance(message.get("replyTo"), str)
+        and (message.get("from") or {}).get("session") == session
+    }
+
+
+def live_session(base: Path, session: str | None) -> bool:
+    peer = load(peer_path(base, session)) if isinstance(session, str) and re.fullmatch(SESSION_ID, session) else None
+    return valid_peer(peer) and is_live(peer)
 
 
 def adopt_cleared(base: Path, me: dict[str, Any]) -> str:
@@ -2112,16 +2118,22 @@ def adopt_cleared(base: Path, me: dict[str, Any]) -> str:
         annotate(base, me["session"], awaitingClear=stamp())
         return ""
     _, path, old = max(stashed, key=lambda item: item[0])
-    carried = []
+    carried, orphaned, replied = [], 0, replied_to(base, old["session"])
     for message in messages(base, old["session"], unread_only=False):
         sent = dt.datetime.fromisoformat(message["sentAt"])
         unread = not message.get("readAt")
-        if unread or (
-            moment - sent <= OPEN_REQUEST_WINDOW
+        open_request = (
+            not unread
+            and moment - sent <= OPEN_REQUEST_WINDOW
             and message["from"].get("session") != MAILBOX_SENDER["session"]
             and message.get("kind") not in {"reply", "update", "notice"}
-            and not answered(base, old["session"], message["id"])
-        ):
+            and message["id"] not in replied
+        )
+        if open_request and not live_session(base, message["from"].get("session")):
+            # Nobody waits on it any more, and its reply may have gone with the sender's inbox.
+            orphaned += 1
+            continue
+        if unread or open_request:
             message.update(
                 to={"session": me["session"], "name": me["name"]},
                 readAt=None,
@@ -2161,6 +2173,8 @@ def adopt_cleared(base: Path, me: dict[str, Any]) -> str:
             f"{len(carried)} message(s) addressed to you before /clear follow; the conversation behind them is gone, "
             "so ask the sender for context before acting."
         )
+    if orphaned:
+        lines.append(f"{orphaned} request(s) you had read came from sessions that have since ended; not carried.")
     lines += offers
     return "\n".join(lines)
 
@@ -2177,7 +2191,24 @@ def offer_cleared_lead(old_session: str, me: dict[str, Any]) -> list[str]:
     for directory in sorted((authority.cache_dir() / "authority-v1").glob("*")):
         with contextlib.suppress(ValueError, OSError):
             record = authority.load(directory)
-            if record and record["status"] == "active" and record["lead"]["session"] == old_session:
+            if not record or record["lead"]["session"] != old_session:
+                continue
+            team, generation = record["team"], record["generation"]
+            if record["status"] == "pending":
+                notes.append(
+                    f"You were taking over team {team} (generation {generation}) but had not accepted. A cleared "
+                    "successor cannot accept: only the user can re-appoint the team's lead now."
+                )
+                continue
+            pending_to = (record.get("offer") or {}).get("to") or {}
+            if pending_to.get("session") not in (None, me["session"]):
+                # A planned handover the lead already made stands; the hook never redirects it.
+                notes.append(
+                    f"You were the lead of team {team} (generation {generation}) and had offered the role to "
+                    f"{pending_to['session']}. That offer stands and this session was not offered the role."
+                )
+                continue
+            if record["status"] == "active":
                 authority.offer(
                     record["team"],
                     old_session,
