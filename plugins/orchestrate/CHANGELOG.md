@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.29.2
+
+- fix(orchestrate): detect blind credits watch and map Gemini account home (#20)
+
 ## 0.29.1
 
 - fix(orchestrate): report the released version in doctor and run records (#19)
