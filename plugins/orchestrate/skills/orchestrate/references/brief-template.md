@@ -4,7 +4,7 @@ Prefer the bundled task spec over copying this template into chat or manually re
 guardrails. The runner renders the complete standalone brief privately while the conductor writes
 only the task-specific values.
 
-Create a concise JSON spec outside the target repository and pass it directly to the runner:
+Create a concise JSON spec outside the target repository and pass it to the runner (when the resolved engine matches the calling harness, `run_agent.py` returns `AGENT_STATUS=native_handoff` with the rendered brief so you can run it via your host's native subagent tools or `coordinator.py dispatch --transport native`; pass `--transport executor` only when crossing an account/profile boundary or resuming an executor CLI session):
 
 ```bash
 python3 <skill-directory>/scripts/run_agent.py \

@@ -156,6 +156,42 @@ def agy_call(control: dict, method: str, body: dict) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _agy_cascade_request_config(trajectory: dict) -> dict:
+    inner = trajectory.get("trajectory")
+    if not isinstance(inner, dict):
+        return {}
+    cascade_config = None
+    custom_agent_spec = None
+    steps = inner.get("steps")
+    if isinstance(steps, list):
+        for step in reversed(steps):
+            if not isinstance(step, dict):
+                continue
+            user_input = step.get("userInput")
+            if not isinstance(user_input, dict):
+                continue
+            if cascade_config is None:
+                for key in ("userConfig", "lastUserConfig"):
+                    candidate = user_input.get(key)
+                    if (
+                        isinstance(candidate, dict)
+                        and isinstance(candidate.get("plannerConfig"), dict)
+                        and candidate["plannerConfig"].get("planModel")
+                    ):
+                        cascade_config = candidate
+                        break
+            if custom_agent_spec is None and isinstance(user_input.get("userAgentSpec"), dict):
+                custom_agent_spec = user_input["userAgentSpec"]
+            if cascade_config is not None and custom_agent_spec is not None:
+                break
+    extra: dict = {}
+    if cascade_config is not None:
+        extra["cascadeConfig"] = cascade_config
+    if custom_agent_spec is not None:
+        extra["customAgentSpec"] = custom_agent_spec
+    return extra
+
+
 def wake_gemini(target: dict, message_id: str, *, base: Path | None = None) -> dict:
     import peer_mailbox as mailbox
 
@@ -213,6 +249,7 @@ def wake_gemini(target: dict, message_id: str, *, base: Path | None = None) -> d
                 "items": [{"text": notification(message_id)}],
                 "deliveryStrategy": "MESSAGE_DELIVERY_STRATEGY_WHEN_IDLE",
                 "blocking": False,
+                **_agy_cascade_request_config(trajectory),
             },
         )
     except Exception:

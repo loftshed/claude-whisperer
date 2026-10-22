@@ -26,9 +26,11 @@ import {
   StoogesView,
   wrapText,
 } from "../lib/stooges-view.mjs";
+import { roomsCommand } from "./rooms.mjs";
 import { cachedQuota, runTui } from "./stooges-tui.mjs";
 
-const HELP = `ork routes [--archetype <name>] [--json] [--width 120]
+const HELP = `ork rooms --help
+ork routes [--archetype <name>] [--json] [--width 120]
 ork quota [--line|--json] [--refresh]
 ork telemetry [--runs-dir <directory>] [--json] [--width 120]
 ork stooges [--team "claude:haiku*2,agy:flash*2,codex:luna:max"]
@@ -264,6 +266,7 @@ async function summaryCommand(argv, stdout) {
 }
 
 export async function main(argv = process.argv.slice(2), { stdout = process.stdout } = {}) {
+  if (argv[0] === "rooms") return roomsCommand(argv.slice(1), { stdout });
   if (["routes", "quota", "telemetry"].includes(argv[0])) return summaryCommand(argv, stdout);
   const { values, positionals } = parseArgs({
     args: argv,

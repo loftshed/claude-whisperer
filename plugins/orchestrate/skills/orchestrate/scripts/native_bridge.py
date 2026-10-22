@@ -71,6 +71,8 @@ def start(directory: Path, run: dict[str, Any], runner: Any) -> None:
                 "recovery": "Recover the native tool handle/event once; never spawn a replacement for an uncertain reservation.",
                 "report": "Use the rendered brief and five report headings; save actual tool output for native-complete.",
                 "completion_owner": "current_host",
+                "communication": "Use the current host's native agent/thread tools for parent-worker communication; "
+                "the run mailbox is only a fallback if native messaging is unavailable.",
                 "brief_path": str(folder / "brief.md"),
             }
             return

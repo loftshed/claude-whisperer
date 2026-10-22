@@ -52,8 +52,9 @@ class NativeQueue:
 class AgyServer:
     """A loopback stand-in for the Antigravity language server."""
 
-    def __init__(self, status="CASCADE_RUN_STATUS_IDLE"):
+    def __init__(self, status="CASCADE_RUN_STATUS_IDLE", trajectory=None):
         self.status = status
+        self.trajectory = trajectory
         self.calls = []
         outer = self
 
@@ -61,7 +62,12 @@ class AgyServer:
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 outer.calls.append((self.path.rsplit("/", 1)[-1], self.headers.get("x-codeium-csrf-token"), body))
-                reply = {"status": outer.status} if self.path.endswith("GetCascadeTrajectory") else {}
+                if self.path.endswith("GetCascadeTrajectory"):
+                    reply = {"status": outer.status}
+                    if outer.trajectory is not None:
+                        reply["trajectory"] = outer.trajectory
+                else:
+                    reply = {}
                 data = json.dumps(reply).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(data)))
@@ -118,6 +124,26 @@ class AntigravityWakeTests(unittest.TestCase):
         self.assertEqual(sends[0][2]["deliveryStrategy"], "MESSAGE_DELIVERY_STRATEGY_WHEN_IDLE")
         self.assertFalse(sends[0][2]["blocking"])
         self.assertIn(ids[0], sends[0][2]["items"][0]["text"])
+
+    def test_idle_session_wake_preserves_cascade_config_and_agent_spec(self):
+        user_config = {"plannerConfig": {"planModel": "MODEL_PLACEHOLDER_M418"}}
+        agent_spec = {"builtinAgent": {"defaultAgent": {"surface": "AGENT_SURFACE_CLI"}}}
+        trajectory = {
+            "steps": [
+                {"userInput": {"userConfig": user_config, "userAgentSpec": agent_spec}},
+                {"userInput": {"lastUserConfig": user_config}},
+            ],
+        }
+        with AgyServer(trajectory=trajectory) as server:
+            self.control(server.address)
+            self.mail("wake-with-config")
+            message_id = peer_mailbox.incoming(self.base, "agy-target")[0]["id"]
+            result = mailbox_wake.wake(self.target, message_id, base=self.base)
+        self.assertEqual(result["status"], "scheduled")
+        sends = server.sends()
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(sends[0][2]["cascadeConfig"], user_config)
+        self.assertEqual(sends[0][2]["customAgentSpec"], agent_spec)
 
     def test_busy_session_keeps_mail_for_the_stop_hook(self):
         with AgyServer("CASCADE_RUN_STATUS_RUNNING") as server:

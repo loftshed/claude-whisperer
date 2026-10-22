@@ -290,7 +290,112 @@ class MailboxTests(unittest.TestCase):
             MAILBOX.send(self.base, sender=self.claude, to=other["name"], text="hi")
         listing = MAILBOX.table(MAILBOX.peers(self.base), self.claude["session"], "claude")
         self.assertIn("same harness: use SendMessage", listing)
+        self.assertIn(f"native address: {other['name']}", listing)
         self.assertIn("(you)", listing)
+
+    def test_native_unreachable_override_delivers_and_records_reason(self):
+        other = self.peer("claude-session-7777", "claude", str(self.repository))
+        with self.assertRaisesRegex(MAILBOX.MailboxError, "nativeUnreachable"):
+            MAILBOX.send(self.base, sender=self.claude, to=other["name"], text="hi")
+        for bad in ("", "  ", "x" * 201):
+            with self.assertRaisesRegex(MAILBOX.MailboxError, "200 characters"):
+                MAILBOX.send(self.base, sender=self.claude, to=other["name"], text="hi", native_unreachable=bad)
+        MAILBOX.send(
+            self.base,
+            sender=self.claude,
+            to=other["name"],
+            text="hi",
+            native_unreachable="ListAgents does not list it",
+        )
+        [message] = MAILBOX.take(self.base, other["session"])
+        self.assertEqual(message["nativeUnreachable"], "ListAgents does not list it")
+        # Cross-harness mail never carries the field.
+        MAILBOX.send(self.base, sender=self.codex, to=other["name"], text="ho", native_unreachable="unused")
+        [plain] = MAILBOX.take(self.base, other["session"])
+        self.assertNotIn("nativeUnreachable", plain)
+
+    def test_same_harness_in_another_account_uses_the_mailbox(self):
+        home = Path.home()
+        me = MAILBOX.register(
+            self.base,
+            session=self.claude["session"],
+            harness="claude",
+            cwd=str(self.repository),
+            account=str(home / ".claude-personal"),
+        )
+        same = MAILBOX.register(
+            self.base,
+            session="claude-session-5555",
+            harness="claude",
+            cwd=str(self.repository),
+            pid=os.getpid(),
+            account=str(home / ".claude-personal"),
+        )
+        other = MAILBOX.register(
+            self.base,
+            session="claude-session-6666",
+            harness="claude",
+            cwd=str(self.repository),
+            pid=os.getpid(),
+            account=str(home / ".claude"),
+        )
+        with self.assertRaisesRegex(MAILBOX.MailboxError, "SendMessage"):
+            MAILBOX.send(self.base, sender=me, to=same["name"], text="hi")
+        MAILBOX.send(self.base, sender=me, to=other["name"], text="hi")
+        self.assertEqual([message["text"] for message in MAILBOX.take(self.base, other["session"])], ["hi"])
+        self.assertEqual(MAILBOX.account_label(other), "default")
+        self.assertEqual(MAILBOX.account_label(me), "personal")
+        self.assertEqual(MAILBOX.native_route(other, "claude", me["accountHome"])["nativeTool"], "")
+        listing = MAILBOX.table(MAILBOX.peers(self.base), me["session"], "claude")
+        self.assertIn("claude (account: default)", listing)
+        self.assertIn("same harness, other account (default): use the peer mailbox", listing)
+        self.assertIn("same harness: use SendMessage", listing)
+        banner = MAILBOX.describe_colleagues([other], me)
+        self.assertIn("[same harness, other account (default): use the peer mailbox]", banner)
+        # A later refresh without an account keeps the one already known.
+        refreshed = MAILBOX.register(self.base, session=other["session"], harness="claude", cwd=str(self.repository))
+        self.assertEqual(refreshed["accountHome"], other["accountHome"])
+
+    def test_account_home_comes_from_transcript_then_environment(self):
+        home = Path.home()
+        transcript = str(home / ".claude-work" / "projects" / "x" / "session.jsonl")
+        self.assertEqual(MAILBOX.account_home("claude", transcript, {}), str((home / ".claude-work").resolve()))
+        custom = Path(self.temporary.name) / "profile"
+        self.assertEqual(
+            MAILBOX.account_home("claude", str(custom / "projects" / "t.jsonl"), {"CLAUDE_CONFIG_DIR": str(custom)}),
+            str(custom.resolve()),
+        )
+        self.assertEqual(MAILBOX.account_home("claude", None, {}), str((home / ".claude").resolve()))
+        self.assertEqual(MAILBOX.account_home("codex", None, {"CODEX_HOME": str(custom)}), str(custom.resolve()))
+        self.assertIsNone(MAILBOX.account_home("gemini", None, {}))
+        self.assertEqual(MAILBOX.account_label({"harness": "claude"}), "")
+
+    def test_claude_native_session_name_syncs_and_fallback_alias_resolves(self):
+        sessions_dir = Path(self.temporary.name) / "claude-config" / "sessions"
+        sessions_dir.mkdir(parents=True)
+        (sessions_dir / f"{os.getpid()}.json").write_text(
+            json.dumps({"sessionId": "claude-native-session", "pid": os.getpid(), "name": "example-app-61"}),
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(sessions_dir.parent)}):
+            peer = self.peer("claude-native-session", "claude", str(self.repository))
+        self.assertEqual(peer["name"], "example-app-61")
+        self.assertEqual(peer["nativeName"], "example-app-61")
+        fallback_alias = MAILBOX.peer_name("claude", str(self.repository), "claude-native-session")
+        self.assertNotEqual(fallback_alias, "example-app-61")
+        self.assertEqual(
+            MAILBOX.resolve(self.base, fallback_alias, sender=self.codex)["session"],
+            "claude-native-session",
+        )
+        colleagues_banner = MAILBOX.describe_colleagues([peer], self.claude)
+        self.assertIn("same harness: use SendMessage", colleagues_banner)
+        self.assertIn("native address example-app-61", colleagues_banner)
+        codex_peer = self.peer("codex-other-thread", "codex", str(self.repository))
+        codex_banner = MAILBOX.describe_colleagues([codex_peer], self.codex)
+        self.assertIn("codex_tui.send_message_to_thread", codex_banner)
+        self.assertIn("native address codex-other-thread", codex_banner)
+        self.assertIn("# Native communication", MAILBOX.run_instructions("run1", transport="native"))
+        self.assertNotIn("mailbox ask", MAILBOX.run_instructions("run1", transport="native"))
 
     def test_refuses_unknown_self_oversize_and_ambiguous_addresses(self):
         with self.assertRaisesRegex(MAILBOX.MailboxError, "no live peer"):

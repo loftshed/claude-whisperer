@@ -23,7 +23,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -45,16 +45,25 @@ UNKNOWN_PID_TTL = dt.timedelta(hours=2)
 HARNESSES = ("claude", "codex", "opencode", "gemini", "unknown")
 STATES = ("idle", "busy", "waiting")
 SCOPES = ("project", "cross-project")
-# The rule for every harness: a session messages peers of its own harness with that harness's native
-# tools whenever it has any, and uses the mailbox only to cross harnesses. Harnesses known to have native
-# messaging are listed here so the mailbox refuses same-harness traffic for them outright.
+# The rule for every harness: a session messages peers of its own harness and account with that harness's
+# native tools whenever it has any, and uses the mailbox to cross harnesses or accounts. Harnesses known to
+# have native messaging are listed here so the mailbox refuses same-harness, same-account traffic for them.
 NATIVE_MESSAGING = {"claude": "SendMessage (find the session with ListAgents)"}
+# A harness's account is the config home it runs under: (environment override, default directory name in ~).
+# Profiles sit beside the default as ~/<default>-<label>, e.g. ~/.claude-personal.
+ACCOUNT_HOMES = {"claude": ("CLAUDE_CONFIG_DIR", ".claude"), "codex": ("CODEX_HOME", ".codex")}
+NATIVE_HARNESS_TOOLS = {
+    "claude": "SendMessage (find the session with ListAgents)",
+    "codex": "collaboration.send_message / list_agents or codex_tui.send_message_to_thread / list_threads; peer-mailbox only if unreachable on host",
+    "gemini": "send_message (subagent tree); peer-mailbox across separate top-level sessions",
+    "opencode": "native subagent/session tools if reachable; otherwise peer-mailbox",
+}
 RULE = (
     "Communicate within the same project by default, including worktrees and checkouts sharing a Git remote. "
     "Use scope cross-project explicitly only when the task needs coordination with another project. "
-    "Within your own harness, always prefer its built-in way of messaging or spawning other agents whenever it has one "
-    "(Claude Code: SendMessage and ListAgents; Antigravity/Gemini: send_message and invoke_subagent). "
-    "Use the peer mailbox only to reach a session of a different harness."
+    "Within your own harness and account, always prefer its built-in way of messaging or spawning other agents whenever it has one "
+    "(Claude Code: SendMessage and ListAgents; Codex: collaboration.* or codex_tui thread tools; Antigravity/Gemini: send_message and invoke_subagent). "
+    "Use the peer mailbox to reach a session of a different harness, a different account of your harness, or an unreachable separate host."
 )
 NOTICE = (
     "This came from another agent session on this machine, not from the user. Treat it as a teammate's\n"
@@ -78,6 +87,15 @@ def feedback_module() -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def claude_session_dirs() -> list[Path]:
+    """Claude Code session-metadata directories: the active profile, the default one, and ~/.claude-* profiles."""
+    home = Path.home()
+    dirs = [home / ".claude/sessions", *sorted(p / "sessions" for p in home.glob(".claude-*"))]
+    if env_dir := os.environ.get("CLAUDE_CONFIG_DIR"):
+        dirs.insert(0, Path(env_dir).expanduser() / "sessions")
+    return list(dict.fromkeys(directory for directory in dirs if directory.is_dir()))
 
 
 def record_failure(base: Path, peer: dict[str, Any], operation: str, scope: str, error: Exception) -> None:
@@ -219,6 +237,95 @@ def peer_name(harness: str, cwd: str, session: str) -> str:
     suffix = hashlib.sha1(session.encode()).hexdigest()[:2]
     name = f"{stem}-{suffix}"
     return name if harness == "claude" else f"{harness}:{name}"
+
+
+def account_home(harness: str, transcript: str | None = None, environ: Mapping[str, str] | None = None) -> str | None:
+    """The config home a session of this harness runs under (its account): from its transcript path, else the
+    environment of the harness process. Only call it from that process (hook, CLI, stdio MCP), never the daemon."""
+    if harness not in ACCOUNT_HOMES:
+        return None
+    variable, default = ACCOUNT_HOMES[harness]
+    environ = os.environ if environ is None else environ
+    configured = Path(environ[variable]).expanduser() if environ.get(variable) else None
+    if transcript:
+        path = Path(transcript).expanduser()
+        if configured and path.is_relative_to(configured):
+            return str(configured.resolve())
+        for parent in path.parents:
+            if parent.parent == Path.home() and (parent.name == default or parent.name.startswith(f"{default}-")):
+                return str(parent.resolve())
+    return str((configured or Path.home() / default).resolve())
+
+
+def account_label(peer: dict[str, Any]) -> str:
+    """Short account name: "default" for the harness's default home, the profile suffix, or the full path."""
+    home = peer.get("accountHome")
+    if not isinstance(home, str) or not home:
+        return ""
+    name = Path(home).name
+    default = ACCOUNT_HOMES.get(peer.get("harness"), (None, ""))[1]
+    if default and name == default:
+        return "default"
+    if default and name.startswith(f"{default}-"):
+        return name[len(default) + 1 :]
+    return home
+
+
+def other_account(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Whether both sessions have a known account and the accounts differ. Unknown counts as the same."""
+    return bool(left.get("accountHome") and right.get("accountHome") and left["accountHome"] != right["accountHome"])
+
+
+def claude_native_name(session: str, pid: int | None = None) -> str | None:
+    """Discover Claude Code's native session name from its local session metadata when available."""
+    return claude_session(session, pid)[0]
+
+
+def claude_session(session: str, pid: int | None = None) -> tuple[str | None, str | None]:
+    """Claude Code's native session name and the profile (config home) whose session metadata lists the session."""
+    for sessions_dir in claude_session_dirs():
+        candidates = ([sessions_dir / f"{pid}.json"] if pid else []) + sorted(sessions_dir.glob("*.json"))
+        seen: set[Path] = set()
+        for path in candidates:
+            if path in seen or not path.is_file():
+                continue
+            seen.add(path)
+            record = load(path)
+            if not isinstance(record, dict) or record.get("sessionId") != session:
+                continue
+            record_pid = record.get("pid")
+            if pid_alive(record_pid) is False:
+                continue
+            native_name = record.get("name")
+            valid = isinstance(native_name, str) and re.fullmatch(SESSION_ID, native_name.strip())
+            return (native_name.strip() if valid else None), str(sessions_dir.parent.resolve())
+    return None, None
+
+
+def native_route(peer: dict[str, Any], caller_harness: str | None, caller_account: str | None = None) -> dict[str, str]:
+    """Return native routing hints (nativeAddress and nativeTool) for a peer of the caller's harness and account."""
+    same = bool(caller_harness and caller_harness != "unknown" and peer.get("harness") == caller_harness)
+    if not same or other_account(peer, {"accountHome": caller_account}):
+        return {"nativeAddress": "", "nativeTool": ""}
+    harness = str(peer.get("harness") or "")
+    address = (
+        str(peer.get("nativeName") or peer.get("name") or peer.get("session") or "")
+        if harness == "claude"
+        else str(peer.get("session") or "")
+    )
+    return {
+        "nativeAddress": address,
+        "nativeTool": NATIVE_HARNESS_TOOLS.get(harness, "your native agent messaging, if any"),
+    }
+
+
+def account_route(peer: dict[str, Any], caller_harness: str | None, caller_account: str | None) -> str:
+    """The routing note for a peer of the caller's harness under another account, which native tools cannot reach."""
+    if not caller_harness or peer.get("harness") != caller_harness:
+        return ""
+    if not other_account(peer, {"accountHome": caller_account}):
+        return ""
+    return f"same harness, other account ({account_label(peer)}): use the peer mailbox"
 
 
 def display_name(peer: dict[str, Any]) -> str:
@@ -778,10 +885,18 @@ def describe_colleagues(rows: list[dict[str, Any]], me: dict[str, Any]) -> str:
             worktree = checkout
         where = "same checkout" if peer.get("checkout") == me.get("checkout") else f"worktree {worktree}"
         role = ", a delegated run worker" if peer.get("delegatedRun") else ""
+        route = native_route(peer, me.get("harness"), me.get("accountHome"))
+        native_hint = (
+            f" [same harness: use {route['nativeTool']} with native address {route['nativeAddress']}]"
+            if route["nativeTool"]
+            else f" [{cross_account}]"
+            if (cross_account := account_route(peer, me.get("harness"), me.get("accountHome")))
+            else ""
+        )
         line = (
             f"- {display_label(peer)} [address: {peer['name']}; id: {peer['session']}] "
             f"({peer['harness']}, {peer['state']}{role}) repo {repository_name(peer)} "
-            f"on {peer.get('branch', '?')}, {where}"
+            f"on {peer.get('branch', '?')}, {where}{native_hint}"
         )
         lines.append(line)
     return "\n".join(lines)
@@ -816,8 +931,10 @@ def register(
     cwd_source: str | None = None,
     model: str | None = None,
     model_source: str = "declared",
+    account: str | None = None,
 ) -> dict[str, Any]:
-    """Create or refresh presence. A known pid and name survive later refreshes that lack them."""
+    """Create or refresh presence. A known pid, name and account survive later refreshes that lack them.
+    Claude's session metadata names its account; otherwise `account` is the caller's own account_home()."""
     if harness not in HARNESSES:
         raise MailboxError(f"unknown harness {harness!r}")
     if state is not None and state not in STATES:
@@ -848,7 +965,17 @@ def register(
             for key in ("repo", "checkout", "branch", "remotes"):
                 peer.pop(key, None)
             peer.update(workspace(peer["cwd"]))
-        peer["name"] = peer_name(peer["harness"], peer.get("checkout") or peer["cwd"], session)
+        fallback_name = peer_name(peer["harness"], peer.get("checkout") or peer["cwd"], session)
+        native_name, profile = claude_session(session, peer.get("pid")) if peer["harness"] == "claude" else (None, None)
+        if profile or account:
+            peer["accountHome"] = profile or account
+        if native_name:
+            peer["nativeName"] = native_name
+            peer["name"] = native_name
+        else:
+            peer["name"] = (
+                peer.get("nativeName") if peer["harness"] == "claude" and peer.get("nativeName") else fallback_name
+            )
         if pid and (pid != previous_pid or not peer.get("pidBirth")):
             peer["pidBirth"] = process_started(pid)
         write(path, peer)
@@ -914,6 +1041,15 @@ def peers(base: Path, *, prune_dead: bool = True, include_runs: bool = False) ->
     return sorted(found, key=lambda peer: (str(peer.get("name")), str(peer.get("startedAt"))))
 
 
+def _peer_aliases(peer: dict[str, Any]) -> set[str]:
+    aliases = {peer["name"], peer["session"]}
+    if peer.get("nativeName"):
+        aliases.add(str(peer["nativeName"]))
+    with contextlib.suppress(Exception):
+        aliases.add(peer_name(peer["harness"], peer.get("checkout") or peer["cwd"], peer["session"]))
+    return aliases
+
+
 def resolve(base: Path, address: str, *, sender: dict[str, Any], scope: str = "project") -> dict[str, Any]:
     """A name, a session id, or a unique session-id prefix of at least six characters."""
     moment = now()
@@ -924,10 +1060,10 @@ def resolve(base: Path, address: str, *, sender: dict[str, Any], scope: str = "p
         and not is_run_peer(peer)
         and not is_live(peer, moment)
         and (scope == "cross-project" or peer["session"] == sender.get("session") or same_project(sender, peer))
-        and (address in (peer["name"], peer["session"]) or (len(address) >= 6 and peer["session"].startswith(address)))
+        and (address in _peer_aliases(peer) or (len(address) >= 6 and peer["session"].startswith(address)))
     ]
     live = scoped_peers(base, sender, scope=scope)
-    exact = [peer for peer in live if address in (peer["name"], peer["session"])]
+    exact = [peer for peer in live if address in _peer_aliases(peer)]
     if not exact and len(address) >= 6:
         exact = [peer for peer in live if peer["session"].startswith(address)]
     if not exact:
@@ -1104,8 +1240,15 @@ def send(
     scope: str = "project",
     wake: bool = False,
     idempotency_key: str | None = None,
+    native_unreachable: str | None = None,
 ) -> dict[str, Any]:
+    """Deliver to a live peer. `native_unreachable` says why native tools could not reach a peer of the
+    sender's own harness and account; it lifts the native-only refusal and is recorded on the message."""
     check_scope(scope)
+    if native_unreachable is not None and (
+        not isinstance(native_unreachable, str) or not native_unreachable.strip() or len(native_unreachable) > 200
+    ):
+        raise MailboxError("nativeUnreachable must say in at most 200 characters what native messaging failed to do")
     if is_run_peer(sender):
         return run_send(
             base,
@@ -1167,10 +1310,22 @@ def send(
     if target["session"] == sender["session"]:
         raise MailboxError("that address is this session", "self_address")
     native = NATIVE_MESSAGING.get(sender.get("harness"))
-    if native and target["harness"] == sender.get("harness"):
+    # Another account of the same harness is out of native reach, so the mailbox carries that traffic.
+    native_only = native and target["harness"] == sender.get("harness") and not other_account(sender, target)
+    if native_only and not native_unreachable:
+        route = native_route(target, sender.get("harness"), sender.get("accountHome"))
+        native_addr = route["nativeAddress"] or target["name"]
         raise MailboxError(
-            f"{target['name']} is a {target['harness']} session too; message it with {native}, not the mailbox",
+            f"{target['name']} is a {target['harness']} session of your account too; message it with {native} "
+            f"(native address: {native_addr}; session: {target['session']}), not the mailbox. "
+            "Only if your native tools cannot find or reach it, resend with nativeUnreachable "
+            "(CLI: --native-unreachable) saying what you tried",
             "native_required",
+        )
+    if native_only:
+        # Fixed code only: the reason travels with the message, never into feedback.
+        feedback_module().observe(
+            base, sender, code="native_unreachable_override", category="routing", operation="send", scope=scope
         )
 
     message = {
@@ -1184,6 +1339,8 @@ def send(
         "readAt": None,
         "scope": scope,
     }
+    if native_only:
+        message["nativeUnreachable"] = " ".join(native_unreachable.split())
     if idempotency_key is None:
         write(inbox_dir(base, target["session"]) / f"{message['id']}.json", message)
         result = delivery_result(message, target)
@@ -1618,7 +1775,8 @@ def render_all(found: list[dict[str, Any]]) -> str:
         "Keep a relaxed, friendly, natural teammate tone—no stiff formality needed, and feel free to credit "
         "helpful context or findings inside your substantive response—while using wake=false for FYI or progress "
         "updates; do not send standalone acknowledgement-only replies. "
-        "A completion that unblocks work may need a wake. Use your native way of messaging within your harness."
+        "A completion that unblocks work may need a wake. Use your native way of messaging within your harness "
+        "and account."
     )
     return f"{blocks}\n\n{NOTICE}\n{hint}"
 
@@ -1764,6 +1922,7 @@ def hook(
         cwd_source="hook",
         model=runtime_model if isinstance(runtime_model, str) and runtime_model.strip() else None,
         model_source="runtime",
+        account=account_home(harness, payload.get("transcript_path") or payload.get("transcriptPath")),
     )
     me = mark_delegated(base, me)
     if event in {"SessionStart", "UserPromptSubmit", "PreInvocation", "Stop"}:
@@ -1898,11 +2057,27 @@ def caller(args: argparse.Namespace, base: Path) -> dict[str, Any]:
     if is_run_peer(existing):
         return existing
     harness = args.harness or detect_harness()
-    return refresh(base, session=session, harness=harness, cwd=os.getcwd(), pid=harness_pid(harness), source="cli")
+    return refresh(
+        base,
+        session=session,
+        harness=harness,
+        cwd=os.getcwd(),
+        pid=harness_pid(harness),
+        source="cli",
+        account=account_home(harness),
+    )
 
 
 def refresh(
-    base: Path, *, session: str, harness: str, cwd: str, pid: int | None, source: str, state: str | None = None
+    base: Path,
+    *,
+    session: str,
+    harness: str,
+    cwd: str,
+    pid: int | None,
+    source: str,
+    state: str | None = None,
+    account: str | None = None,
 ) -> dict[str, Any]:
     """Register a CLI or MCP call. A live session's hooks own its directory: a tool call may run elsewhere."""
     known = load(peer_path(base, session))
@@ -1915,6 +2090,7 @@ def refresh(
         pid=pid,
         state=state,
         cwd_source="hook" if hooked else source,
+        account=account,
     )
     return mark_delegated(base, me)
 
@@ -1942,6 +2118,7 @@ def table(
     rows = sorted(rows, key=lambda peer: not (mine.get("repo") and peer.get("repo") == mine.get("repo")))
     lines = []
     native = NATIVE_MESSAGING.get(harness or "")
+    my_account = (own or mine).get("accountHome")
     for peer in rows:
         marks = []
         if peer["session"] == session:
@@ -1955,10 +2132,13 @@ def table(
                 marks.append("other project")
             if peer.get("delegatedRun"):
                 marks.append("delegated run worker")
-            if harness and peer["harness"] == harness:
-                marks.append(
-                    f"same harness: use {native.split(' ')[0] if native else 'your native agent messaging, if any'}"
-                )
+            if cross_account := account_route(peer, harness, my_account):
+                marks.append(cross_account)
+            elif harness and peer["harness"] == harness:
+                route = native_route(peer, harness, my_account)
+                tool_label = native.split(" ")[0] if native else route["nativeTool"]
+                addr_note = f", native address: {route['nativeAddress']}" if route["nativeAddress"] else ""
+                marks.append(f"same harness: use {tool_label}{addr_note}")
         mark = f"  ({'; '.join(marks)})" if marks else ""
         branch = f"  {peer['branch']}" if peer.get("branch") else ""
         checkout = peer.get("checkout") or peer["cwd"]
@@ -1973,12 +2153,20 @@ def table(
         if any(p["session"] != peer["session"] and p["session"].startswith(identity) for p in rows):
             identity = peer["session"]
         label = f"{display_label(peer)}  [address: {peer['name']}]"
-        lines.append(f"{label} [id: {identity}]  {peer['harness']}  {peer['state']}  {context}{mark}")
+        account = f" (account: {account_label(peer)})" if peer.get("accountHome") else ""
+        lines.append(f"{label} [id: {identity}]  {peer['harness']}{account}  {peer['state']}  {context}{mark}")
     return "\n".join(lines)
 
 
-def run_instructions(run_id: str) -> str:
+def run_instructions(run_id: str, *, transport: str = "executor") -> str:
     """Worker-facing run messaging commands; paths are absolute for detached execution."""
+    if transport == "native":
+        return (
+            "# Native communication\n\n"
+            "Use the current host's native parent-worker agent/thread tools for questions, updates, and replies. "
+            "The recorded run mailbox is a fallback only if native messaging cannot reach the recipient. "
+            "Do not launch another CLI or a replacement agent to communicate."
+        )
     runner = Path(__file__).with_name("run_agent.py").resolve()
     command = shlex.join([sys.executable, str(runner), "mailbox"])
     session = shlex.quote(f"run-{run_id}-worker")
@@ -2064,6 +2252,11 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--event", help="lifecycle event, for hosts whose payload does not name it")
         if name == "send":
             sub.add_argument("--no-wake", action="store_true", help="queue mail without waking an idle receiver")
+            sub.add_argument(
+                "--native-unreachable",
+                metavar="REASON",
+                help="what native messaging failed to do; lifts the same-harness, same-account refusal",
+            )
             sub.add_argument("--to", default=os.environ.get("AGENT_MAILBOX_PEER"))
             sub.add_argument("--text", "--message", "--body", dest="text", required=True)
             sub.add_argument("--kind", choices=("question", "reply", "update"))
@@ -2121,9 +2314,12 @@ def main(argv: list[str] | None = None) -> int:
             output = feedback_module().summary(base, peer=None if args.scope == "cross-project" else me)
         elif args.action == "peers":
             me = caller(args, base) if session_arg(args) else workspace(os.getcwd())
+            caller_harness = args.harness or me.get("harness") or detect_harness()
+            if not me.get("accountHome") and (own_account := account_home(caller_harness)):
+                me = {**me, "accountHome": own_account}
             rows = scoped_peers(base, me, scope=args.scope, include_runs=args.runs)
             if args.format != "json":
-                print(table(rows, session_arg(args), args.harness or detect_harness(), here=me, scope=args.scope))
+                print(table(rows, session_arg(args), caller_harness, here=me, scope=args.scope))
                 return 0
             output = [
                 {
@@ -2131,6 +2327,12 @@ def main(argv: list[str] | None = None) -> int:
                     "displayName": display_name(peer),
                     "displayLabel": display_label(peer),
                     "repositoryName": repository_name(peer),
+                    "account": account_label(peer),
+                    **(
+                        native_route(peer, caller_harness, me.get("accountHome"))
+                        if peer["session"] != session_arg(args)
+                        else {"nativeAddress": "", "nativeTool": ""}
+                    ),
                 }
                 for peer in rows
             ]
@@ -2166,6 +2368,7 @@ def main(argv: list[str] | None = None) -> int:
                     client_id=args.id,
                     scope=getattr(args, "scope", "project"),
                     wake=args.action == "send" and not args.no_wake,
+                    native_unreachable=getattr(args, "native_unreachable", None),
                 )
                 if args.action == "ask":
                     output = wait(base, me["session"], timeout=args.timeout, reply_to=args.id)

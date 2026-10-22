@@ -718,6 +718,13 @@ class CoordinatorTests(unittest.TestCase):
         )
         packet = self.fixture.external_path / "native.json"
         try:
+            instructions = run["native_instructions"]
+            self.assertEqual(run["status"], "reserved")
+            self.assertIn("native agent/thread tools", instructions["communication"])
+            native_brief = Path(instructions["brief_path"]).read_text()
+            self.assertIn("Write the approved output", native_brief)
+            self.assertIn("# Native communication", native_brief)
+            self.assertNotIn("mailbox ask", native_brief)
             with self.assertRaisesRegex(SUPPORT.ContractError, "another executor"):
                 with SUPPORT.workspace_lease(self.fixture.repository.path, RUNNER.default_agent_cache_dir()):
                     self.fail("lease should belong to the native guard")

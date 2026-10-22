@@ -1319,6 +1319,7 @@ else:
         argv.extend(["--verify-timeout", verify_timeout])
         argv.extend(extra_args or [])
         environment = {
+            **{key: "" for keys in RUNNER.HOST_MARKERS.values() for key in keys},
             "FAKE_CAPTURE": str(capture_path),
             "FAKE_COMMIT": "1" if fake_commit else "0",
             "FAKE_MALFORMED": "1" if malformed else "0",
@@ -1342,6 +1343,110 @@ else:
         result = json.loads((out_dir / "result.json").read_text(encoding="utf-8"))
         capture = json.loads(capture_path.read_text(encoding="utf-8")) if capture_path.exists() else {}
         return exit_code, result, out_dir, output.getvalue(), capture
+
+    def test_same_host_hands_off_a_brief_without_starting_an_executor_or_taking_a_lease(self) -> None:
+        cache = self.external_path / "native-cache"
+        support = RUNNER.bundled_module("execution_support")
+        with support.workspace_lease(self.repository.path, cache):
+            code, result, out, summary, capture = self.run_main(
+                model="gpt-6-sol",
+                extra_env={"CODEX_THREAD_ID": "native-parent", "AGENT_EXECUTOR_HOME": str(cache)},
+            )
+        self.assertEqual((code, result["status"], result["task_outcome"]), (0, "native_handoff", "not_run"))
+        self.assertEqual((result["transport"], result["host"], result["engine"]), ("native", "codex", "codex"))
+        self.assertEqual(result["model"], "gpt-6-sol")
+        brief = Path(result["submitted_brief_path"]).read_text()
+        self.assertIn("Create the fixture output.", brief)
+        self.assertIn("EXECUTION AND REPORT CONTRACT", brief)
+        self.assertNotIn("# Live run messages", brief)
+        self.assertEqual(capture, {})
+        self.assertFalse((self.repository.path / "allowed/output.txt").exists())
+        self.assertFalse((cache / "mailbox-v1/runs").exists())
+        self.assertIn(f"AGENT_RESULT={out.resolve() / 'result.json'}", summary)
+        self.assertIn("collaboration.spawn_agent", result["native_instructions"])
+        self.assertIn("codex_tui", result["native_instructions"])
+
+    def test_native_handoff_supports_each_host_and_read_only_scratch(self) -> None:
+        for engine, tool in (
+            ("codex", "collaboration.spawn_agent"),
+            ("claude", "Agent"),
+            ("agy", "invoke_subagent"),
+            ("opencode", "native subagent"),
+        ):
+            with self.subTest(engine=engine):
+                code, result, _out, _summary, capture = self.run_main(
+                    engine=engine,
+                    expect_changes=False,
+                    allow_path=None,
+                    extra_args=["--host", engine],
+                )
+                self.assertEqual((code, result["status"]), (0, "native_handoff"))
+                self.assertIn(tool, result["native_instructions"])
+                self.assertTrue(Path(result["scratch_dir"]).is_dir())
+                self.assertIn(result["scratch_dir"], Path(result["submitted_brief_path"]).read_text())
+                self.assertEqual(capture, {})
+
+    def test_same_host_executor_override_still_executes_and_audits(self) -> None:
+        code, result, _out, _summary, capture = self.run_main(extra_args=["--host", "codex", "--transport", "executor"])
+        self.assertEqual((code, result["status"], result["session_id"]), (0, "completed", "codex-thread-1"))
+        self.assertEqual((self.repository.path / "allowed/output.txt").read_text(), "executor output\n")
+        self.assertEqual(capture["argv"][0], "exec")
+
+    def test_explicit_native_rejects_wrong_host_and_executor_boundaries(self) -> None:
+        for arguments in (
+            ["--host", "claude"],
+            ["--host", "codex", "--detach"],
+            ["--host", "codex", "--session", "existing-thread"],
+            ["--host", "codex", "--continue"],
+            ["--host", "codex", "--claude-config-dir", "/tmp/other-profile"],
+        ):
+            with self.subTest(arguments=arguments), self.assertRaises(RUNNER.RunnerError) as caught:
+                self.run_main(extra_args=["--transport", "native", *arguments])
+            self.assertEqual(caught.exception.exit_code, 4)
+
+    def test_native_handoff_validates_task_scope_before_writing_artifacts(self) -> None:
+        with self.assertRaises(RUNNER.RunnerError) as caught:
+            self.run_main(allow_path="../escape", extra_args=["--host", "codex"])
+        self.assertEqual(caught.exception.exit_code, 4)
+        self.assertFalse((self.external_path / "artifacts-1").exists())
+
+    def test_auto_transport_preserves_existing_executor_boundaries(self) -> None:
+        base = ["--brief", "task.md", "--engine", "claude", "--host", "claude"]
+        fresh = RUNNER.parse_args(base)
+        self.assertEqual(RUNNER.decide_transport(fresh, "claude"), "native")
+        for flags in (
+            ["--detach"],
+            ["--session", "original-session"],
+            ["--continue"],
+            ["--resume-result", "result.json"],
+            ["--completion-event", "/tmp/event.json"],
+            ["--mailbox-run-id", "original-run"],
+            ["--dry-run"],
+            ["--claude-config-dir", "/tmp/other-profile"],
+        ):
+            with self.subTest(flags=flags):
+                args = RUNNER.parse_args([*base, *flags])
+                self.assertEqual(RUNNER.decide_transport(args, "claude"), "executor")
+
+    def test_native_task_spec_handoff_retains_authoritative_scope(self) -> None:
+        code, result, _out, _summary, capture = self.run_main(
+            task_spec={
+                "objective": "Create the bounded output",
+                "repository_root": str(self.repository.path),
+                "current_state": "Output is missing",
+                "pre_existing_changes": [],
+                "plan": ["Write allowed/output.txt"],
+                "allow_paths": ["allowed/"],
+                "track_paths": [],
+                "development_checks": [],
+                "acceptance_criteria": ["Output is under allowed only"],
+            },
+            allow_path=None,
+            extra_args=["--host", "codex", "--transport", "native"],
+        )
+        self.assertEqual((code, result["status"], result["allowed_paths"]), (0, "native_handoff", ["allowed"]))
+        self.assertIn("Create the bounded output", Path(result["submitted_brief_path"]).read_text())
+        self.assertEqual(capture, {})
 
     def test_codex_default_records_scoped_delta_and_uses_stdin(self) -> None:
         exit_code, result, out_dir, summary, capture = self.run_main()
@@ -2263,7 +2368,7 @@ class NativeRouteAndProviderErrorTests(unittest.TestCase):
             {"CLAUDECODE": "1", "CLAUDE_CODE_MESSAGING_TOKEN": "host-secret", "CLAUDE_CONFIG_DIR": "/host/profile"},
         ):
             exit_code, result, _out, _summary, capture = self.run_main(
-                engine="claude", model="opus", extra_args=["--effort", "high"]
+                engine="claude", model="opus", extra_args=["--effort", "high", "--transport", "executor"]
             )
         self.assertEqual(exit_code, 0, result.get("error"))
         self.assertEqual(result["session_id"], "claude-session-1")
