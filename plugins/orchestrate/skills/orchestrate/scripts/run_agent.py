@@ -80,6 +80,8 @@ EXIT_ROUTE_NOT_ALLOWED = 17
 EXIT_POOL_ON_CREDITS = 18
 EXIT_STOPPED_CREDITS = 19
 CREDITS_CHECK_SECONDS = 5.0
+# Without a session log after this long, the credits watch says it cannot protect the run.
+CREDITS_WATCH_GRACE_SECONDS = 120.0
 
 DEFAULT_OPENCODE_VARIANT = "high"
 OPENCODE_RUNTIME_CONFIG = {
@@ -1837,10 +1839,19 @@ class CodexCreditsWatch:
     spending. A stop interrupts the executor like a user's Ctrl-C and ends the run as stopped_credits.
     """
 
-    def __init__(self, environment: dict[str, str], session_of: Any, *, check_seconds: float = CREDITS_CHECK_SECONDS):
+    def __init__(
+        self,
+        environment: dict[str, str],
+        session_of: Any,
+        *,
+        check_seconds: float = CREDITS_CHECK_SECONDS,
+        grace_seconds: float = CREDITS_WATCH_GRACE_SECONDS,
+    ):
         self.sessions = Path(environment.get("CODEX_HOME") or Path.home() / ".codex").expanduser() / "sessions"
         self.session_of = session_of
         self.check_seconds = check_seconds
+        self.give_up_at = time.monotonic() + grace_seconds
+        self.unavailable: str | None = None
         self.since = dt.datetime.now(dt.UTC)
         self.path: Path | None = None
         self.offset = 0
@@ -1857,8 +1868,13 @@ class CodexCreditsWatch:
             session = self.session_of()
             found = sorted(self.sessions.glob(f"*/*/*/rollout-*-{session}.jsonl")) if session else []
             if not found:
+                if self.unavailable is None and time.monotonic() >= self.give_up_at:
+                    # Fail visibly: the run goes on, but nothing stops it from spending credits.
+                    self.unavailable = "no session id" if not session else "no session log under " + str(self.sessions)
+                    emit_lifecycle("credits_watch_unavailable", reason=self.unavailable)
                 return False
             self.path = found[-1]
+            self.unavailable = None
         try:
             with self.path.open("rb") as handle:
                 handle.seek(self.offset)
@@ -3545,16 +3561,19 @@ def quota_gate(
     used up but that has a credit balance (Codex) would bill that balance: refused unless the user
     allows credits, and then the run goes ahead and says so.
     """
-    if ignore:
+    if ignore and allow_credits:
         return
     quota = bundled_module("quota")
     view = quota.snapshot()
     result = quota.check(engine, model, view, claude_config_dir=claude_config_dir)
+    # --ignore-quota launches into an exhausted pool; it never implies permission to bill credits.
+    if result["status"] == "credits" and not allow_credits:
+        raise RunnerError(quota.credits_message(engine, model, result), EXIT_POOL_ON_CREDITS)
+    if ignore:
+        return
     if result["status"] == "blocked":
         raise RunnerError(quota.blocked_message(engine, model, result, view), quota.EXIT_QUOTA_EXHAUSTED)
     if result["status"] == "credits":
-        if not allow_credits:
-            raise RunnerError(quota.credits_message(engine, model, result), EXIT_POOL_ON_CREDITS)
         emit_lifecycle(
             "quota_credits",
             pool=result.get("label"),
@@ -4057,7 +4076,7 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
             model,
             ignore=args.ignore_quota or args.dry_run,
             claude_config_dir=args.claude_config_dir,
-            allow_credits=args.allow_credits,
+            allow_credits=args.allow_credits or args.dry_run,
         )
         support = bundled_module("execution_support")
         try:
@@ -4802,6 +4821,11 @@ def execute(args: argparse.Namespace, *, lease: int | None = None) -> int:
         "provider_terminal_status": agy_status,
         "provider_error": provider_error,
         "credits_stop": credits_watch.stopped if credits_watch is not None else None,
+        "credits_watch": (
+            {"status": "unavailable", "reason": credits_watch.unavailable}
+            if credits_watch is not None and credits_watch.unavailable
+            else {"status": "watching" if credits_watch is not None else "off"}
+        ),
         "exit_code": exit_code,
         "executor_exit_code": process.returncode,
         "executor_attempts": executor_attempts,
