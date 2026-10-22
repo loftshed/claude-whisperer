@@ -30,6 +30,7 @@ import { roomsCommand } from "./rooms.mjs";
 import { cachedQuota, runTui } from "./stooges-tui.mjs";
 
 const HELP = `ork rooms --help
+ork name [--model <model>] [--effort <level>] [--harness <harness>]
 ork routes [--archetype <name>] [--json] [--width 120]
 ork quota [--line|--json] [--refresh]
 ork telemetry [--runs-dir <directory>] [--json] [--width 120]
@@ -267,6 +268,15 @@ async function summaryCommand(argv, stdout) {
 
 export async function main(argv = process.argv.slice(2), { stdout = process.stdout } = {}) {
   if (argv[0] === "rooms") return roomsCommand(argv.slice(1), { stdout });
+  if (argv[0] === "name") {
+    // A readable session name for the current checkout: claude --name "$(ork name --model opus-5.5)".
+    const script = fileURLToPath(
+      new URL("../skills/orchestrate/scripts/peer_mailbox.py", import.meta.url),
+    );
+    const { stdout: name } = await execute("python3", [script, "name", ...argv.slice(1)]);
+    stdout.write(name);
+    return;
+  }
   if (["routes", "quota", "telemetry"].includes(argv[0])) return summaryCommand(argv, stdout);
   const { values, positionals } = parseArgs({
     args: argv,

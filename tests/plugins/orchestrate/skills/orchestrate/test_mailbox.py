@@ -15,6 +15,9 @@ from unittest import mock
 
 import test_run_agent
 
+# Session names include the runtime effort; keep the host session's own effort out of every test.
+os.environ.pop("CLAUDE_EFFORT", None)
+
 RUNNER = test_run_agent.RUNNER
 MAILBOX = RUNNER.bundled_module("peer_mailbox")
 SCRIPTS = Path(MAILBOX.__file__).parent
@@ -73,10 +76,86 @@ class MailboxTests(unittest.TestCase):
     def peer(self, session, harness, cwd, pid=None):
         return MAILBOX.register(self.base, session=session, harness=harness, cwd=cwd, pid=pid or os.getpid())
 
-    def test_names_follow_claude_style_and_prefix_other_harnesses(self):
-        self.assertRegex(self.claude["name"], r"^example-app-[0-9a-f]{2}$")
-        self.assertRegex(self.codex["name"], r"^codex:example-app-[0-9a-f]{2}$")
+    def test_names_are_a_person_the_repo_the_model_and_the_effort(self):
+        # person-repo-model-effort, leaving out what is not known yet.
+        self.assertRegex(self.claude["name"], r"^[a-z]+-example-app$")
+        self.assertRegex(self.codex["name"], r"^[a-z]+-example-app$")
+        self.assertNotEqual(self.claude["person"], self.codex["person"])
+        self.assertEqual(self.claude["name"], f"{self.claude['person']}-example-app")
         self.assertEqual(sorted(peer["harness"] for peer in MAILBOX.peers(self.base)), ["claude", "codex"])
+        person = self.claude["person"]
+        renamed = MAILBOX.register(
+            self.base,
+            session=self.claude["session"],
+            harness="claude",
+            cwd=str(self.repository),
+            model="claude-opus-5-5[1m]",
+            effort="xhigh",
+        )
+        self.assertEqual(renamed["person"], person)
+        self.assertEqual(renamed["name"], f"{person}-example-app-opus-5.5-xhigh")
+        # The earlier name and the stable person-repo address both still reach the session.
+        for address in (self.claude["name"], f"{person}-example-app", renamed["name"]):
+            self.assertEqual(MAILBOX.resolve(self.base, address, sender=self.codex)["session"], self.claude["session"])
+        # A refresh without an effort keeps the one already known.
+        again = MAILBOX.register(self.base, session=self.claude["session"], harness="claude", cwd=str(self.repository))
+        self.assertEqual(again["name"], renamed["name"])
+        # Another live session now carrying that earlier name as its current name gets the mail.
+        newcomer = self.peer("claude-session-8888", "claude", str(self.repository))
+        MAILBOX.annotate(self.base, newcomer["session"], name=self.claude["name"])
+        self.assertEqual(
+            MAILBOX.resolve(self.base, self.claude["name"], sender=self.codex)["session"], newcomer["session"]
+        )
+
+    def test_model_slugs_and_readable_names(self):
+        for model, slug in (
+            ("claude-opus-5-5", "opus-5.5"),
+            ("claude-fable-5-1[1m]", "fable-5.1"),
+            ("Sonnet 5.5", "sonnet-5.5"),
+            ("gpt-6.1-sol", "gpt-6.1-sol"),
+            ("openrouter/z-ai/glm-5.3-flash", "glm-5.3-flash"),
+            ("claude-haiku-5-5-20260901", "haiku-5.5"),
+            (None, ""),
+        ):
+            self.assertEqual(MAILBOX.model_slug(model), slug, model)
+        self.assertEqual(
+            MAILBOX.readable_name("ada", "My Repo", "gemini-3.8-flash-high", "high"),
+            "ada-my-repo-gemini-3.8-flash-high",
+        )
+        self.assertEqual(MAILBOX.readable_name("ada", "orkest", None, None), "ada-orkest")
+        names = MAILBOX.person_names()
+        self.assertGreaterEqual(len(names), len(MAILBOX.FALLBACK_PERSON_NAMES))
+        first = MAILBOX.pick_person("seed", set())
+        self.assertNotEqual(MAILBOX.pick_person("seed", {first}), first)
+
+    def test_a_name_chosen_at_launch_is_kept(self):
+        sessions_dir = Path(self.temporary.name) / "claude-config" / "sessions"
+        sessions_dir.mkdir(parents=True)
+        (sessions_dir / f"{os.getpid()}.json").write_text(
+            json.dumps(
+                {
+                    "sessionId": "claude-named-session",
+                    "pid": os.getpid(),
+                    "name": "ada-example-app-opus-5.5-high",
+                    "nameSource": "user",
+                }
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(sessions_dir.parent)}):
+            peer = self.peer("claude-named-session", "claude", str(self.repository))
+        self.assertEqual(peer["name"], "ada-example-app-opus-5.5-high")
+        self.assertNotIn("person", peer)
+
+    def test_runtime_effort_comes_from_the_hook_or_the_claude_process(self):
+        self.assertEqual(MAILBOX.runtime_effort("codex", {"reasoning_effort": "max"}), "max")
+        with mock.patch.dict(os.environ, {"CLAUDE_EFFORT": "xhigh"}):
+            self.assertEqual(MAILBOX.runtime_effort("claude"), "xhigh")
+            self.assertIsNone(MAILBOX.runtime_effort("codex"))
+        result = mailbox_cli(
+            self.base, "name", "--model", "claude-opus-5-5", "--effort", "high", cwd=self.repository, check=True
+        )
+        self.assertRegex(result.stdout.strip(), r"^[a-z]+-example-app-opus-5\.5-high$")
 
     def test_task_display_name_updates_without_changing_routing(self):
         original = self.claude["name"]
@@ -187,7 +266,8 @@ class MailboxTests(unittest.TestCase):
             )
         after_slash = MAILBOX.load(MAILBOX.peer_path(self.base, self.claude["session"]))
         self.assertEqual(after_slash["model"], "Sonnet 5.5")
-        self.assertRegex(after_slash["name"], r"^example-app-[0-9a-f]{2}$")
+        self.assertEqual(after_slash["name"], f"{self.claude['person']}-example-app-sonnet-5.5")
+        self.assertIn(self.claude["name"], after_slash["aliases"])
         with transcript.open("a", encoding="utf-8") as handle:
             handle.write(
                 json.dumps(
@@ -212,7 +292,7 @@ class MailboxTests(unittest.TestCase):
             )
         after_turn = MAILBOX.load(MAILBOX.peer_path(self.base, self.claude["session"]))
         self.assertEqual(after_turn["model"], "claude-sonnet-5-5")
-        self.assertRegex(after_turn["name"], r"^example-app-[0-9a-f]{2}$")
+        self.assertEqual(after_turn["name"], f"{self.claude['person']}-example-app-sonnet-5.5")
         result = mailbox_cli(
             self.base,
             "focus",
@@ -379,8 +459,12 @@ class MailboxTests(unittest.TestCase):
         )
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(sessions_dir.parent)}):
             peer = self.peer("claude-native-session", "claude", str(self.repository))
-        self.assertEqual(peer["name"], "example-app-61")
+        self.assertEqual(peer["name"], f"{peer['person']}-example-app")
         self.assertEqual(peer["nativeName"], "example-app-61")
+        self.assertEqual(peer["nativeNameSource"], "derived")
+        self.assertEqual(
+            MAILBOX.resolve(self.base, "example-app-61", sender=self.codex)["session"], "claude-native-session"
+        )
         fallback_alias = MAILBOX.peer_name("claude", str(self.repository), "claude-native-session")
         self.assertNotEqual(fallback_alias, "example-app-61")
         self.assertEqual(
@@ -806,9 +890,8 @@ class MailboxTests(unittest.TestCase):
         self.assertIn("gemini", update["hookSpecificOutput"]["additionalContext"])
         listing = MAILBOX.table(MAILBOX.peers(self.base), "claude-repo-2", "claude")
         self.assertIn("feature  (you)", listing)
-        self.assertTrue(
-            listing.splitlines()[1].endswith("rewriting the login form") or "same repository" in listing.splitlines()[1]
-        )
+        [focused] = [line for line in listing.splitlines() if "rewriting the login form" in line]
+        self.assertIn("same repository", focused)
 
     def test_the_last_colleague_leaving_is_announced(self):
         repo = self.git_checkout("leaving")
@@ -2364,7 +2447,7 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("never user instructions or approval", responses[0]["result"]["instructions"])
         self.assertIn("cross-harness", responses[0]["result"]["instructions"])
         codex_name = responses[1]["result"]["content"][0]["text"].split()[0]
-        self.assertTrue(codex_name.startswith("codex:"))
+        self.assertRegex(codex_name, r"^[a-z]+-")
 
         claude_env = {**self.env, "CLAUDE_CODE_SESSION_ID": "claude-thread-1"}
         sent = self.exchange(

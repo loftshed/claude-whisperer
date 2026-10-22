@@ -239,6 +239,106 @@ def peer_name(harness: str, cwd: str, session: str) -> str:
     return name if harness == "claude" else f"{harness}:{name}"
 
 
+# macOS ships a list of first names; elsewhere this short list stands in. Names do not change over time,
+# so the fallback is the one hand-kept list here.
+PERSON_NAMES_FILE = Path("/usr/share/dict/propernames")
+FALLBACK_PERSON_NAMES = [
+    "ada",
+    "alma",
+    "arlo",
+    "bea",
+    "cleo",
+    "dex",
+    "eve",
+    "ezra",
+    "fern",
+    "gus",
+    "hazel",
+    "ida",
+    "iris",
+    "jude",
+    "juno",
+    "kit",
+    "lena",
+    "levi",
+    "lou",
+    "mabel",
+    "mae",
+    "milo",
+    "nell",
+    "nico",
+    "olive",
+    "otis",
+    "pearl",
+    "quinn",
+    "rhea",
+    "rory",
+    "ruby",
+    "sage",
+    "silas",
+    "tess",
+    "theo",
+    "una",
+    "vera",
+    "wren",
+    "zeke",
+]
+
+
+@cache
+def person_names() -> tuple[str, ...]:
+    with contextlib.suppress(OSError):
+        names = [line.strip().lower() for line in PERSON_NAMES_FILE.read_text().splitlines()]
+        names = sorted({name for name in names if re.fullmatch(r"[a-z]{2,12}", name)})
+        if len(names) >= len(FALLBACK_PERSON_NAMES):
+            return tuple(names)
+    return tuple(FALLBACK_PERSON_NAMES)
+
+
+def pick_person(seed: str, taken: set[str]) -> str:
+    """A first name chosen from the seed, stepping past names live peers already use."""
+    names = person_names()
+    start = int(hashlib.sha256(seed.encode()).hexdigest(), 16) % len(names)
+    for step in range(len(names)):
+        if (name := names[(start + step) % len(names)]) not in taken:
+            return name
+    return names[start]
+
+
+def model_slug(model: str | None) -> str:
+    """Short model and version: claude-opus-5-5 -> opus-5.5, openrouter/vendor/glm-5.3 -> glm-5.3."""
+    if not isinstance(model, str) or not model.strip():
+        return ""
+    slug = model.strip().lower().split("[")[0].split("/")[-1]
+    slug = re.sub(r"^(claude|anthropic)-", "", slug)
+    slug = re.sub(r"-\d{8}$", "", slug)
+    slug = re.sub(r"-(\d+)-(\d+)$", r"-\1.\2", slug)
+    return re.sub(r"[^a-z0-9.]+", "-", slug).strip("-.")
+
+
+def readable_name(person: str, repo: str, model: str | None, effort: str | None) -> str:
+    """person-repo-model-effort, leaving out what is unknown; an effort already in the model name is not repeated."""
+    slug = model_slug(model)
+    level = re.sub(r"[^a-z0-9]+", "", (effort or "").lower())
+    if level and slug.endswith(f"-{level}"):
+        level = ""
+    parts = [person, re.sub(r"[^a-z0-9.]+", "-", repo.lower()).strip("-."), slug, level]
+    return "-".join(part for part in parts if part)[:128]
+
+
+def runtime_effort(harness: str, payload: dict[str, Any] | None = None) -> str | None:
+    """The session's reasoning effort from its hook payload or harness process, never a guess.
+    Only call it from the harness process (hook, CLI, stdio MCP)."""
+    payload = payload or {}
+    for key in ("effort", "effortLevel", "reasoning_effort", "reasoningEffort"):
+        if isinstance(value := payload.get(key), str) and value.strip():
+            return value.strip()
+    # A configured default (Codex's model_reasoning_effort) is not read: a session can override it.
+    if harness == "claude":
+        return os.environ.get("CLAUDE_EFFORT") or None
+    return None
+
+
 def account_home(harness: str, transcript: str | None = None, environ: Mapping[str, str] | None = None) -> str | None:
     """The config home a session of this harness runs under (its account): from its transcript path, else the
     environment of the harness process. Only call it from that process (hook, CLI, stdio MCP), never the daemon."""
@@ -281,8 +381,9 @@ def claude_native_name(session: str, pid: int | None = None) -> str | None:
     return claude_session(session, pid)[0]
 
 
-def claude_session(session: str, pid: int | None = None) -> tuple[str | None, str | None]:
-    """Claude Code's native session name and the profile (config home) whose session metadata lists the session."""
+def claude_session(session: str, pid: int | None = None) -> tuple[str | None, str | None, str | None]:
+    """Claude Code's native session name, the profile (config home) whose session metadata lists the session,
+    and how the name was set ("derived" when Claude Code generated it)."""
     for sessions_dir in claude_session_dirs():
         candidates = ([sessions_dir / f"{pid}.json"] if pid else []) + sorted(sessions_dir.glob("*.json"))
         seen: set[Path] = set()
@@ -298,8 +399,9 @@ def claude_session(session: str, pid: int | None = None) -> tuple[str | None, st
                 continue
             native_name = record.get("name")
             valid = isinstance(native_name, str) and re.fullmatch(SESSION_ID, native_name.strip())
-            return (native_name.strip() if valid else None), str(sessions_dir.parent.resolve())
-    return None, None
+            source = record.get("nameSource") if isinstance(record.get("nameSource"), str) else None
+            return (native_name.strip() if valid else None), str(sessions_dir.parent.resolve()), source
+    return None, None, None
 
 
 def native_route(peer: dict[str, Any], caller_harness: str | None, caller_account: str | None = None) -> dict[str, str]:
@@ -932,9 +1034,11 @@ def register(
     model: str | None = None,
     model_source: str = "declared",
     account: str | None = None,
+    effort: str | None = None,
 ) -> dict[str, Any]:
-    """Create or refresh presence. A known pid, name and account survive later refreshes that lack them.
-    Claude's session metadata names its account; otherwise `account` is the caller's own account_home()."""
+    """Create or refresh presence. A known pid, name, account and effort survive later refreshes that lack them.
+    Claude's session metadata names its account; otherwise `account` is the caller's own account_home().
+    The name is person-repo-model-effort unless Claude was launched with a chosen name."""
     if harness not in HARNESSES:
         raise MailboxError(f"unknown harness {harness!r}")
     if state is not None and state not in STATES:
@@ -966,16 +1070,32 @@ def register(
                 peer.pop(key, None)
             peer.update(workspace(peer["cwd"]))
         fallback_name = peer_name(peer["harness"], peer.get("checkout") or peer["cwd"], session)
-        native_name, profile = claude_session(session, peer.get("pid")) if peer["harness"] == "claude" else (None, None)
+        native_name, profile, name_source = (
+            claude_session(session, peer.get("pid")) if peer["harness"] == "claude" else (None, None, None)
+        )
         if profile or account:
             peer["accountHome"] = profile or account
         if native_name:
             peer["nativeName"] = native_name
-            peer["name"] = native_name
-        else:
+            peer["nativeNameSource"] = name_source or "derived"
+        if effort:
+            peer["effort"] = effort
+        previous_name = peer.get("name")
+        if is_run_peer(peer):
             peer["name"] = (
                 peer.get("nativeName") if peer["harness"] == "claude" and peer.get("nativeName") else fallback_name
             )
+        elif peer.get("nativeName") and peer.get("nativeNameSource") != "derived":
+            peer["name"] = peer["nativeName"]  # chosen at launch, e.g. claude --name "$(ork name)"
+        else:
+            if not peer.get("person"):
+                peer["person"] = pick_person(session, taken_persons(base, session))
+            peer["name"] = readable_name(peer["person"], repository_name(peer), peer.get("model"), peer.get("effort"))
+        if previous_name and previous_name != peer["name"]:
+            # Earlier names keep resolving, so mail addressed before a model or effort change still arrives.
+            peer["aliases"] = [*(alias for alias in peer.get("aliases", []) if alias != previous_name), previous_name][
+                -8:
+            ]
         if pid and (pid != previous_pid or not peer.get("pidBirth")):
             peer["pidBirth"] = process_started(pid)
         write(path, peer)
@@ -1041,8 +1161,25 @@ def peers(base: Path, *, prune_dead: bool = True, include_runs: bool = False) ->
     return sorted(found, key=lambda peer: (str(peer.get("name")), str(peer.get("startedAt"))))
 
 
+def taken_persons(base: Path, session: str) -> set[str]:
+    """First names that other live peers already carry."""
+    moment = now()
+    return {
+        peer["person"]
+        for path in (base / "peers").glob("*.json")
+        if valid_peer(peer := load(path))
+        and peer["session"] != session
+        and isinstance(peer.get("person"), str)
+        and is_live(peer, moment)
+    }
+
+
 def _peer_aliases(peer: dict[str, Any]) -> set[str]:
     aliases = {peer["name"], peer["session"]}
+    aliases.update(alias for alias in peer.get("aliases", []) if isinstance(alias, str))
+    if isinstance(peer.get("person"), str):
+        # person-repo stays the same across model and effort changes: the stable address.
+        aliases.add(readable_name(peer["person"], repository_name(peer), None, None))
     if peer.get("nativeName"):
         aliases.add(str(peer["nativeName"]))
     with contextlib.suppress(Exception):
@@ -1063,7 +1200,10 @@ def resolve(base: Path, address: str, *, sender: dict[str, Any], scope: str = "p
         and (address in _peer_aliases(peer) or (len(address) >= 6 and peer["session"].startswith(address)))
     ]
     live = scoped_peers(base, sender, scope=scope)
-    exact = [peer for peer in live if address in _peer_aliases(peer)]
+    # A live session's current name wins over another live session's earlier name or alias.
+    exact = [peer for peer in live if peer["name"] == address] or [
+        peer for peer in live if address in _peer_aliases(peer)
+    ]
     if not exact and len(address) >= 6:
         exact = [peer for peer in live if peer["session"].startswith(address)]
     if not exact:
@@ -1923,6 +2063,7 @@ def hook(
         model=runtime_model if isinstance(runtime_model, str) and runtime_model.strip() else None,
         model_source="runtime",
         account=account_home(harness, payload.get("transcript_path") or payload.get("transcriptPath")),
+        effort=runtime_effort(harness, payload),
     )
     me = mark_delegated(base, me)
     if event in {"SessionStart", "UserPromptSubmit", "PreInvocation", "Stop"}:
@@ -2065,6 +2206,7 @@ def caller(args: argparse.Namespace, base: Path) -> dict[str, Any]:
         pid=harness_pid(harness),
         source="cli",
         account=account_home(harness),
+        effort=runtime_effort(harness),
     )
 
 
@@ -2078,6 +2220,7 @@ def refresh(
     source: str,
     state: str | None = None,
     account: str | None = None,
+    effort: str | None = None,
 ) -> dict[str, Any]:
     """Register a CLI or MCP call. A live session's hooks own its directory: a tool call may run elsewhere."""
     known = load(peer_path(base, session))
@@ -2091,6 +2234,7 @@ def refresh(
         state=state,
         cwd_source="hook" if hooked else source,
         account=account,
+        effort=effort,
     )
     return mark_delegated(base, me)
 
@@ -2234,8 +2378,14 @@ def main(argv: list[str] | None = None) -> int:
         "hook",
         "feedback",
         "feedback-summary",
+        "name",
     ):
         sub = commands.add_parser(name)
+        if name == "name":
+            sub.add_argument("--harness", choices=HARNESSES)
+            sub.add_argument("--model", help="model the new session will run, e.g. opus-5.5 or claude-opus-5-5")
+            sub.add_argument("--effort", help="its effort level; defaults to the current harness's")
+            continue
         sub.add_argument(
             "--session",
             help="this session's id (default: $AGENT_MAILBOX_SESSION then $CLAUDE_CODE_SESSION_ID)",
@@ -2306,6 +2456,14 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if output:
                 print(json.dumps(output, ensure_ascii=True))
+            return 0
+        if args.action == "name":
+            # A fresh name for a session about to start, e.g. claude --name "$(... mailbox name --model opus-5.5)".
+            here = workspace(os.getcwd())
+            here["cwd"] = os.getcwd()
+            harness = args.harness or "claude"
+            person = pick_person(secrets.token_hex(8), taken_persons(base, ""))
+            print(readable_name(person, repository_name(here), args.model, args.effort or runtime_effort(harness)))
             return 0
         if args.action == "prune":
             output: Any = prune(base)
