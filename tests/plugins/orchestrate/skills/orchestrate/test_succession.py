@@ -7,6 +7,7 @@ import datetime as dt
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -44,6 +45,9 @@ class SuccessionTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.claude_home = self.root / "claude-personal"
         self.claude_home.mkdir()
+        self.repo = self.root / "repo"
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        self.git_dir = str((self.repo / ".git").resolve())
         self.config = {
             "maxAgeSeconds": 180,
             "accounts": [
@@ -87,7 +91,7 @@ class SuccessionTests(unittest.TestCase):
             MAILBOX.root(),
             session=LEAD,
             harness="claude",
-            cwd=self.temporary.name,
+            cwd=str(self.repo),
             pid=os.getpid(),
             model="claude-opus-5-5",
             account=str(self.claude_home),
@@ -150,11 +154,13 @@ class SuccessionTests(unittest.TestCase):
             "codex:codex",
             "--standing-takeover",
             standing,
+            "--repository",
+            self.git_dir,
         )
 
-    def deputy_session(self):
+    def deputy_session(self, session=DEPUTY, cwd=None):
         return MAILBOX.register(
-            MAILBOX.root(), session=DEPUTY, harness="codex", cwd=self.temporary.name, pid=os.getpid(), account="/x"
+            MAILBOX.root(), session=session, harness="codex", cwd=str(cwd or self.repo), pid=os.getpid(), account="/x"
         )
 
     def quiet_lead(self, seconds=3600):
@@ -308,7 +314,7 @@ class SuccessionTests(unittest.TestCase):
             MAILBOX.root(),
             session="claude-other",
             harness="claude",
-            cwd=self.temporary.name,
+            cwd=str(self.repo),
             account=str(self.claude_home),
         )
         refused = self.authority(
@@ -328,8 +334,8 @@ class SuccessionTests(unittest.TestCase):
 
     # Hook notices
 
-    def hook(self, session, harness):
-        payload = {"hook_event_name": "UserPromptSubmit", "session_id": session, "cwd": self.temporary.name}
+    def hook(self, session, harness, cwd=None):
+        payload = {"hook_event_name": "UserPromptSubmit", "session_id": session, "cwd": str(cwd or self.repo)}
         with (
             mock.patch.object(MAILBOX, "harness_pid", return_value=os.getpid()),
             mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]),
@@ -361,6 +367,124 @@ class SuccessionTests(unittest.TestCase):
         self.assertIn("the lead's pool claude-personal:all is blocked", notice)
         self.assertIn("--standing", notice)
         self.assertNotIn("Team team", self.hook(DEPUTY, "codex"))
+
+    def test_another_repository_on_the_same_account_is_not_the_deputy(self) -> None:
+        self.appoint()
+        elsewhere = self.root / "work-repo"
+        subprocess.run(["git", "init", "-q", str(elsewhere)], check=True)
+        self.deputy_session("codex-elsewhere", cwd=elsewhere)
+        self.set_lane("claude-personal", "all", status="blocked", usable=0)
+        self.quiet_lead()
+        self.assertNotIn("Team team", self.hook("codex-elsewhere", "codex", cwd=elsewhere))
+        refused = self.authority(
+            "takeover",
+            "--team",
+            "team",
+            "--session",
+            "codex-elsewhere",
+            "--harness",
+            "codex",
+            "--expect-generation",
+            "1",
+            "--standing",
+            ok=False,
+        )
+        self.assertIn("team's repository", refused)
+
+    def test_a_process_that_cannot_be_checked_counts_as_running(self) -> None:
+        peer = {"pid": os.getpid(), "pidBirth": "Thu Oct 22 00:00:00 2026"}
+        with mock.patch.object(MAILBOX, "process_started", return_value=None):
+            self.assertFalse(SUCCESSION.pid_replaced(peer))
+        with mock.patch.object(MAILBOX, "pid_alive", return_value=None):
+            self.assertFalse(SUCCESSION.pid_replaced(peer))
+        with mock.patch.object(MAILBOX, "pid_alive", return_value=False):
+            self.assertTrue(SUCCESSION.pid_replaced(peer))
+
+    def test_a_stale_deputy_pool_is_not_healthy(self) -> None:
+        self.appoint()
+        self.deputy_session()
+        self.quiet_lead()
+        self.set_lane("claude-personal", "all", status="blocked", usable=0)
+        self.set_lane("codex", "codex", stale=True)
+        self.assertIn("the deputy's own pool is unknown", self.standing_takeover())
+
+    def test_an_offer_made_during_the_monitor_read_wins(self) -> None:
+        self.appoint()
+        self.deputy_session()
+        self.quiet_lead()
+        self.set_lane("claude-personal", "all", status="blocked", usable=0)
+        succession = AUTHORITY.module("succession")
+        real = succession.fresh_view
+
+        def returning_lead():
+            AUTHORITY.offer("team", LEAD, 1, AUTHORITY.member("someone", "claude"))
+            return real()
+
+        with mock.patch.object(succession, "fresh_view", returning_lead):
+            self.assertIn("already offered", self.standing_takeover())
+
+    def test_set_billing_never_changes_an_existing_context(self) -> None:
+        refused = self.authority("set-billing", "--account", "codex", "--billing", "work", ok=False)
+        self.assertIn("already personal", refused)
+        self.authority("set-billing", "--account", "codex", "--billing", "personal")
+
+    def test_a_lead_without_a_deputy_is_told_once(self) -> None:
+        self.authority(
+            "appoint",
+            "--team",
+            "team",
+            "--lead-session",
+            LEAD,
+            "--lead-harness",
+            "claude",
+            "--lead-pool",
+            "claude-personal:all",
+            "--repository",
+            self.git_dir,
+        )
+        self.assertIn("has no deputy", self.hook(LEAD, "claude"))
+        self.assertNotIn("has no deputy", self.hook(LEAD, "claude"))
+
+    def test_proposed_deputy_sessions_are_in_the_teams_repository(self) -> None:
+        elsewhere = self.root / "other-repo"
+        subprocess.run(["git", "init", "-q", str(elsewhere)], check=True)
+        self.deputy_session("codex-here")
+        self.deputy_session("codex-there", cwd=elsewhere)
+        worker = self.deputy_session("codex-worker")
+        MAILBOX.annotate(MAILBOX.root(), worker["session"], delegatedRun="run-1")
+        proposal = SUCCESSION.propose(
+            {
+                "session": LEAD,
+                "harness": "claude",
+                "model": "claude-opus-5-5",
+                "accountHome": str(self.claude_home),
+                "repo": self.git_dir,
+            },
+            view=SUCCESSION.fresh_view(),
+            config=SUCCESSION.monitor_config(),
+            routes={},
+            peers=MAILBOX.peers(MAILBOX.root()),
+        )
+        self.assertEqual([s["session"] for s in proposal["deputy"]["sessions"]], ["codex-here"])
+
+    def test_the_deputy_is_told_only_when_a_standing_takeover_would_pass(self) -> None:
+        self.appoint()
+        self.deputy_session()
+        self.quiet_lead()
+        self.set_lane("claude-personal", "all", status="credits", usable=0)
+        # On credits with the lead's process alive, a takeover would be refused: no notice, nothing latched.
+        self.assertNotIn("Team team", self.hook(DEPUTY, "codex"))
+        MAILBOX.annotate(MAILBOX.root(), LEAD, pid=2**22 - 3)
+        self.assertIn("is credits", self.hook(DEPUTY, "codex"))
+
+    def test_an_offered_deputy_is_told_to_review_and_accept(self) -> None:
+        self.appoint()
+        self.deputy_session()
+        AUTHORITY.offer("team", LEAD, 1, AUTHORITY.member(DEPUTY, "codex"))
+        notice = self.hook(DEPUTY, "codex")
+        self.assertIn("offered you the handover", notice)
+        self.assertIn("authority.py accept --team team", notice)
+        self.assertNotIn("offered you the handover", self.hook(DEPUTY, "codex"))
 
     def test_no_monitor_cache_means_no_check(self) -> None:
         self.appoint()

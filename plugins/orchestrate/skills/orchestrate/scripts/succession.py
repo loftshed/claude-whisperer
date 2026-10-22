@@ -86,7 +86,7 @@ def cached_view() -> dict[str, Any] | None:
             [command, "json", "--max-age", "1000000000"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=3,  # well inside the turn hook's own time limit
             env={**os.environ, "NO_COLOR": "1"},
             check=False,
         )
@@ -166,11 +166,20 @@ def rank(pool: dict[str, Any]) -> tuple:
     return (pool["status"] == "low", -(pool.get("surplusPts") or 0), -(pool.get("availableNowPct") or 0))
 
 
-def sessions_on(account_id: str, provider: str | None, peers: list[dict[str, Any]], config: dict[str, Any]) -> list:
-    """Live sessions that draw on this account."""
+def sessions_on(
+    account_id: str, provider: str | None, peers: list[dict[str, Any]], config: dict[str, Any], repository: str | None
+) -> list:
+    """Live interactive sessions in the team's repository that draw on this account."""
     found = []
+    mailbox = module("peer_mailbox")
     for peer in peers:
-        if HARNESS_PROVIDER.get(peer.get("harness")) != provider:
+        if (
+            HARNESS_PROVIDER.get(peer.get("harness")) != provider
+            or peer.get("delegatedRun")
+            or mailbox.is_run_peer(peer)
+        ):
+            continue
+        if not same_repository(peer.get("repo"), repository):
             continue
         if account_of(peer["harness"], peer.get("accountHome"), config)[0] == account_id:
             found.append({"session": peer["session"], "name": peer.get("name"), "harness": peer["harness"]})
@@ -230,7 +239,7 @@ def propose(
     result["deputy"] = {
         **deputy,
         "harness": next(harness for harness, provider in HARNESS_PROVIDER.items() if provider == deputy["provider"]),
-        "sessions": sessions_on(deputy["accountId"], deputy["provider"], peers, config),
+        "sessions": sessions_on(deputy["accountId"], deputy["provider"], peers, config, lead.get("repo")),
     }
     if not result["deputy"]["sessions"]:
         result["deputy"]["note"] = "no live session draws on this pool: start one before you need it"
@@ -256,44 +265,67 @@ def propose(
 
 
 def pid_replaced(peer: dict[str, Any] | None) -> bool:
-    """Whether a session's recorded process is gone or another process now has its pid."""
+    """Whether a session's recorded process is verifiably gone, or another process now has its pid.
+    A process that cannot be checked counts as still running: unknown never takes authority away."""
     if not peer or not peer.get("pid"):
         return True
     mailbox = module("peer_mailbox")
-    if mailbox.pid_alive(peer["pid"]) is False:
+    alive = mailbox.pid_alive(peer["pid"])
+    if alive is False:
         return True
-    return bool(peer.get("pidBirth")) and mailbox.process_started(peer["pid"]) != peer["pidBirth"]
+    if alive is None or not peer.get("pidBirth"):
+        return False
+    started = mailbox.process_started(peer["pid"])
+    return started is not None and started != peer["pidBirth"]
 
 
-def standing_evidence(
-    record: dict[str, Any], *, view: dict[str, Any] | None, config: dict[str, Any], moment: dt.datetime | None = None
-) -> list[str]:
-    """Why a standing takeover is not justified now; an empty list means it is. Unknown never qualifies."""
-    moment = moment or now()
+def monitor_evidence(
+    record: dict[str, Any],
+    *,
+    view: dict[str, Any] | None,
+    config: dict[str, Any],
+    moment: dt.datetime,
+    fresh_required: bool = True,
+) -> tuple[list[str], str | None]:
+    """The pool half of a standing takeover's evidence (slow: it needs monitor), and the lead pool's status.
+    A hook reading monitor's cache passes fresh_required=False: the takeover itself re-reads fresh data."""
     rule = record.get("standing")
-    reasons: list[str] = []
     if not rule:
-        return ["the appointment records no standing takeover rule; the user must approve a takeover"]
+        return ["the appointment records no standing takeover rule; the user must approve a takeover"], None
     if view is None:
-        return ["monitor did not answer: the lead's pool is unknown"]
+        return ["monitor did not answer: the lead's pool is unknown"], None
     by_key = {pool["pool"]: pool for pool in pools(view, config)}
     lead_pool = by_key.get(record["lead"].get("pool") or "")
     if lead_pool is None:
-        return [f"monitor reports no pool {record['lead'].get('pool')} for the lead"]
-    if lead_pool["stale"]:
+        return [f"monitor reports no pool {record['lead'].get('pool')} for the lead"], None
+    if lead_pool["stale"] and fresh_required:
         # Exhaustion may have passed since: only fresh data takes authority from a lead.
-        return ["the lead's pool is unknown: monitor's data for it is stale"]
+        return ["the lead's pool is unknown: monitor's data for it is stale"], None
+    reasons = []
     if lead_pool["status"] not in rule["statuses"]:
         reasons.append(f"the lead's pool is {lead_pool['status']}, not {' or '.join(rule['statuses'])}")
     until = parse_time(lead_pool.get("blockedUntil"))
     if lead_pool["status"] == "blocked" and until is not None and until <= moment:
         reasons.append("the lead's pool has already reset")
+    deputy_pool = by_key.get((record.get("deputy") or {}).get("pool") or "")
+    if deputy_pool is None or (deputy_pool["stale"] and fresh_required):
+        reasons.append("the deputy's own pool is unknown")
+    elif deputy_pool["status"] not in USABLE:
+        reasons.append("the deputy's own pool has no room now")
+    reasons += context_changes(record, by_key)
+    return reasons, lead_pool["status"]
+
+
+def local_evidence(record: dict[str, Any], *, lead_status: str | None, moment: dt.datetime) -> list[str]:
+    """The fast half, re-read under the team lock: these change without a new generation."""
+    rule = record.get("standing") or {"seconds": 0}
+    reasons = []
     mailbox = module("peer_mailbox")
     lead_peer = mailbox.load(mailbox.peer_path(mailbox.root(), record["lead"]["session"]))
     seen = parse_time((lead_peer or {}).get("lastSeenAt"))
     if seen is not None and (moment - seen).total_seconds() < rule["seconds"]:
         reasons.append(f"the lead was active {int((moment - seen).total_seconds())} s ago")
-    if lead_pool["status"] == "credits" and not pid_replaced(lead_peer):
+    if lead_status == "credits" and not pid_replaced(lead_peer):
         # A lead on credits can still act, and a waiting lead looks idle: only a gone process counts.
         reasons.append("the lead's process is still running; on credits only the user can approve a takeover")
     for task in module("authority").tasks(record):
@@ -304,11 +336,22 @@ def standing_evidence(
     offer = record.get("offer") or {}
     if offer.get("to"):
         reasons.append(f"a handover is already offered to {offer['to']['session']}")
-    deputy_pool = by_key.get((record.get("deputy") or {}).get("pool") or "")
-    if deputy_pool is None or deputy_pool["status"] not in USABLE:
-        reasons.append("the deputy's own pool has no room now")
-    reasons += context_changes(record, by_key)
     return reasons
+
+
+def standing_evidence(
+    record: dict[str, Any], *, view: dict[str, Any] | None, config: dict[str, Any], moment: dt.datetime | None = None
+) -> list[str]:
+    """Why a standing takeover is not justified now; an empty list means it is. Unknown never qualifies."""
+    moment = moment or now()
+    reasons, lead_status = monitor_evidence(record, view=view, config=config, moment=moment)
+    if lead_status is None:
+        return reasons
+    return reasons + local_evidence(record, lead_status=lead_status, moment=moment)
+
+
+def same_repository(left: str | None, right: str | None) -> bool:
+    return bool(left and right) and Path(left).resolve() == Path(right).resolve()
 
 
 def context_changes(record: dict[str, Any], by_key: dict[str, dict[str, Any]]) -> list[str]:
@@ -330,6 +373,11 @@ def set_billing(account_id: str, billing: str) -> None:
     account = next((a for a in config.get("accounts", []) if a.get("id") == account_id), None)
     if account is None:
         raise ValueError(f"monitor has no account '{account_id}'")
+    if account.get("billing") == billing:
+        return
+    if account.get("billing"):
+        # Moving an account between work and personal is the user's own edit, never an agent's call.
+        raise ValueError(f"account '{account_id}' is already {account['billing']}; change it by hand if it is wrong")
     account["billing"] = billing
     temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
     temporary.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")

@@ -243,16 +243,18 @@ monitor's pools (`accountId:poolId`), each account's context (monitor's `billing
 the route table and live sessions. The deputy draws on another account in the same context with room
 now (two pools of one login fail together); worker pools stay off the lead's and deputy's pools while
 another fits. Anything unknown refuses with a fix: an account without `billing` is never a candidate
-until the user names its context (`authority.py set-billing --account A --billing work|personal`). The
+until the user names its context, and an existing context is never changed this way (`authority.py set-billing --account A --billing work|personal`). The
 output ends with the `appoint` command, including `--lead-pool`, `--deputy-pool` and an optional
 `--standing-takeover blocked,credits:SECONDS`; appointing records each account's context.
 
-`takeover --standing` (no `--user-approved`) works only under that rule, for a session on the deputy's
+`takeover --standing` (no `--user-approved`) works only under that rule, for a session in the team's
+repository (recorded at appointment) on the deputy's
 account, when monitor reports the lead's pool exhausted with fresh data, the lead has been quiet for
 the rule's seconds, no team task has a recently updated live run, and no handover is already offered.
 On credits the lead's process must also be gone, since a lead on credits can still act. A changed
 account context refuses. It still lands as pending: `show`, then `accept`. Taking over clears the
-deputy: naming the next one is a new appointment.
+deputy: naming the next one is a new appointment, so `accept` prints a fresh proposal and the new
+lead's hook says it has no deputy.
 
 The mailbox hook tells a team's lead, once per status change, when its pool runs low or out (checkpoint,
 then `offer`), and tells the deputy when the lead's pool is exhausted and the lead has gone quiet (a lead

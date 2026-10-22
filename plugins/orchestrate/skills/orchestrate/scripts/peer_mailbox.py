@@ -2259,12 +2259,16 @@ def succession_notice(base: Path, me: dict[str, Any]) -> str:
         deputy = record.get("deputy") or {}
         if record["lead"]["session"] == me["session"]:
             roles.append(("lead", record))
-        elif deputy.get("session") == me["session"] or (
-            not deputy.get("session")
-            and deputy.get("harness") == me["harness"]
-            and deputy.get("account")
-            and succession.account_of(me["harness"], me.get("accountHome"), config)[0] == deputy["account"]
+        elif succession.same_repository(me.get("repo"), record.get("repository")) and (
+            deputy.get("session") == me["session"]
+            or (
+                not deputy.get("session")
+                and deputy.get("harness") == me["harness"]
+                and deputy.get("account")
+                and succession.account_of(me["harness"], me.get("accountHome"), config)[0] == deputy["account"]
+            )
         ):
+            # Only in the team's own repository: one Codex or Antigravity login serves work and personal repos.
             roles.append(("deputy", record))
     if not roles:
         return ""
@@ -2284,6 +2288,14 @@ def succession_notice(base: Path, me: dict[str, Any]) -> str:
             continue
         status, key = lead_pool["status"], f"{record['team']}:{role}"
         deputy = record.get("deputy") or {}
+        if deputy:
+            notified.pop(f"{team}:no-deputy", None)
+        if role == "lead" and not deputy and not notified.get(f"{team}:no-deputy"):
+            lines.append(
+                f"Team {team} has no deputy, so nobody can take over if your pool runs out. Run authority.py "
+                f"propose --session {me['session']} --harness {me['harness']} and ask the user to appoint one."
+            )
+            notified[f"{team}:no-deputy"] = "told"
         if role == "lead":
             if status in ("low", *succession.EXHAUSTED) and notified.get(key) != status:
                 to = (
@@ -2298,24 +2310,45 @@ def succession_notice(base: Path, me: dict[str, Any]) -> str:
                 )
             notified[key] = status
             continue
+        offered = (record.get("offer") or {}).get("to") or {}
+        if offered.get("session") == me["session"]:
+            told = f"{team}:offer:{record['generation']}"
+            if not notified.get(told):
+                lines.append(
+                    f"Team {team}: the lead offered you the handover. Run authority.py show --team {team} --harness "
+                    f"{me['harness']}, review it, then authority.py accept --team {team} --session {me['session']} "
+                    f"--harness {me['harness']} --expect-generation {record['generation']} --digest DIGEST."
+                )
+                notified[told] = "told"
+            continue
         rule = record.get("standing")
         statuses = rule["statuses"] if rule else list(succession.EXHAUSTED)
         lead_peer = load(peer_path(base, record["lead"]["session"]))
         seen = succession.parse_time((lead_peer or {}).get("lastSeenAt"))
         quiet = None if seen is None else int((now() - seen).total_seconds())
-        if status in statuses and (quiet is None or quiet >= (rule["seconds"] if rule else 0)):
-            if notified.get(key) != status:
-                how = "--standing" if rule else "--user-approved, after asking the user"
-                lines.append(
-                    f"Team {team}: the lead's pool {lead_pool['pool']} is {status} and the lead has been quiet "
-                    + ("since it ended" if quiet is None else f"{quiet} s")
-                    + f". You are its deputy: run authority.py takeover --team {team} --session {me['session']} "
-                    f"--harness {me['harness']} --expect-generation {record['generation']} {how}, then review "
-                    "authority.py show and accept with its digest."
-                )
+        if status not in statuses:
             notified[key] = status
-        elif status not in statuses:
-            notified[key] = status
+            continue
+        if (quiet is not None and quiet < (rule["seconds"] if rule else 0)) or notified.get(key) == status:
+            continue
+        if rule:
+            # Advise a standing takeover only when it would pass now (fresh data is the takeover's own check);
+            # otherwise stay quiet and unlatched, so the notice comes once the blocking condition clears.
+            reasons, lead_status = succession.monitor_evidence(
+                record, view=view, config=config, moment=now(), fresh_required=False
+            )
+            reasons += succession.local_evidence(record, lead_status=lead_status, moment=now())
+            if reasons:
+                continue
+        how = "--standing" if rule else "--user-approved, after asking the user"
+        lines.append(
+            f"Team {team}: the lead's pool {lead_pool['pool']} is {status} and the lead has been quiet "
+            + ("since it ended" if quiet is None else f"{quiet} s")
+            + f". You are its deputy: run authority.py takeover --team {team} --session {me['session']} "
+            f"--harness {me['harness']} --expect-generation {record['generation']} {how}, then review "
+            "authority.py show and accept with its digest."
+        )
+        notified[key] = status
     annotate(base, me["session"], successionNotified=notified)
     return "\n".join(lines)
 
