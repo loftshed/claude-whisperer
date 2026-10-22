@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.29.1
+
+- fix(orchestrate): report the released version in doctor and run records (#19)
+
 ## 0.29.0
 
 - feat(orchestrate): carry a cleared session's requests and tell senders about ended ones (#18)
