@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.26.0
+
+- feat(orchestrate): name peers person-repo-model-effort (#15)
+
 ## 0.25.0
 
 - feat(orchestrate): route mailbox by account, hand native work to the host, add ork rooms (#14)
