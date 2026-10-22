@@ -1200,7 +1200,10 @@ def resolve(base: Path, address: str, *, sender: dict[str, Any], scope: str = "p
         and (address in _peer_aliases(peer) or (len(address) >= 6 and peer["session"].startswith(address)))
     ]
     live = scoped_peers(base, sender, scope=scope)
-    exact = [peer for peer in live if address in _peer_aliases(peer)]
+    # A live session's current name wins over another live session's earlier name or alias.
+    exact = [peer for peer in live if peer["name"] == address] or [
+        peer for peer in live if address in _peer_aliases(peer)
+    ]
     if not exact and len(address) >= 6:
         exact = [peer for peer in live if peer["session"].startswith(address)]
     if not exact:

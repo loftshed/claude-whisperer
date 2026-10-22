@@ -100,6 +100,12 @@ class MailboxTests(unittest.TestCase):
         # A refresh without an effort keeps the one already known.
         again = MAILBOX.register(self.base, session=self.claude["session"], harness="claude", cwd=str(self.repository))
         self.assertEqual(again["name"], renamed["name"])
+        # Another live session now carrying that earlier name as its current name gets the mail.
+        newcomer = self.peer("claude-session-8888", "claude", str(self.repository))
+        MAILBOX.annotate(self.base, newcomer["session"], name=self.claude["name"])
+        self.assertEqual(
+            MAILBOX.resolve(self.base, self.claude["name"], sender=self.codex)["session"], newcomer["session"]
+        )
 
     def test_model_slugs_and_readable_names(self):
         for model, slug in (
