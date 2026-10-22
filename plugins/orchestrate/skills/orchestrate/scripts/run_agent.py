@@ -33,6 +33,30 @@ except ImportError:  # pragma: no cover - Windows falls back to atomic replaceme
     fcntl = None  # type: ignore[assignment]
 
 
+def skill_version(skill_file: Path) -> str:
+    """`metadata.version` from SKILL.md's frontmatter, which the release workflow writes.
+
+    SKILL.md is the one versioned file every install has: the plugin cache, and the skill directory
+    linked on its own into ~/.agents/skills. Copies without it, such as the mailbox daemon's runtime,
+    report "unknown".
+    """
+    try:
+        text = skill_file.read_text(encoding="utf-8")
+    except OSError:
+        return "unknown"
+    if not text.startswith("---\n"):
+        return "unknown"
+    in_metadata = False
+    for line in text[4:].split("\n"):
+        if line.startswith("---"):
+            break
+        if line[:1].strip():
+            in_metadata = line.startswith("metadata:")
+        elif in_metadata and line.strip().startswith("version:"):
+            return line.split(":", 1)[1].strip() or "unknown"
+    return "unknown"
+
+
 DEFAULT_ENGINE = "codex"
 EXECUTION_ENGINES = ("codex", "agy", "opencode", "claude")
 CATALOG_ENGINES = EXECUTION_ENGINES
@@ -100,7 +124,7 @@ MAX_FINAL_MESSAGE_CHARS = 4000
 MAX_COMPLETION_SIGNAL_ERROR_CHARS = 500
 MAX_VERIFICATION_TAIL_BYTES = 64 * 1024
 MAX_VERIFICATION_TAIL_LINE_CHARS = 500
-RUNNER_VERSION = "0.12.0"
+RUNNER_VERSION = skill_version(Path(__file__).resolve().parents[1] / "SKILL.md")
 RESULT_SCHEMA = "agent-executor.result.v2"
 MODEL_CATALOG_SCHEMA = "agent-executor.models.v1"
 MODEL_CACHE_SCHEMA = "agent-executor.model-cache.v1"

@@ -112,7 +112,15 @@ class ContractTests(unittest.TestCase):
         # The model joins the name; the person-repo part the session started with stays.
         self.assertEqual(reader["name"], f"{self.reader['name']}-gpt-6-sol")
         self.assertEqual(reader["checkout"], str(SCRIPTS.parents[4].resolve()))
-        self.assertEqual(reader["repositoryName"], SCRIPTS.parents[4].resolve().name)
+        # The repository is named after its shared Git directory, so a linked worktree keeps the main name.
+        common_dir = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=SCRIPTS,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        self.assertEqual(reader["repositoryName"], Path(common_dir).parent.name)
         self.assertTrue(rows["content"][0]["text"].startswith(args["focus"]))
         self.tool("register", {"cwd": os.getcwd(), "harness": "codex"})
         self.assertEqual(MAILBOX.load(MAILBOX.peer_path(self.base, "fixture-reader"))["focus"], args["focus"])
