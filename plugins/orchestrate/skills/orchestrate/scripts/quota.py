@@ -358,11 +358,13 @@ def rollout_records(text: str, since: dt.datetime | None = None) -> list[dict[st
     return records
 
 
-def rate_limit_snapshots(text: str, since: dt.datetime | None = None) -> list[dict[str, Any]]:
+def rate_limit_snapshots(
+    text: str, since: dt.datetime | None = None, *, records: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
     """The rate_limits objects in Codex session-log (rollout) lines, oldest first. With `since`, lines
     stamped earlier are skipped, so a resumed session's history does not count against a new run."""
     found = []
-    for record in rollout_records(text, since=since):
+    for record in rollout_records(text, since=since) if records is None else records:
         stack: list[Any] = [record]
         while stack:
             item = stack.pop()

@@ -520,10 +520,14 @@ class CodexCreditsWatchTests(unittest.TestCase):
             + "\n"
         )
         recent = json.dumps({"timestamp": RUNNER.utc_now().replace("+00:00", "Z"), "type": "turn_context"}) + "\n"
-        # 70 lines from an earlier segment plus 99 post-start lines before the first snapshot at line 100.
-        self.log.write_text((old * 70) + (recent * 99) + rollout_line(rate_limits(used=40.0)), encoding="utf-8")
+        # 70 lines from an earlier segment plus 99 post-start lines, polled before the first snapshot at line 100.
+        self.log.write_text((old * 70) + (recent * 99), encoding="utf-8")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
+            self.assertFalse(watch.poll(self.process))
+            self.assertIsNone(watch.unavailable)
+            with self.log.open("a", encoding="utf-8") as handle:
+                handle.write(rollout_line(rate_limits(used=40.0)))
             self.assertFalse(watch.poll(self.process))
         self.assertIsNone(watch.unavailable)
         self.assertNotIn("credits_watch_unavailable", out.getvalue())

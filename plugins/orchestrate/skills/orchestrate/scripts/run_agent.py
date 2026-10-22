@@ -1920,8 +1920,9 @@ class CodexCreditsWatch:
         self.offset += len(whole)
         text = whole.decode("utf-8", errors="replace")
         quota = bundled_module("quota")
-        self.lines_seen += len(quota.rollout_records(text, since=self.since))
-        for snapshot in quota.rate_limit_snapshots(text, since=self.since):
+        records = quota.rollout_records(text, since=self.since)
+        self.lines_seen += len(records)
+        for snapshot in quota.rate_limit_snapshots(text, since=self.since, records=records):
             if not quota.valid_rate_limits(snapshot):
                 if self.previous is None and self.unavailable is None:
                     self._mark_unavailable(
