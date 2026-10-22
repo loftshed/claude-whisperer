@@ -201,6 +201,47 @@ Neither adapter claims exactly-once remote execution across that uncertain crash
 Final-state auditing detects final violations. It does not prevent transient/external side effects,
 other editors, or Git-ref changes from another worktree. Existing executor permissions remain intact.
 
+## Team lead and succession
+
+A team has one accountable lead, recorded by session ID with a numbered **generation** in
+`scripts/authority.py` (one record per team under `<cache>/authority-v1/`). Every change is a
+compare-and-swap with `--expect-generation`; read the current state with `authority.py show --team T`.
+
+- **Appoint** (the user's act): `authority.py appoint --team T --lead-session S --lead-harness H
+[--deputy-harness H2 --deputy-account A] [--allow-credits]`. Re-appointing, which the user can always
+  do, even from a stuck pending generation, needs `--expect-generation N` and fences the old lead.
+- **Planned handover:** the lead runs `offer --session S --to-session S2 --to-harness H2` and stays in
+  charge. The successor runs `show --harness H2`, reviews the computed state, then
+  `accept --session S2 --harness H2 --expect-generation N --digest D`, which bumps the generation.
+- **Takeover** when the lead is gone: the named deputy runs `takeover ... --user-approved` (the user's
+  OK). The old lead is fenced at once; the new generation stays pending until the deputy accepts.
+- `accept` binds to the digest of the state it was shown: HEAD per checkout, whether the handoff HEAD
+  is still an ancestor, live runs by identity and status, and uncommitted paths in the team's scope
+  minus those a live writing run owns. Any change, or rewritten history, refuses it; show again.
+- `show` lists each live run's conductor mailbox; the successor reads a worker's questions through
+  `coordinator next`, which needs no generation.
+
+`coordinator.py init --authority T --lead-session S --lead-generation N` puts a task under the team.
+From then on every action except `show` and `next` needs `--lead-session` and `--lead-generation`
+matching the current, accepted generation. A pending successor may only `recover` and `abandon`. A
+native result's arrival (`native-complete`) is recorded whoever sends it; its review is fenced. The
+current lead's harness decides native versus executor transport, so a Codex successor sends Claude
+workers through the executor. A team's `--allow-credits` dispatch needs the appointment's
+`--allow-credits`.
+
+`abandon --run-id R --reason ...` ends a live run a superseded lead left behind. A native run's guard
+outlives its worker and holds the checkout's write lease; abandon makes it audit what the worktree
+holds, release the lease and record `abandoned`, never completed. An executor run's runner stops its
+executor and exits without an audit; its partial changes stay in the worktree, listed by `show`. Then
+review a native one (`takeover` or `reject`); an abandoned run is never accepted. Native corrections
+need the original host's session, so the handoff marks them unavailable to a cross-harness successor.
+
+**Not fenced:** session IDs are guard rails against confused or superseded agents, not security; any
+local process can pass any ID. Direct edits, commits and pushes are not checked, and neither are tasks
+created without `--authority`. In a room, `ork rooms create --authority T` makes the room accept only
+that team's tasks. A lead must not `/clear` (its session ID changes and it fences itself out): hand
+over first, or the user re-appoints.
+
 ## Calibration
 
 `calibration.py init --directory DIR --packet manifest.json` fixes 12–20 representative real tasks,

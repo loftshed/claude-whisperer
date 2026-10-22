@@ -38,6 +38,9 @@ def process_identity(pid: int) -> str | None:
     return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
 
 
+ABANDONED_EXIT = 29
+
+
 def process_state(run: dict[str, Any]) -> str:
     if not run.get("pid") or not run.get("process_identity"):
         return "unknown"
@@ -131,12 +134,18 @@ def audit(
     after_executor = runner.git_state(repository, spec["track_paths"])
     identity_executor = runner.git_identity(repository)
     delta = runner.state_delta(before, after_executor)
-    report_path = Path(packet["report_path"]).expanduser().resolve(strict=True)
-    report = report_path.read_text(encoding="utf-8")
-    raw, extracted = runner.extract_raw_final_report(report)
-    violations = runner.report_contract_violations(raw, extracted)
-    outcome = runner.parse_reported_outcome(raw, extracted)
-    consultation = support.consultation_from_report(raw, outcome)
+    abandoned = packet.get("abandoned") is True
+    if abandoned:
+        # A later lead ended this run: record what the worktree holds, never verify or accept it.
+        report, raw, extracted, violations, outcome = "", "", False, [], "failed"
+        consultation = {"status": "not_requested", "request": None, "error": None}
+    else:
+        report_path = Path(packet["report_path"]).expanduser().resolve(strict=True)
+        report = report_path.read_text(encoding="utf-8")
+        raw, extracted = runner.extract_raw_final_report(report)
+        violations = runner.report_contract_violations(raw, extracted)
+        outcome = runner.parse_reported_outcome(raw, extracted)
+        consultation = support.consultation_from_report(raw, outcome)
     if consultation["status"] == "invalid":
         violations.append("invalid_consultation_request")
     allowed = list(dict.fromkeys(spec["allow_paths"] + spec["track_paths"]))
@@ -152,6 +161,8 @@ def audit(
         reported_outcome=outcome,
         report_contract_valid=not violations,
     )
+    if abandoned and status not in {"history_violation", "scope_violation"}:
+        status, code = "abandoned", ABANDONED_EXIT
     verification = runner.verification_summary(run["verification_commands"], status="skipped", skipped_reason=status)
     if status == "completed":
         verification = runner.run_verification_commands(
@@ -195,7 +206,7 @@ def audit(
         },
         "variant": run.get("variant"),
         "billing_mode": run["billing_mode"],
-        "session_id": packet["native_handle"],
+        "session_id": packet.get("native_handle"),
         "native_event_id": packet["event_id"],
         "transport": "native",
         "mailbox": run.get("mailbox"),

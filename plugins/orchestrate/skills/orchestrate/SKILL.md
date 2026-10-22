@@ -125,6 +125,10 @@ would change it. Never send secrets, credentials or unrelated private files; the
 model provider. Read [references/coordinator.md](references/coordinator.md) for consultation,
 correction, Pointdexter evidence checks, or recovery across turns, and
 [references/rooms.md](references/rooms.md) to run a team of members (`ork rooms`, swarm presets).
+When the user appoints a lead for a team, follow
+[coordinator.md#team-lead-and-succession](references/coordinator.md#team-lead-and-succession): pass
+your `--lead-session`/`--lead-generation`, hand over before you stop or run out of quota, and as a
+successor review `authority.py show` before you accept and before you edit.
 
 ## Ask one question: `consult`
 

@@ -12,6 +12,39 @@ const execute = promisify(execFile);
 const coordinatorPath = fileURLToPath(
   new URL("../skills/orchestrate/scripts/coordinator.py", import.meta.url),
 );
+const authorityPath = fileURLToPath(
+  new URL("../skills/orchestrate/scripts/authority.py", import.meta.url),
+);
+
+/** The team's current lead and generation; the authority record is written only by authority.py. */
+export async function authorityShow(team) {
+  try {
+    const { stdout } = await execute("python3", [authorityPath, "show", "--team", team], {
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    const { authority } = JSON.parse(stdout);
+    return {
+      team,
+      generation: authority.generation,
+      status: authority.status,
+      lead: authority.lead,
+      offer: authority.offer?.to,
+    };
+  } catch (error) {
+    return { team, error: error.stderr?.trim() || error.message };
+  }
+}
+
+/** Coordinator arguments naming the caller as the team's lead at a generation. */
+function leadArgs(options) {
+  if (!options.leadSession) return [];
+  return [
+    "--lead-session",
+    options.leadSession,
+    "--lead-generation",
+    String(options.leadGeneration),
+  ];
+}
 
 export async function coordinator(args) {
   try {
@@ -48,12 +81,13 @@ export async function listRooms(root = mailboxRoot()) {
 
 export async function newRoom(
   members,
-  { id = randomUUID(), cwd, group, title, root = mailboxRoot() } = {},
+  { id = randomUUID(), cwd, group, title, authority, root = mailboxRoot() } = {},
 ) {
   const room = createRoom(members, { id, cwd: await realpath(cwd || process.cwd()) });
   room.group = group || path.basename(room.cwd);
   room.title = title || room.id;
   room.machine = hostname();
+  if (authority) room.authority = authority;
   await updateRoom(id, () => room, { root, create: true });
   return room;
 }
@@ -95,6 +129,11 @@ export async function dispatchMember(id, memberId, options = {}) {
   const room = await readRoom(id, root);
   if ((await realpath(task.repository)) !== (await realpath(room.cwd)))
     throw new Error("Task repository differs from room checkout");
+  // A room under a team only runs that team's tasks, so a superseded lead cannot dodge the fence here.
+  if (room.authority && task.authority?.team !== room.authority)
+    throw new Error(
+      `Task is not under the room's team ${room.authority}; init it with --authority`,
+    );
   const kind = options.kind || "investigation";
   if (!["implementation", "investigation", "consultation", "challenge"].includes(kind))
     throw new Error("Unsupported dispatch kind");
@@ -158,6 +197,7 @@ export async function dispatchMember(id, memberId, options = {}) {
     "--billing-mode",
     binding.billingMode,
     "--background",
+    ...leadArgs(options),
   ];
   if (member.effort) args.push("--effort", member.effort);
   if (binding.packet) args.push("--packet", binding.packet);
@@ -201,12 +241,19 @@ export async function dispatchMember(id, memberId, options = {}) {
     },
     { root },
   );
-  return { room: await observeRoom(id, { root, run }), dispatch: result };
+  return {
+    room: await observeRoom(id, { root, run, authority: options.authority }),
+    dispatch: result,
+  };
 }
 
 /** Read task snapshots through the coordinator. A terminal's idle state is never a verdict. */
-export async function observeRoom(id, { root = mailboxRoot(), run = coordinator } = {}) {
+export async function observeRoom(
+  id,
+  { root = mailboxRoot(), run = coordinator, authority = authorityShow } = {},
+) {
   const room = await readRoom(id, root);
+  if (room.authority) room.lead = await authority(room.authority);
   const tasks = new Map();
   for (const member of room.agents) {
     if (!member.dispatch) continue;
@@ -267,7 +314,8 @@ export async function observeRoom(id, { root = mailboxRoot(), run = coordinator 
   return room;
 }
 
-export async function recoverRoom(id, { root = mailboxRoot(), run = coordinator } = {}) {
+export async function recoverRoom(id, options = {}) {
+  const { root = mailboxRoot(), run = coordinator } = options;
   const room = await readRoom(id, root);
   const directories = new Set(
     room.agents.map((member) => member.dispatch?.taskDir).filter(Boolean),
@@ -283,8 +331,9 @@ export async function recoverRoom(id, { root = mailboxRoot(), run = coordinator 
     )
       throw new Error("Task identity changed; refusing to recover a different task");
   }
-  for (const directory of directories) await run(["recover", "--task-dir", directory]);
-  return observeRoom(id, { root, run });
+  for (const directory of directories)
+    await run(["recover", "--task-dir", directory, ...leadArgs(options)]);
+  return observeRoom(id, { root, run, authority: options.authority });
 }
 
 export async function readLaunchPlan(file) {

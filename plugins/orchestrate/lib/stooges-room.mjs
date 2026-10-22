@@ -68,6 +68,11 @@ export function validateRoom(room) {
   if (room.agents.length > 64) throw new Error("A room supports at most 64 members");
   if (room.cwd !== undefined && (typeof room.cwd !== "string" || !path.isAbsolute(room.cwd)))
     throw new Error("Room checkout must be an absolute path");
+  if (
+    room.authority !== undefined &&
+    (typeof room.authority !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(room.authority))
+  )
+    throw new Error("Invalid room authority team");
   for (const key of ["group", "title", "machine"])
     if (
       room[key] !== undefined &&

@@ -53,6 +53,11 @@ as `review` until the coordinator records its verdict; a worker going idle never
 
 To record which interactive agent plays a member, bind its native session ID:
 `ork rooms bind --room cache-review --member conductor --engine codex --session SESSION_ID`.
-The binding is a label for now: nothing checks it, and it grants no authority.
+The binding is a label: nothing checks it, and it grants no authority.
+
+A room created with `--authority TEAM` runs only that team's tasks (`init-task --authority TEAM`), shows
+the team's lead and generation, and its `init-task`, `dispatch`, `launch` and `recover` need
+`--lead-session` and `--lead-generation`. See
+[coordinator.md](coordinator.md#team-lead-and-succession).
 
 Closing a view never cancels work; the coordinator's cancellation stops workers.

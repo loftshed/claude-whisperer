@@ -16,14 +16,17 @@ import { loadPresets, mailboxRoot, parseTeam } from "../lib/stooges-room.mjs";
 
 export const ROOMS_HELP = `ork rooms list [--json]
 ork rooms show --room ID [--json]
-ork rooms create --team TEAM [--group GROUP] [--title TITLE] [--cwd PATH] [--id ID]
+ork rooms create --team TEAM [--group GROUP] [--title TITLE] [--cwd PATH] [--id ID] [--authority TEAM_ID]
 ork rooms add --room ID --team TEAM
-ork rooms init-task --task-spec FILE --task-dir DIR --host codex|claude|agy|opencode|other
+ork rooms init-task --task-spec FILE --task-dir DIR (--host codex|claude|agy|opencode|other | --authority TEAM_ID)
 ork rooms dispatch --room ID --member ID --task-dir DIR [--kind investigation|implementation|consultation|challenge]
                    [--transport executor|native] [--packet FILE] [--request-id ID]
 ork rooms launch --room ID --plan FILE
 ork rooms bind --room ID --member ID|conductor --session ID --engine ENGINE
 ork rooms recover --room ID
+
+A room or task under a team (--authority) is fenced: init-task, dispatch, launch and recover also need
+--lead-session and --lead-generation from authority.py show.
 
 create/add queue members. dispatch/launch use the coordinator and may start billable work.
 Native dispatch returns a reservation for the conductor's native tools.
@@ -62,6 +65,9 @@ export async function roomsCommand(
           "engine",
           "plan",
           "billing-mode",
+          "authority",
+          "lead-session",
+          "lead-generation",
         ].map((name) => [name, { type: "string" }]),
       ),
     },
@@ -84,6 +90,10 @@ export async function roomsCommand(
     }
     return parseTeam(requireValue("team"));
   };
+  const lead = { leadSession: values["lead-session"], leadGeneration: values["lead-generation"] };
+  const leadArgs = lead.leadSession
+    ? ["--lead-session", lead.leadSession, "--lead-generation", String(lead.leadGeneration)]
+    : [];
   let result;
   switch (action) {
     case "list": {
@@ -102,6 +112,7 @@ export async function roomsCommand(
         cwd: values.cwd,
         group: values.group,
         title: values.title,
+        authority: values.authority,
       });
 
       break;
@@ -123,8 +134,9 @@ export async function roomsCommand(
         path.resolve(requireValue("task-spec")),
         "--task-dir",
         path.resolve(requireValue("task-dir")),
-        "--host",
-        requireValue("host"),
+        ...(values.authority
+          ? ["--authority", values.authority, ...leadArgs]
+          : ["--host", requireValue("host")]),
       ]);
 
       break;
@@ -139,6 +151,7 @@ export async function roomsCommand(
         packet: values.packet,
         requestId: values["request-id"],
         billingMode: values["billing-mode"],
+        ...lead,
       });
 
       break;
@@ -149,7 +162,7 @@ export async function roomsCommand(
       // Stop on first failure. Completed requests are safe to revisit using their persisted IDs.
       result = [];
       for (const member of plan.members)
-        result.push(await dispatchMember(roomId, member.id, { ...member, root, run }));
+        result.push(await dispatchMember(roomId, member.id, { ...member, ...lead, root, run }));
 
       break;
     }
@@ -163,7 +176,7 @@ export async function roomsCommand(
       break;
     }
     case "recover": {
-      result = await recoverRoom(requireValue("room"), { root, run });
+      result = await recoverRoom(requireValue("room"), { root, run, ...lead });
 
       break;
     }
