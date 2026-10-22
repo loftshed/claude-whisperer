@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.27.0
+
+- feat(orchestrate)!: stop Codex runs from spending credits unless allowed (#16)
+
 ## 0.26.0
 
 - feat(orchestrate): name peers person-repo-model-effort (#15)
