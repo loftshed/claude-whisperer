@@ -748,17 +748,17 @@ def abandon(args: argparse.Namespace, directory: Path, state: dict[str, Any]) ->
     elif alive:
         # The runner stops its executor on these signals and exits, releasing the checkout's lease. It is
         # never killed outright: its executor, in its own process group, would keep the lease.
-        with committing():
-            sent = []
-            for number in (signal.SIGINT, signal.SIGTERM):
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(run["pid"], number)
-                    sent.append(signal.Signals(number).name)
-                until = time.monotonic() + ABANDON_GRACE_SECONDS
-                while NATIVE.process_state(run) == "active" and time.monotonic() < until:
-                    time.sleep(0.1)
-                if NATIVE.process_state(run) != "active":
-                    break
+        sent = []
+        for number in (signal.SIGINT, signal.SIGTERM):
+            # Only the first signal is the commit point; the waits run outside the team lock.
+            with committing(), contextlib.suppress(ProcessLookupError):
+                os.killpg(run["pid"], number)
+                sent.append(signal.Signals(number).name)
+            until = time.monotonic() + ABANDON_GRACE_SECONDS
+            while NATIVE.process_state(run) == "active" and time.monotonic() < until:
+                time.sleep(0.1)
+            if NATIVE.process_state(run) != "active":
+                break
         run["abandoned"] = {**note, "signals": sent}
         if not import_result(run, state):
             if NATIVE.process_state(run) == "active":

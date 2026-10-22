@@ -355,6 +355,13 @@ class AuthorityTests(unittest.TestCase):
         self.assertIn("not registered with its team", self.task("recover", *self.as_lead(1))[1])
         with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(self.fixture.external_path / "elsewhere")}):
             self.assertIn("this process resolves", self.task("recover", *self.as_lead(1))[1])
+        # The same store reached through a symlink is the same store.
+        alias = self.fixture.external_path / "cache-link"
+        alias.symlink_to(self.fixture.external_path / "cache")
+        record["tasks"] = [str(self.directory.resolve())]
+        record_path.write_text(json.dumps(record))
+        with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(alias)}):
+            self.assertEqual(self.task("recover", *self.as_lead(1))[0], 0)
 
     def test_an_authority_change_waits_briefly_then_says_why(self) -> None:
         with (

@@ -447,7 +447,7 @@ class Fence:
         store: str | None = None,
     ):
         self.directory = team_dir(team)
-        if store is not None and Path(store) != self.directory:
+        if store is not None and Path(store).resolve() != self.directory.resolve():
             raise AuthorityError(
                 f"this task's team record lives in {store}, but this process resolves {self.directory}: "
                 "run with the same AGENT_EXECUTOR_HOME / XDG_CACHE_HOME as the team"
