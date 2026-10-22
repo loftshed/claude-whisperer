@@ -281,6 +281,45 @@ def show(team: str, successor_harness: str | None = None) -> dict[str, Any]:
         return {"authority": record, "state": computed_state(record, successor_harness)}
 
 
+def pool_facts(lead_pool: str | None, deputy_pool: str | None) -> dict[str, Any]:
+    """Each named pool's account and context from monitor; refused when either is unknown or they differ."""
+    if not lead_pool and not deputy_pool:
+        return {}
+    succession = module("succession")
+    config = succession.monitor_config()
+    by_key = {pool["pool"]: pool for pool in succession.pools(succession.fresh_view(), config)}
+    contexts = {}
+    for name, key in (("lead", lead_pool), ("deputy", deputy_pool)):
+        if not key:
+            continue
+        pool = by_key.get(key)
+        if pool is None:
+            raise AuthorityError(f"monitor reports no pool {key} for the {name}")
+        if pool["billing"] is None:
+            raise AuthorityError(
+                f"set billing (work or personal) on monitor account '{pool['accountId']}' before appointing"
+            )
+        contexts[pool["accountId"]] = pool["billing"]
+    if lead_pool and deputy_pool:
+        lead, deputy = by_key[lead_pool], by_key[deputy_pool]
+        if lead["accountId"] == deputy["accountId"]:
+            raise AuthorityError("the deputy must draw on another account: one login's pools fail together")
+        if lead["billing"] != deputy["billing"]:
+            raise AuthorityError("the deputy's account is in another context (work versus personal)")
+    return {"contexts": contexts, "pools": by_key}
+
+
+def parse_standing(value: str | None) -> dict[str, Any] | None:
+    """`blocked,credits:900`: the lead pool statuses and the inactivity that allow a takeover without the user."""
+    if not value:
+        return None
+    statuses, _, seconds = value.partition(":")
+    names = [name.strip() for name in statuses.split(",") if name.strip()]
+    if not names or any(name not in ("blocked", "credits") for name in names) or not seconds.isdigit():
+        raise AuthorityError("standing takeover reads STATUSES:SECONDS, e.g. blocked,credits:900")
+    return {"statuses": names, "seconds": int(seconds)}
+
+
 def appoint(
     team: str,
     lead: dict[str, str],
@@ -288,8 +327,19 @@ def appoint(
     deputy: dict[str, Any] | None = None,
     allow_credits: bool = False,
     expect_generation: int | None = None,
+    standing: dict[str, Any] | None = None,
+    repository: str | None = None,
 ) -> dict[str, Any]:
-    """Appoint the lead (the user's act). Re-appointing needs the current generation and fences the old lead."""
+    """Appoint the lead (the user's act). Re-appointing needs the current generation and fences the old lead.
+
+    A lead and deputy pool (`accountId:poolId`, see `propose`) record each account's context, so a later
+    takeover refuses when it changed. A standing rule lets the deputy take over without the user only when
+    the lead's pool is exhausted and the lead is gone (succession.standing_evidence)."""
+    facts = pool_facts(lead.get("pool"), (deputy or {}).get("pool"))
+    if standing and not (lead.get("pool") and (deputy or {}).get("pool")):
+        raise AuthorityError("a standing takeover rule needs both the lead's and the deputy's pool")
+    if standing and not repository:
+        raise AuthorityError("a standing takeover rule needs the team's repository (run appoint inside it)")
     directory = team_dir(team)
     with locked(directory, exclusive=True):
         record = load(directory)
@@ -306,6 +356,9 @@ def appoint(
             lead=lead,
             deputy=deputy,
             allow_credits=bool(allow_credits),
+            standing=standing,
+            repository=repository,
+            contexts=facts.get("contexts", {}),
             offer=None,
             handoff={"reason": "appoint", "from": previous, "heads": heads(record), "at": now()},
         )
@@ -328,14 +381,53 @@ def offer(team: str, caller: str, generation: int, to: dict[str, str], note: str
         return record
 
 
-def takeover(team: str, successor: dict[str, str], expect_generation: int, *, user_approved: bool) -> dict[str, Any]:
-    """The lead is presumed gone: fence it now; the successor's generation stays pending until it accepts."""
-    if not user_approved:
-        raise AuthorityError("a takeover needs the user's approval (--user-approved); a planned handover does not")
+def takeover(
+    team: str,
+    successor: dict[str, str],
+    expect_generation: int,
+    *,
+    user_approved: bool,
+    standing: bool = False,
+    successor_account: str | None = None,
+    successor_repository: str | None = None,
+) -> dict[str, Any]:
+    """The lead is presumed gone: fence it now; the successor's generation stays pending until it accepts.
+
+    It needs the user's approval, or `standing` evidence under the appointment's rule. The evidence is read
+    before the lock (monitor may take a while) and holds only for the generation it was read at."""
+    if not (user_approved or standing):
+        raise AuthorityError("a takeover needs the user's approval (--user-approved) or --standing evidence")
     directory = team_dir(team)
+    by_standing = standing and not user_approved
+    lead_status = None
+    if by_standing:
+        succession = module("succession")
+        with locked(directory, exclusive=False):
+            snapshot = require(directory)
+        expect(snapshot, expect_generation)
+        named = (snapshot.get("deputy") or {}).get("session")
+        if named and named != successor["session"]:
+            raise AuthorityError("only the named deputy session can take over")
+        if successor_account != (snapshot.get("deputy") or {}).get("account"):
+            raise AuthorityError("a standing takeover is only for a session on the named deputy's account")
+        if not succession.same_repository(successor_repository, snapshot.get("repository")):
+            # One Codex or Antigravity login serves every repository: only the team's own may succeed it.
+            raise AuthorityError("a standing takeover is only for a session in the team's repository")
+        # Only the monitor read happens outside the lock; the rest is re-read under it below.
+        reasons, lead_status = succession.monitor_evidence(
+            snapshot, view=succession.fresh_view(), config=succession.monitor_config(), moment=succession.now()
+        )
+        if reasons:
+            raise AuthorityError("no standing takeover: " + "; ".join(reasons))
     with locked(directory, exclusive=True):
         record = require(directory)
         expect(record, expect_generation)
+        if by_standing:
+            reasons = module("succession").local_evidence(
+                record, lead_status=lead_status, moment=module("succession").now()
+            )
+            if reasons:
+                raise AuthorityError("no standing takeover: " + "; ".join(reasons))
         deputy = record.get("deputy") or {}
         if deputy.get("harness") and deputy["harness"] != successor["harness"]:
             raise AuthorityError(f"the named deputy runs on {deputy['harness']}, not {successor['harness']}")
@@ -345,11 +437,14 @@ def takeover(team: str, successor: dict[str, str], expect_generation: int, *, us
         record.update(
             generation=record["generation"] + 1,
             status="pending",
-            lead=successor,
+            # The deputy is now the lead: a new deputy (and standing rule) is the user's next appointment.
+            lead={**successor, **({"pool": deputy["pool"]} if deputy.get("pool") else {})},
+            deputy=None,
+            standing=None,
             offer=None,
             handoff={"reason": "takeover", "from": previous, "heads": heads(record), "at": now()},
         )
-        log(record, "takeover", lead=successor, previous=previous)
+        log(record, "takeover", lead=successor, previous=previous, standing=standing and not user_approved)
         save(directory, record)
         return record
 
@@ -471,33 +566,83 @@ class Fence:
         """Kept for callers that release before a long wait; holds are already brief."""
 
 
+def session_facts(session: str, harness: str, model: str | None, account_home: str | None) -> dict[str, Any]:
+    """A session's harness, model and account home: from its mailbox record unless given explicitly."""
+    mailbox = module("peer_mailbox")
+    peer = mailbox.load(mailbox.peer_path(mailbox.root(), session)) or {}
+    return {
+        "session": session,
+        "harness": "gemini" if harness == "agy" else harness,
+        "model": model or peer.get("model"),
+        "accountHome": account_home or peer.get("accountHome"),
+        "repo": peer.get("repo") or repository_here(),
+    }
+
+
+def propose_for(lead: dict[str, Any]) -> dict[str, Any]:
+    succession, mailbox = module("succession"), module("peer_mailbox")
+    proposal = succession.propose(
+        lead,
+        view=succession.fresh_view(),
+        config=succession.monitor_config(),
+        routes=module("routes").load_routes(),
+        peers=mailbox.peers(mailbox.root()),
+    )
+    deputy = proposal.get("deputy")
+    if not proposal["refusals"] and deputy:
+        proposal["appoint"] = (
+            f"authority.py appoint --team TEAM --lead-session {lead['session']} --lead-harness {lead['harness']} "
+            f"--lead-pool {proposal['lead']['pool']} --deputy-harness {deputy['harness']} "
+            f"--deputy-pool {deputy['pool']} [--deputy-session SESSION] [--standing-takeover blocked:900]"
+        )
+    return proposal
+
+
+def repository_here() -> str | None:
+    """The shared Git directory of the current checkout, which every worktree of the repository has in common."""
+    common = git(os.getcwd(), "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return str(Path(common.strip()).resolve()) if common else None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
-    for name in ("appoint", "offer", "takeover", "accept", "show"):
+    for name in ("appoint", "offer", "takeover", "accept", "show", "propose", "set-billing"):
         sub = commands.add_parser(name)
-        sub.add_argument("--team", required=True)
+        sub.add_argument("--team", required=name not in {"propose", "set-billing"})
         if name in {"appoint", "offer", "takeover", "accept"}:
             sub.add_argument("--expect-generation", type=int)
         if name == "appoint":
             sub.add_argument("--lead-session", required=True)
             sub.add_argument("--lead-harness", choices=sorted(HARNESS_HOST), required=True)
+            sub.add_argument("--lead-pool", help="accountId:poolId the lead pays from (see propose)")
             sub.add_argument("--deputy-harness", choices=sorted(HARNESS_HOST))
             sub.add_argument("--deputy-session")
-            sub.add_argument("--deputy-account", help="the deputy's account; must draw on another quota pool")
+            sub.add_argument("--deputy-pool", help="accountId:poolId on another account in the same context")
+            sub.add_argument(
+                "--standing-takeover", help="STATUSES:SECONDS, e.g. blocked:900; only on the user's say-so"
+            )
             sub.add_argument("--allow-credits", action="store_true", help="only when the user allows spending credits")
+            sub.add_argument("--repository", help="the team's Git directory (default: the current checkout's)")
         elif name == "offer":
             sub.add_argument("--session", required=True, help="the lead's own session")
             sub.add_argument("--to-session", required=True)
             sub.add_argument("--to-harness", choices=sorted(HARNESS_HOST), required=True)
             sub.add_argument("--note", default="")
-        elif name in {"takeover", "accept", "show"}:
-            sub.add_argument("--session", required=name != "show", help="the successor's own session")
+        elif name in {"takeover", "accept", "show", "propose"}:
+            sub.add_argument("--session", required=name != "show", help="the successor's (or proposed lead's) session")
             sub.add_argument("--harness", choices=sorted(HARNESS_HOST), required=name != "show")
             if name == "takeover":
                 sub.add_argument("--user-approved", action="store_true")
+                sub.add_argument("--standing", action="store_true", help="under the appointment's standing rule")
             if name == "accept":
                 sub.add_argument("--digest", required=True, help="the digest show printed for the state you reviewed")
+            if name == "propose":
+                sub.add_argument("--model", help="the lead's model, when its mailbox record lacks it")
+                sub.add_argument("--account-home", help="the lead's config home, when its mailbox record lacks it")
+        elif name == "set-billing":
+            sub.add_argument("--account", required=True, help="monitor account id")
+            sub.add_argument("--billing", choices=("work", "personal"), required=True, help="as the user answered")
     args = parser.parse_args(argv)
     try:
         if args.action == "appoint":
@@ -506,33 +651,56 @@ def main(argv: list[str] | None = None) -> int:
                 deputy = {
                     "harness": "gemini" if args.deputy_harness == "agy" else args.deputy_harness,
                     "session": args.deputy_session,
-                    "account": args.deputy_account,
+                    "pool": args.deputy_pool,
+                    "account": args.deputy_pool.split(":", 1)[0] if args.deputy_pool else None,
                 }
+            lead = member(args.lead_session, args.lead_harness)
+            if args.lead_pool:
+                lead["pool"] = args.lead_pool
             output = appoint(
                 args.team,
-                member(args.lead_session, args.lead_harness),
+                lead,
                 deputy=deputy,
                 allow_credits=args.allow_credits,
                 expect_generation=args.expect_generation,
+                standing=parse_standing(args.standing_takeover),
+                repository=str(Path(args.repository).resolve()) if args.repository else repository_here(),
             )
         elif args.action == "offer":
             output = offer(
                 args.team, args.session, args.expect_generation, member(args.to_session, args.to_harness), args.note
             )
         elif args.action == "takeover":
+            facts = session_facts(args.session, args.harness, None, None)
+            account = module("succession").account_of(
+                facts["harness"], facts["accountHome"], module("succession").monitor_config()
+            )[0]
             output = takeover(
                 args.team,
                 member(args.session, args.harness),
                 args.expect_generation,
                 user_approved=args.user_approved,
+                standing=args.standing,
+                successor_account=account,
+                successor_repository=facts["repo"],
             )
         elif args.action == "accept":
             output = accept(args.team, member(args.session, args.harness), args.expect_generation, args.digest)
+            if not output.get("deputy"):
+                # Accepting leaves the team without a deputy until the user names one: propose it now.
+                output = {**output, "next": "no deputy: ask the user to appoint one from this proposal"}
+                with contextlib.suppress(AuthorityError, OSError, ValueError):
+                    output["proposal"] = propose_for(session_facts(args.session, args.harness, None, None))
+        elif args.action == "propose":
+            output = propose_for(session_facts(args.session, args.harness, args.model, args.account_home))
+        elif args.action == "set-billing":
+            module("succession").set_billing(args.account, args.billing)
+            output = {"account": args.account, "billing": args.billing}
         else:
             output = show(args.team, args.harness)
         print(json.dumps(output, indent=2, ensure_ascii=True))
         return 0
-    except (AuthorityError, OSError) as error:
+    except (AuthorityError, OSError, ValueError) as error:
         print(f"authority: {error}", file=sys.stderr)
         return 2
 

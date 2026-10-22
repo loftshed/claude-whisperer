@@ -128,7 +128,12 @@ correction, Pointdexter evidence checks, or recovery across turns, and
 When the user appoints a lead for a team, follow
 [coordinator.md#team-lead-and-succession](references/coordinator.md#team-lead-and-succession): pass
 your `--lead-session`/`--lead-generation`, hand over before you stop or run out of quota, and as a
-successor review `authority.py show` before you accept and before you edit.
+successor review `authority.py show` before you accept and before you edit. To set up a team, run
+`authority.py propose` and put its result to the user with the multiple-choice question tool
+(`AskUserQuestion`; plain chat without it): "Appoint as proposed (Recommended)", "Appoint without a
+standing takeover", "Pick another deputy", "Don't appoint". When it refuses for an account without a
+context, ask "Is account A work or personal?" with "Personal", "Work" and "Leave it unset", record the
+answer with `authority.py set-billing`, and propose again. Never choose a context or an account yourself.
 
 ## Ask one question: `consult`
 
