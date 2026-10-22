@@ -239,8 +239,9 @@ need the original host's session, so the handoff marks them unavailable to a cro
 **Not fenced:** session IDs are guard rails against confused or superseded agents, not security; any
 local process can pass any ID. Direct edits, commits and pushes are not checked, and neither are tasks
 created without `--authority`. In a room, `ork rooms create --authority T` makes the room accept only
-that team's tasks. A lead must not `/clear` (its session ID changes and it fences itself out): hand
-over first, or the user re-appoints.
+that team's tasks. A `/clear` gives a session a new ID: in Claude Code the mailbox hook turns a cleared
+lead's role into an offer to its new session, which must `show` and `accept` like any successor (the
+old generation stands until then). Elsewhere, hand over first, or the user re-appoints.
 
 ## Calibration
 

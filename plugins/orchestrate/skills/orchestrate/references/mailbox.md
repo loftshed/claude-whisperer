@@ -35,6 +35,13 @@ failure through the mailbox, except when a separate top-level host process is ge
 External executor runs (`run_agent.py` with `--transport executor`) use their dedicated `run-<id>-conductor` / `run-<id>-worker` mailbox for the run's reporting contract. Natively dispatched subagents (`native_handoff` or `coordinator.py dispatch --transport native`) communicate with their parent through the host's native parent-child tools first and keep the run mailbox only for delegation tracking and fallback when native mid-run messaging is unavailable.
 `NATIVE_MESSAGING` in `scripts/peer_mailbox.py` lists the harnesses with an enforced mailbox guard; `peers`, `table()`, and hook colleague banners also surface `account`, `nativeTool`, and `nativeAddress` so callers can route natively without guessing.
 
+**Ended and cleared sessions.** When a session ends with unread mail, each live sender gets a notice
+from `mailbox` (kind `notice`) saying nobody received it. A Claude Code `/clear` ends one session and
+starts another in the same process; the hook pairs them by process within ten minutes and gives the new
+session the old one's unread mail and the requests it read in the last day but never answered, each
+flagged `carried`, plus its names as addresses, its person and what it was working on. Senders are told
+that the conversation behind their message is gone. Mail sent over native `SendMessage` is not covered.
+
 **Names.** A peer's name reads `person-repo-model-effort`, for example `ada-orkest-opus-5.5-xhigh`.
 The first name is picked once per session (from `/usr/share/dict/propernames` when present) and
 differs from other live peers'; model and effort come from the runtime and are left out when unknown,

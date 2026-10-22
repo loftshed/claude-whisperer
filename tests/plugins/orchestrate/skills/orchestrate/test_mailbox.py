@@ -19,6 +19,12 @@ import test_run_agent
 os.environ.pop("CLAUDE_EFFORT", None)
 
 RUNNER = test_run_agent.RUNNER
+
+
+def MAILBOX_AUTHORITY():  # noqa: N802 -- reads like the other module handles
+    return RUNNER.bundled_module("authority")
+
+
 MAILBOX = RUNNER.bundled_module("peer_mailbox")
 SCRIPTS = Path(MAILBOX.__file__).parent
 SERVER = SCRIPTS / "mailbox_mcp.py"
@@ -690,6 +696,113 @@ class MailboxTests(unittest.TestCase):
         payload = {"hook_event_name": event, "session_id": session, "cwd": str(cwd)}
         with mock.patch.object(MAILBOX, "harness_pid", return_value=os.getpid()):
             return MAILBOX.hook(payload, harness=harness, base=self.base)
+
+    def lifecycle(self, session, event, **extra):
+        payload = {"hook_event_name": event, "session_id": session, "cwd": str(self.repository), **extra}
+        with (
+            mock.patch.object(MAILBOX, "harness_pid", return_value=os.getpid()),
+            mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]),
+        ):
+            return MAILBOX.hook(payload, harness="claude", base=self.base)
+
+    def test_a_session_that_ends_unread_tells_its_senders(self):
+        sent = MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text="Can you check the parser?")
+        self.lifecycle(self.claude["session"], "SessionEnd", reason="prompt_input_exit")
+        self.assertIsNone(MAILBOX.load(MAILBOX.peer_path(self.base, self.claude["session"])))
+        [notice] = MAILBOX.take(self.base, self.codex["session"])
+        self.assertEqual(
+            (notice["from"]["session"], notice["kind"], notice["replyTo"]), ("mailbox", "notice", sent["id"])
+        )
+        self.assertIn("ended (prompt_input_exit) without reading your message", notice["text"])
+
+    def test_a_cleared_session_hands_its_mail_and_names_to_its_successor(self):
+        MAILBOX.set_focus(self.base, self.claude["session"], "Fixing the parser")
+        unread = MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text="Unread request")
+        MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text="Read, never answered")
+        MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text="Read and answered")
+        taken = MAILBOX.take(self.base, self.claude["session"])
+        answered = next(message for message in taken if message["text"] == "Read and answered")
+        MAILBOX.send(self.base, sender=self.claude, to=self.codex["name"], text="Done", reply_to=answered["id"])
+        MAILBOX.take(self.base, self.codex["session"])
+        unread_after = MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text="Arrived just before")
+        old_name, old_person = self.claude["name"], self.claude["person"]
+
+        self.lifecycle(self.claude["session"], "SessionEnd", reason="clear")
+        output = self.lifecycle("claude-session-after-clear", "SessionStart", source="clear")
+        context = output["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Your earlier context in this process was cleared", context)
+        self.assertIn("Before that you were working on: Fixing the parser.", context)
+        self.assertIn("Read, never answered", context)
+        self.assertIn("Arrived just before", context)
+        self.assertNotIn("Read and answered", context)
+        successor = MAILBOX.load(MAILBOX.peer_path(self.base, "claude-session-after-clear"))
+        self.assertEqual(successor["person"], old_person)
+        self.assertEqual(MAILBOX.resolve(self.base, old_name, sender=self.codex)["session"], successor["session"])
+        self.assertEqual(
+            MAILBOX.resolve(self.base, self.claude["session"], sender=self.codex)["session"], successor["session"]
+        )
+        self.assertFalse(list((self.base / "cleared").glob("*.json")))
+        [notice] = MAILBOX.take(self.base, self.codex["session"])
+        self.assertIn("cleared its context", notice["text"])
+        self.assertIn(unread["id"], notice["text"])
+        self.assertIn(unread_after["id"], notice["text"])
+
+    def test_a_clear_hands_over_whichever_event_arrives_first(self):
+        MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text="Unread request")
+        started = self.lifecycle("claude-session-after-clear", "SessionStart", source="clear")
+        self.assertNotIn("was cleared", json.dumps(started or {}))
+        self.lifecycle(self.claude["session"], "SessionEnd", reason="clear")
+        delivered = [message["text"] for message in MAILBOX.take(self.base, "claude-session-after-clear")]
+        self.assertIn("Unread request", delivered)
+        self.assertTrue(any("Your earlier context in this process was cleared" in text for text in delivered))
+        successor = MAILBOX.load(MAILBOX.peer_path(self.base, "claude-session-after-clear"))
+        self.assertEqual(successor["clearedFrom"], self.claude["session"])
+
+    def test_requests_from_senders_that_ended_are_not_carried(self):
+        MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text="Read, sender gone")
+        MAILBOX.take(self.base, self.claude["session"])
+        MAILBOX.unregister(self.base, self.codex["session"])
+        self.lifecycle(self.claude["session"], "SessionEnd", reason="clear")
+        context = self.lifecycle("claude-session-after-clear", "SessionStart", source="clear")
+        text = context["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("Read, sender gone", text)
+        self.assertIn("1 request(s) you had read came from sessions that have since ended", text)
+
+    def test_a_cleared_lead_never_redirects_a_handover_it_already_offered(self):
+        authority = MAILBOX_AUTHORITY()
+        with mock.patch.dict(os.environ, {"AGENT_EXECUTOR_HOME": str(self.base.parent / "executor")}):
+            authority.appoint("team", authority.member(self.claude["session"], "claude"))
+            authority.offer("team", self.claude["session"], 1, authority.member("deputy-session", "codex"))
+            self.lifecycle(self.claude["session"], "SessionEnd", reason="clear")
+            output = self.lifecycle("claude-session-after-clear", "SessionStart", source="clear")
+            record = authority.load(authority.team_dir("team"))
+        self.assertEqual(record["offer"]["to"]["session"], "deputy-session")
+        self.assertIn("That offer stands", output["hookSpecificOutput"]["additionalContext"])
+
+    def test_a_cleared_pending_successor_is_told_only_the_user_can_re_appoint(self):
+        authority = MAILBOX_AUTHORITY()
+        with mock.patch.dict(os.environ, {"AGENT_EXECUTOR_HOME": str(self.base.parent / "executor")}):
+            authority.appoint("team", authority.member("old-lead", "codex"), deputy={"harness": "claude"})
+            authority.takeover("team", authority.member(self.claude["session"], "claude"), 1, user_approved=True)
+            self.lifecycle(self.claude["session"], "SessionEnd", reason="clear")
+            output = self.lifecycle("claude-session-after-clear", "SessionStart", source="clear")
+            record = authority.load(authority.team_dir("team"))
+        self.assertEqual((record["status"], record["lead"]["session"]), ("pending", self.claude["session"]))
+        self.assertIn("only the user can re-appoint", output["hookSpecificOutput"]["additionalContext"])
+
+    def test_a_cleared_lead_has_its_role_offered_not_given(self):
+        authority = MAILBOX_AUTHORITY()
+        with mock.patch.dict(os.environ, {"AGENT_EXECUTOR_HOME": str(self.base.parent / "executor")}):
+            authority.appoint("team", authority.member(self.claude["session"], "claude"))
+            self.lifecycle(self.claude["session"], "SessionEnd", reason="clear")
+            output = self.lifecycle("claude-session-after-clear", "SessionStart", source="clear")
+            record = authority.load(authority.team_dir("team"))
+        self.assertIn(
+            "You were the lead of team team (generation 1)", output["hookSpecificOutput"]["additionalContext"]
+        )
+        self.assertEqual((record["generation"], record["status"]), (1, "active"))
+        self.assertEqual(record["lead"]["session"], self.claude["session"])
+        self.assertEqual(record["offer"]["to"]["session"], "claude-session-after-clear")
 
     def set_remote(self, repository, url, name="origin"):
         subprocess.run(["git", "-C", str(repository), "config", f"remote.{name}.url", url], check=True)

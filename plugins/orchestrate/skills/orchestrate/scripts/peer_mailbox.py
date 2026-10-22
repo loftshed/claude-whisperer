@@ -2010,6 +2010,220 @@ ANTIGRAVITY_NO_CONTINUE = {
 }
 
 
+# A /clear ends one session and starts another in the same harness process; pair them within this window.
+CLEAR_PAIRING = dt.timedelta(minutes=10)
+# Requests a cleared session had read but not answered within this window travel to its successor.
+OPEN_REQUEST_WINDOW = dt.timedelta(hours=24)
+MAILBOX_SENDER = {"session": "mailbox", "name": "mailbox", "harness": "unknown"}
+
+
+def notify(base: Path, to: dict[str, Any], text: str, reply_to: str | None = None) -> None:
+    """A notice from the mailbox itself to one live session, delivered with its next mail."""
+    message = {
+        "schema": MAIL_SCHEMA,
+        "id": message_id(),
+        "from": MAILBOX_SENDER,
+        "to": {"session": to["session"], "name": to.get("name")},
+        "text": text,
+        "replyTo": reply_to,
+        "sentAt": stamp(),
+        "readAt": None,
+        "scope": "cross-project",
+        "kind": "notice",
+    }
+    write(inbox_dir(base, to["session"]) / f"{message['id']}.json", message)
+
+
+def notify_senders(base: Path, found: list[dict[str, Any]], text: Any) -> None:
+    """One notice per live sender of `found`, written by text(sender, its message ids)."""
+    by_sender: dict[str, list[str]] = {}
+    for message in found:
+        sender = message["from"].get("session")
+        if sender and sender != MAILBOX_SENDER["session"]:
+            by_sender.setdefault(sender, []).append(message["id"])
+    for sender, ids in by_sender.items():
+        peer = load(peer_path(base, sender)) if re.fullmatch(SESSION_ID, sender) else None
+        if valid_peer(peer) and not is_run_peer(peer) and is_live(peer):
+            notify(base, peer, text(peer, ids), reply_to=ids[-1])
+
+
+def end_session(base: Path, session: str, *, reason: str, pid: int | None) -> None:
+    """A session is going away. A /clear keeps it for its successor; any other end tells its waiting senders."""
+    peer = load(peer_path(base, session))
+    if valid_peer(peer) and not is_run_peer(peer):
+        if reason == "clear":
+            write(base / "cleared" / f"{session_key(session)}.json", {**peer, "clearedAt": stamp(), "clearedPid": pid})
+            # Claude Code does not order the two events: the successor may already be waiting.
+            moment = now()
+            for path in (base / "peers").glob("*.json"):
+                waiting = load(path)
+                if (
+                    valid_peer(waiting)
+                    and waiting["session"] != session
+                    and waiting.get("harness") == peer.get("harness")
+                    and waiting.get("pid") == pid
+                    and isinstance(waiting.get("awaitingClear"), str)
+                    and moment - dt.datetime.fromisoformat(waiting["awaitingClear"]) <= CLEAR_PAIRING
+                ):
+                    notice = adopt_cleared(base, waiting)
+                    if notice:
+                        notify(base, waiting, notice)
+                    break
+        else:
+            unread = messages(base, session)
+            name = display_label(peer)
+            notify_senders(
+                base,
+                unread,
+                lambda _peer, ids: (
+                    f"{name} ended ({reason or 'closed'}) without reading your message "
+                    f"{', '.join(ids)}. Nobody received it: send it to another session if it still matters."
+                ),
+            )
+    unregister(base, session)
+
+
+def replied_to(base: Path, session: str) -> set[str]:
+    """IDs of the messages `session` replied to, from one pass over the retained mail."""
+    return {
+        message["replyTo"]
+        for path in (base / "inbox").glob("*/*.json")
+        if (message := load(path))
+        and isinstance(message.get("replyTo"), str)
+        and (message.get("from") or {}).get("session") == session
+    }
+
+
+def live_session(base: Path, session: str | None) -> bool:
+    peer = load(peer_path(base, session)) if isinstance(session, str) and re.fullmatch(SESSION_ID, session) else None
+    return valid_peer(peer) and is_live(peer)
+
+
+def adopt_cleared(base: Path, me: dict[str, Any]) -> str:
+    """Give a session started by /clear what its predecessor in the same process left: unread mail, requests it
+    read but never answered, its names, and a lead role offered for acceptance. Returns a notice, or ''."""
+    moment = now()
+    stashed = []
+    for path in (base / "cleared").glob("*.json"):
+        record = load(path)
+        if not valid_peer(record) or record["session"] == me["session"]:
+            continue
+        age = moment - dt.datetime.fromisoformat(record["clearedAt"])
+        if age > CLEAR_PAIRING:
+            path.unlink(missing_ok=True)  # never adopted: nothing in this process asked for it in time
+        elif record.get("harness") == me["harness"] and record.get("clearedPid") == me.get("pid"):
+            stashed.append((record["clearedAt"], path, record))
+    if not stashed:
+        # The old session's end may still be on its way; it hands over when it arrives.
+        annotate(base, me["session"], awaitingClear=stamp())
+        return ""
+    _, path, old = max(stashed, key=lambda item: item[0])
+    carried, orphaned, replied = [], 0, replied_to(base, old["session"])
+    for message in messages(base, old["session"], unread_only=False):
+        sent = dt.datetime.fromisoformat(message["sentAt"])
+        unread = not message.get("readAt")
+        open_request = (
+            not unread
+            and moment - sent <= OPEN_REQUEST_WINDOW
+            and message["from"].get("session") != MAILBOX_SENDER["session"]
+            and message.get("kind") not in {"reply", "update", "notice"}
+            and message["id"] not in replied
+        )
+        if open_request and not live_session(base, message["from"].get("session")):
+            # Nobody waits on it any more, and its reply may have gone with the sender's inbox.
+            orphaned += 1
+            continue
+        if unread or open_request:
+            message.update(
+                to={"session": me["session"], "name": me["name"]},
+                readAt=None,
+                carriedFrom=old["session"],
+                carried="unread before /clear" if unread else "read before /clear but never answered",
+            )
+            write(inbox_dir(base, me["session"]) / f"{message['id']}.json", message)
+            (inbox_dir(base, old["session"]) / f"{message['id']}.json").unlink(missing_ok=True)
+            carried.append(message)
+    names = [old["session"], old.get("name"), *old.get("aliases", [])]
+    annotate(
+        base,
+        me["session"],
+        aliases=[name for name in dict.fromkeys(names) if isinstance(name, str)][-8:],
+        clearedFrom=old["session"],
+        awaitingClear=None,
+        **({"person": old["person"]} if old.get("person") else {}),
+    )
+    me = register(base, session=me["session"], harness=me["harness"], cwd=me["cwd"])
+    notify_senders(
+        base,
+        carried,
+        lambda _peer, ids: (
+            f"{display_label(me)} (formerly {old.get('name')}) cleared its context. Your message "
+            f"{', '.join(ids)} now reaches it, but the conversation behind it is gone: resend any context it needs."
+        ),
+    )
+    offers = offer_cleared_lead(old["session"], me)
+    path.unlink(missing_ok=True)
+    lines = [
+        f"Your earlier context in this process was cleared (previous session {old['session']}, {old.get('name')})."
+    ]
+    if old.get("focus"):
+        lines.append(f"Before that you were working on: {old['focus']}.")
+    if carried:
+        lines.append(
+            f"{len(carried)} message(s) addressed to you before /clear follow; the conversation behind them is gone, "
+            "so ask the sender for context before acting."
+        )
+    if orphaned:
+        lines.append(f"{orphaned} request(s) you had read came from sessions that have since ended; not carried.")
+    lines += offers
+    return "\n".join(lines)
+
+
+def offer_cleared_lead(old_session: str, me: dict[str, Any]) -> list[str]:
+    """A cleared lead's role is offered to its successor session, which must review and accept it."""
+    path = Path(__file__).with_name("authority.py")
+    spec = importlib.util.spec_from_file_location("agent_executor_mailbox_authority", path)
+    if spec is None or spec.loader is None:
+        return []
+    authority = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(authority)
+    notes = []
+    for directory in sorted((authority.cache_dir() / "authority-v1").glob("*")):
+        with contextlib.suppress(ValueError, OSError):
+            record = authority.load(directory)
+            if not record or record["lead"]["session"] != old_session:
+                continue
+            team, generation = record["team"], record["generation"]
+            if record["status"] == "pending":
+                notes.append(
+                    f"You were taking over team {team} (generation {generation}) but had not accepted. A cleared "
+                    "successor cannot accept: only the user can re-appoint the team's lead now."
+                )
+                continue
+            pending_to = (record.get("offer") or {}).get("to") or {}
+            if pending_to.get("session") not in (None, me["session"]):
+                # A planned handover the lead already made stands; the hook never redirects it.
+                notes.append(
+                    f"You were the lead of team {team} (generation {generation}) and had offered the role to "
+                    f"{pending_to['session']}. That offer stands and this session was not offered the role."
+                )
+                continue
+            if record["status"] == "active":
+                authority.offer(
+                    record["team"],
+                    old_session,
+                    record["generation"],
+                    authority.member(me["session"], me["harness"]),
+                    note="offered to the session that replaced the lead after /clear",
+                )
+                notes.append(
+                    f"You were the lead of team {record['team']} (generation {record['generation']}). The role is "
+                    f"offered to this session, not given: run authority.py show --team {record['team']} --harness "
+                    f"{me['harness']}, review it, then accept with its digest. Until then the old generation stands."
+                )
+    return notes
+
+
 def hook(
     payload: dict[str, Any],
     *,
@@ -2040,7 +2254,7 @@ def hook(
         spaces = payload.get("workspacePaths")
         cwd = spaces[0] if isinstance(spaces, list) and spaces and isinstance(spaces[0], str) else os.getcwd()
     if event == "SessionEnd":
-        unregister(base, session)
+        end_session(base, session, reason=str(payload.get("reason") or ""), pid=harness_pid(harness))
         return None
     state = {"SessionStart": "idle", "UserPromptSubmit": "busy", "PreInvocation": "busy", "Stop": "idle"}.get(event)
     if state is None:
@@ -2066,6 +2280,10 @@ def hook(
         effort=runtime_effort(harness, payload),
     )
     me = mark_delegated(base, me)
+    cleared_notice = ""
+    if event == "SessionStart" and payload.get("source") == "clear" and not me.get("delegatedRun"):
+        cleared_notice = adopt_cleared(base, me)
+        me = load(peer_path(base, session)) or me
     if event in {"SessionStart", "UserPromptSubmit", "PreInvocation", "Stop"}:
         wake_dir = base / "wakes" / session_key(session)
         for marker_name in ("agy-wake.json", "claude-wake.json"):
@@ -2099,7 +2317,7 @@ def hook(
         return {}
     delivered = take(base, session)
     context = render_all(delivered)
-    hint = "\n".join(value for value in (identity_hint, availability_hint) if value)
+    hint = "\n".join(value for value in (cleared_notice, identity_hint, availability_hint) if value)
     if hint:
         context = hint + ("\n\n" + context if context else "")
     if event == "Stop":
