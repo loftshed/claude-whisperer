@@ -165,10 +165,24 @@ export async function dispatchMember(id, memberId, options = {}) {
   try {
     result = await run(args);
   } catch (error) {
+    // The coordinator records a run before any side effect, so a refusal with no run for this
+    // request launched nothing: clear the intent so the member can be dispatched again.
+    let wasLaunched = true;
+    try {
+      const after = await run(["show", "--task-dir", binding.taskDir]);
+      wasLaunched = after.runs.some((entry) => entry.request_id === binding.requestId);
+    } catch {
+      // Unknown outcome: keep the intent so retrying the same request can recover it.
+    }
     await updateRoom(
       id,
       (current) => {
-        memberOf(current, memberId).dispatchError = error.message;
+        const agent = memberOf(current, memberId);
+        agent.dispatchError = error.message;
+        if (!wasLaunched && agent.dispatch?.requestId === binding.requestId) {
+          delete agent.dispatch;
+          agent.status = "queued";
+        }
         return current;
       },
       { root },

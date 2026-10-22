@@ -19,15 +19,20 @@ ork rooms dispatch --room cache-review --member haiku-1 \
 Members begin queued: creating a room never starts work. `dispatch` and `launch` may start billable
 work, so dispatch only once the [task specification](brief-template.md) says what you want done.
 Task directories live outside the repository. `ork stooges --preset bug-court` (or `scout-swarm`,
-`patch-race`, `heavy-trifecta`) creates a room from a preset team; `ork stooges --attach-room ID`
-shows a live view.
+`heavy-trifecta`) creates a room from a preset team; `ork stooges --attach-room ID` shows a live view.
+
+A room works in one checkout, and the runner's writer lease is exclusive per checkout, so a room runs
+one implementation at a time; other members run as investigation, consultation or challenge.
+`patch-race` needs a separate worktree per candidate and cannot run in a room yet.
 
 For a model native to the conductor, add `--transport native`: it returns a reservation for the
 conductor's own agent tools instead of starting a CLI session.
 
 Add members with `ork rooms add --room cache-review --team "agy:flash"`. Each member has one dispatch
 intent; add another member for another task. Retrying a dispatch reuses its stored request ID, even
-after a lost response. Changing its task, kind or transport is rejected.
+after a lost response. Changing its task, kind or transport is rejected. When the coordinator refuses
+a dispatch and records no run for it, nothing launched: the intent is cleared, the error stays on the
+member, and the member can be dispatched again.
 
 `ork rooms launch --room cache-review --plan /absolute/plan.json` dispatches a batch and stops at the
 first error; retry the same plan to recover recorded requests:
@@ -46,8 +51,8 @@ first error; retry the same plan to recover recorded requests:
 `ork rooms recover --room cache-review` collects results through the coordinator. Finished work shows
 as `review` until the coordinator records its verdict; a worker going idle never accepts a task.
 
-To show an interactive agent as a member, bind its native session ID:
+To record which interactive agent plays a member, bind its native session ID:
 `ork rooms bind --room cache-review --member conductor --engine codex --session SESSION_ID`.
-Matching requires the session ID, engine, machine and exact checkout.
+The binding is a label for now: nothing checks it, and it grants no authority.
 
 Closing a view never cancels work; the coordinator's cancellation stops workers.

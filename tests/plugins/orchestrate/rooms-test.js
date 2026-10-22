@@ -139,6 +139,40 @@ describe("room execution", () => {
     expect(task.runs.map((entry) => entry.request_id)).toEqual(["one"]);
   });
 
+  it("clears the intent after a refusal that launched nothing, so the member can dispatch again", async () => {
+    const { root, room, taskDir, task, run } = await fixture();
+    const refuse = async (args) => {
+      if (args[0] === "dispatch") throw new Error("implementation already dispatched");
+      return run(args);
+    };
+    await expect(
+      dispatchMember(room.id, "haiku-1", { root, taskDir, run: refuse, kind: "implementation" }),
+    ).rejects.toThrow("already dispatched");
+    const refused = (await readRoom(room.id, root)).agents.find((agent) => agent.id === "haiku-1");
+    expect(refused.dispatch).toBeUndefined();
+    expect(refused.status).toBe("queued");
+    expect(refused.dispatchError).toBe("implementation already dispatched");
+    // A different kind is no longer blocked by the stale intent.
+    await dispatchMember(room.id, "haiku-1", { root, taskDir, run, kind: "investigation" });
+    expect(task.runs).toHaveLength(1);
+  });
+
+  it("keeps the intent when the outcome of a failed dispatch is unknown", async () => {
+    const { root, room, taskDir, run } = await fixture();
+    const lost = async (args) => {
+      if (args[0] === "dispatch") {
+        await run(args);
+        throw new Error("response lost");
+      }
+      return run(args);
+    };
+    await expect(dispatchMember(room.id, "haiku-1", { root, taskDir, run: lost })).rejects.toThrow(
+      "response lost",
+    );
+    const kept = (await readRoom(room.id, root)).agents.find((agent) => agent.id === "haiku-1");
+    expect(kept.dispatch.requestId).toBeTruthy();
+  });
+
   it("reports corrupt rooms alongside valid rooms", async () => {
     const { root } = await fixture();
     await writeFile(path.join(root, "rooms", "broken.json"), "{", "utf8");
