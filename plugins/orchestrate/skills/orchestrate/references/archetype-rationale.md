@@ -52,7 +52,7 @@ ranking. Keep the current descriptions separate from verified capabilities of a 
 model, and effort. It reports accepted outcomes, first-pass outcomes, duration, and the lower endpoint
 of a 95% Wilson interval for the accepted proportion.
 
-The current reorder heuristic considers candidate slots with `available` or `credits` quota status,
+The current reorder heuristic considers candidate slots with `available` quota status,
 at least three matching runs, and a Wilson lower-bound difference strictly greater than 0.05.
 Candidates without that evidence retain their slots. These thresholds avoid reacting to every result;
 they are not a statistical test that one model is superior. Three runs are little evidence, different
@@ -80,9 +80,9 @@ a model fits a task, and a favorable score does not authorize a billing switch.
 
 Monitor's `surplusPts` compares remaining weekly capacity with an even-use schedule. An `expiring`
 window is at least a day long, in its final 20%, and has at least 5% remaining. These signals help use
-capacity before rollover. The generic profile recommender orders low-quota pools last, then prefers
-included quota over credits, expiring pools, native routes, and greater surplus in that priority
-order. Archetype routing instead starts with its configured candidate order and uses the telemetry
+capacity before rollover. The generic profile recommender leaves out pools on credits (they bill the
+user's balance), orders low-quota pools last, then prefers expiring pools, native routes, and greater
+surplus in that priority order. Archetype routing instead starts with its configured candidate order and uses the telemetry
 gate above; it does not apply that generic quota sort. See
 [Monitor's ranking rules](../../../../monitor/README.md#ranking).
 

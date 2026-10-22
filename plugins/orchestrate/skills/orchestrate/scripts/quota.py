@@ -5,7 +5,8 @@ pools. This module maps an engine and model onto the pool that pays for it, so t
 whether a route can take a run now and the runner can refuse to launch into an exhausted one.
 
 A pool whose included allowance is used up but that has a credit balance (Codex/ChatGPT) has status
-"credits": it takes runs of any size, metered against the balance, so it is never refused.
+"credits": every request there is billed against the balance, so a run is refused unless the user
+allows credits, and a running Codex job stops once its account starts spending them (credit_spend).
 """
 
 from __future__ import annotations
@@ -111,6 +112,9 @@ def assess(lane: dict[str, Any]) -> str:
     status = lane.get("status")
     if status in ("blocked", "credits"):
         return status
+    if lane.get("stale"):
+        # Old data saying there is room may hide a pool that has since moved onto credits.
+        return "unknown"
     usable = lane.get("availableNowPct")
     if usable is None or not isinstance(usable, (int, float)) or isinstance(usable, bool):
         return "unknown"
@@ -292,18 +296,96 @@ def credits_text(row: dict[str, Any]) -> str:
 def blocked_message(engine: str, model: str, result: dict[str, Any], view: dict[str, Any] | None) -> str:
     until = result.get("blockedUntil")
     when = f" until {until}" if until else ""
-    alternatives = [
-        f"--engine {row['engine']} ({row['models']}): {row['label']}, "
-        + (credits_text(row) if row["status"] == "credits" else f"{round(row['availableNowPct'])}% usable now")
+    rows = [
+        row
         for row in route_table(view)
-        if row["engine"] in ("codex", "agy")
-        and row["status"] in ("available", "low", "credits")
-        and row.get("label") != result.get("label")
+        if row["engine"] in ("codex", "agy") and row.get("label") != result.get("label")
+    ]
+    alternatives = [
+        f"--engine {row['engine']} ({row['models']}): {row['label']}, {round(row['availableNowPct'])}% usable now"
+        for row in rows
+        if row["status"] in ("available", "low")
+    ]
+    on_credits = [
+        f"--engine {row['engine']}: {row['label']}, {credits_text(row)}" for row in rows if row["status"] == "credits"
     ]
     text = f"{result.get('label', engine)} quota is exhausted{when}; a {engine} run on {model} would stall."
     if alternatives:
         text += " Routes with quota now: " + "; ".join(alternatives) + "."
+    if on_credits:
+        text += " On credits, only with the user's permission (--allow-credits): " + "; ".join(on_credits) + "."
     return text + " Pass --ignore-quota only when the user asks to launch anyway."
+
+
+def credits_message(engine: str, model: str, result: dict[str, Any]) -> str:
+    """Why a run onto a pool on credits is refused."""
+    back = result.get("blockedUntil")
+    when = f"; its included quota returns at {back}" if back else ""
+    return (
+        f"{result.get('label', engine)} has used its included quota and is {credits_text(result)}{when}. "
+        f"A {engine} run on {model} would be billed to that balance, so it is refused. "
+        "Pass --allow-credits only when the user allows spending credits."
+    )
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def rate_limit_snapshots(text: str, since: dt.datetime | None = None) -> list[dict[str, Any]]:
+    """The rate_limits objects in Codex session-log (rollout) lines, oldest first. With `since`, lines
+    stamped earlier are skipped, so a resumed session's history does not count against a new run."""
+    found = []
+    for line in text.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if since is not None and isinstance(record, dict) and isinstance(record.get("timestamp"), str):
+            try:
+                if dt.datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00")) < since:
+                    continue
+            except ValueError:
+                pass
+        stack: list[Any] = [record]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                if isinstance(item.get("rate_limits"), dict):
+                    found.append(item["rate_limits"])
+                stack.extend(value for key, value in item.items() if key != "rate_limits")
+            elif isinstance(item, list):
+                stack.extend(item)
+    return found
+
+
+def credit_spend(previous: dict[str, Any] | None, current: dict[str, Any]) -> str | None:
+    """Why a Codex account is spending credits, judged from two successive rate_limits snapshots, or None.
+
+    Holding a balance is not spending it. Spending is: spend control reached, a balance that falls between
+    snapshots (any session on the account may cause it), or an included allowance used up in either window
+    while a balance remains, so requests continue on credits. Used up with no balance is "blocked", which
+    Codex reports itself; it is not a credits stop.
+    """
+    if current.get("spend_control_reached"):
+        return "spend_control_reached"
+    credits = current.get("credits") if isinstance(current.get("credits"), dict) else {}
+    earlier = (previous or {}).get("credits") if isinstance((previous or {}).get("credits"), dict) else {}
+    balance, before = _number(credits.get("balance")), _number(earlier.get("balance"))
+    if balance is not None and before is not None and balance < before:
+        return "account_balance_falling"
+    windows = [current.get(key) for key in ("primary", "secondary")]
+    used_up = bool(current.get("rate_limit_reached_type")) or any(
+        isinstance(window, dict) and (_number(window.get("used_percent")) or 0) >= 100 for window in windows
+    )
+    if used_up and (credits.get("has_credits") or credits.get("unlimited")):
+        return "allowance_used_up_on_credits"
+    return None
 
 
 # Engines the runner can dispatch to from any host (a Claude host uses its native sub-agents for Claude).
@@ -318,7 +400,7 @@ def access_records(
     One record per profile model and account, for routes this host can actually use: the runner's
     engines plus the host's own models. Personal accounts are marked personal_subscription so
     recommend() keeps excluding them unless the packet authorizes personal quota. A pool on credits is
-    available with billing_mode "credits": every request is metered against a prepaid balance.
+    not available: every request there is billed to a balance, which needs the user's permission.
     """
     observed_at = dt.datetime.now(dt.UTC).isoformat()
     records = []
@@ -362,7 +444,7 @@ def access_records(
                     {
                         "model": model,
                         "engine": engine,
-                        "available": status != "blocked",
+                        "available": status not in ("blocked", "credits"),
                         "observed_at": observed_at,
                         "source": f"monitor:{lane['accountId']}",
                         "billing_mode": billing_mode,

@@ -586,6 +586,8 @@ def dispatch(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
         command += ["--effort", effort]
     if variant:
         command += ["--variant", variant]
+    if args.allow_credits:
+        command += ["--allow-credits"]
     if kind in {"implementation", "correction"}:
         for check in verification:
             command += ["--verify-command", check]
@@ -609,6 +611,7 @@ def dispatch(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
         "effort": effort,
         "variant": variant,
         "billing_mode": billing,
+        "allow_credits": bool(args.allow_credits),
         "verification_commands": verification,
         "event_id": event_path.stem,
         "event_path": str(event_path),
@@ -863,6 +866,11 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--effort")
             sub.add_argument("--variant")
             sub.add_argument("--billing-mode", choices=("unknown", "subscription", "api"), default="unknown")
+            sub.add_argument(
+                "--allow-credits",
+                action="store_true",
+                help="Let a Codex run bill the account's credit balance; only when the user allows spending credits",
+            )
             sub.add_argument("--verify-command", action="append", default=[])
             sub.add_argument("--packet", type=Path)
             sub.add_argument("--evidence", type=Path)

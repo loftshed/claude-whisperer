@@ -265,7 +265,7 @@ def rank_candidates_by_telemetry(
     healthy_slots = [
         index
         for index, candidate in enumerate(ranked)
-        if candidate.get("quota_pace") in {"available", "credits"}
+        if candidate.get("quota_pace") == "available"
         and candidate["sample_count"] is not None
         and candidate["sample_count"] >= min_runs
         and candidate["wilson_lb_95"] is not None

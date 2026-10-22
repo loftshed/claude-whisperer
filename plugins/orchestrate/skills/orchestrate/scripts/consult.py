@@ -196,6 +196,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--billing-mode", choices=("unknown", "subscription", "api"), default="unknown")
     parser.add_argument("--ignore-quota", action="store_true", help="Ask even when monitor reports the pool exhausted")
+    parser.add_argument(
+        "--allow-credits",
+        action="store_true",
+        help="Let a Codex consult bill the account's credit balance; only when the user allows spending credits",
+    )
     parser.add_argument("--refresh-models", action="store_true", help="Bypass the model catalog cache")
     parser.add_argument(
         "--transport",
@@ -580,6 +585,7 @@ def build_request(args: argparse.Namespace) -> dict[str, Any]:
         "requested_model": args.model,
         "billing_mode": args.billing_mode,
         "ignore_quota": args.ignore_quota,
+        "allow_credits": args.allow_credits,
         "refresh_models": args.refresh_models,
         "transport": transport,
         "host": host,
@@ -1029,7 +1035,11 @@ def _perform(
     executable, version, model, selection, catalog, effort, variant = preflight(request)
     if not dry_run:
         runner.quota_gate(
-            engine, model, ignore=request.get("ignore_quota", False), claude_config_dir=request.get("claude_config_dir")
+            engine,
+            model,
+            ignore=request.get("ignore_quota", False),
+            claude_config_dir=request.get("claude_config_dir"),
+            allow_credits=request.get("allow_credits", False),
         )
     previous = request.get("previous") or {}
     session_id = previous.get("session_id")
@@ -1129,6 +1139,7 @@ def _perform(
     runner.emit_lifecycle("consultant_started", engine=engine, model=model, intent=intent)
     stdin_handle: Any = stdin_path.open("rb") if stdin_path is not None else subprocess.DEVNULL
     repository_before = runner.git_state(workspace) if reading else None
+    credits_watch = None
     try:
         with contextlib.ExitStack() as stack:
             if reading:
@@ -1150,12 +1161,21 @@ def _perform(
                 stderr=stderr_handle,
                 start_new_session=True,
             )
+            credits_watch = (
+                runner.CodexCreditsWatch(
+                    environment,
+                    lambda: runner.executor_session_so_far("codex", stdout_path, log_path) or session_id,
+                )
+                if engine == "codex" and not request.get("allow_credits", False)
+                else None
+            )
             with runner.forward_termination_signals(process):
                 timed_out = runner.wait_with_heartbeats(
                     process,
                     timeout_seconds=timeout_seconds + 60,
                     heartbeat_seconds=0,
                     monotonic_start=monotonic_start,
+                    poll=(lambda: credits_watch.poll(process)) if credits_watch is not None else None,
                 )
     finally:
         if stdin_handle is not subprocess.DEVNULL:
@@ -1196,7 +1216,10 @@ def _perform(
         engine, stdout_text, resumed=bool(previous), baseline=previous.get("usage_cumulative")
     )
     error: str | None = None
-    if timed_out:
+    if credits_watch is not None and credits_watch.stopped is not None:
+        status, exit_code = "stopped_credits", runner.EXIT_STOPPED_CREDITS
+        error = "stopped: the Codex account started spending credits (" + credits_watch.stopped["reason"] + ")"
+    elif timed_out:
         status, exit_code = "timed_out", EXIT_TIMED_OUT
         error = f"the consultant did not answer within {request['timeout']}"
     elif (process.returncode != 0 or provider_failed or quota_structured) and (
@@ -1266,6 +1289,7 @@ def launch_detached(request: dict[str, Any], args: argparse.Namespace) -> int:
         model,
         ignore=request.get("ignore_quota", False),
         claude_config_dir=request.get("claude_config_dir"),
+        allow_credits=request.get("allow_credits", False),
     )
     request = {**request, "model": model, "effort": effort["requested"], "variant": variant}
     job_dir = prepare_consult_dir(None, request.get("read"))
