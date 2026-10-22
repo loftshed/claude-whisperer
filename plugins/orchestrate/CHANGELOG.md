@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.28.0
+
+- feat(orchestrate): one accountable team lead with fenced, verified succession (#17)
+
 ## 0.27.0
 
 - feat(orchestrate)!: stop Codex runs from spending credits unless allowed (#16)
