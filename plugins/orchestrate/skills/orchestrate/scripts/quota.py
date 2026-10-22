@@ -364,6 +364,19 @@ def rate_limit_snapshots(text: str, since: dt.datetime | None = None) -> list[di
     return found
 
 
+def valid_rate_limits(snapshot: Any) -> bool:
+    """Whether a rate_limits object has the window or credit fields credit_spend relies on."""
+    if not isinstance(snapshot, dict):
+        return False
+    has_window = any(
+        isinstance(snapshot.get(key), dict) and _number(snapshot[key].get("used_percent")) is not None
+        for key in ("primary", "secondary")
+    )
+    credits = snapshot.get("credits")
+    has_credits = isinstance(credits, dict) and any(key in credits for key in ("balance", "has_credits", "unlimited"))
+    return has_window or has_credits
+
+
 def credit_spend(previous: dict[str, Any] | None, current: dict[str, Any]) -> str | None:
     """Why a Codex account is spending credits, judged from two successive rate_limits snapshots, or None.
 

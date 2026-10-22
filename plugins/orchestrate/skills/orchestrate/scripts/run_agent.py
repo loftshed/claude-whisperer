@@ -104,8 +104,9 @@ EXIT_ROUTE_NOT_ALLOWED = 17
 EXIT_POOL_ON_CREDITS = 18
 EXIT_STOPPED_CREDITS = 19
 CREDITS_CHECK_SECONDS = 5.0
-# Without a session log after this long, the credits watch says it cannot protect the run.
+# Without a session log or usable rate_limits snapshots after this long (or this many records), the credits watch says it cannot protect the run.
 CREDITS_WATCH_GRACE_SECONDS = 120.0
+CREDITS_WATCH_MAX_BLIND_LINES = 50
 
 DEFAULT_OPENCODE_VARIANT = "high"
 OPENCODE_RUNTIME_CONFIG = {
@@ -1870,18 +1871,26 @@ class CodexCreditsWatch:
         *,
         check_seconds: float = CREDITS_CHECK_SECONDS,
         grace_seconds: float = CREDITS_WATCH_GRACE_SECONDS,
+        max_blind_lines: int = CREDITS_WATCH_MAX_BLIND_LINES,
     ):
         self.sessions = Path(environment.get("CODEX_HOME") or Path.home() / ".codex").expanduser() / "sessions"
         self.session_of = session_of
         self.check_seconds = check_seconds
         self.give_up_at = time.monotonic() + grace_seconds
+        self.max_blind_lines = max_blind_lines
         self.unavailable: str | None = None
         self.since = dt.datetime.now(dt.UTC)
         self.path: Path | None = None
         self.offset = 0
+        self.lines_seen = 0
         self.previous: dict[str, Any] | None = None
         self.next_check = 0.0
         self.stopped: dict[str, Any] | None = None
+
+    def _mark_unavailable(self, reason: str) -> None:
+        if self.unavailable != reason:
+            self.unavailable = reason
+            emit_lifecycle("credits_watch_unavailable", reason=reason)
 
     def poll(self, process: subprocess.Popen[bytes]) -> bool:
         """True when the run was stopped for spending credits."""
@@ -1894,8 +1903,9 @@ class CodexCreditsWatch:
             if not found:
                 if self.unavailable is None and time.monotonic() >= self.give_up_at:
                     # Fail visibly: the run goes on, but nothing stops it from spending credits.
-                    self.unavailable = "no session id" if not session else "no session log under " + str(self.sessions)
-                    emit_lifecycle("credits_watch_unavailable", reason=self.unavailable)
+                    self._mark_unavailable(
+                        "no session id" if not session else "no session log under " + str(self.sessions)
+                    )
                 return False
             self.path = found[-1]
             self.unavailable = None
@@ -1907,8 +1917,17 @@ class CodexCreditsWatch:
             return False
         whole = chunk[: chunk.rfind(b"\n") + 1]  # a line still being written is read next time
         self.offset += len(whole)
+        text = whole.decode("utf-8", errors="replace")
+        self.lines_seen += sum(1 for line in text.splitlines() if line.strip())
         quota = bundled_module("quota")
-        for snapshot in quota.rate_limit_snapshots(whole.decode("utf-8", errors="replace"), since=self.since):
+        for snapshot in quota.rate_limit_snapshots(text, since=self.since):
+            if not quota.valid_rate_limits(snapshot):
+                if self.previous is None and self.unavailable is None:
+                    self._mark_unavailable(
+                        f"rate_limits in {self.path} lacks expected primary/secondary window and credits keys"
+                    )
+                continue
+            self.unavailable = None
             reason = quota.credit_spend(self.previous, snapshot)
             self.previous = snapshot
             if reason is None:
@@ -1924,6 +1943,15 @@ class CodexCreditsWatch:
             emit_lifecycle("credits_stop", reason=reason, balance=credits.get("balance"))
             interrupt_process(process)
             return True
+        if (
+            self.previous is None
+            and self.unavailable is None
+            and (
+                (self.lines_seen >= self.max_blind_lines)
+                or (self.lines_seen > 0 and time.monotonic() >= self.give_up_at)
+            )
+        ):
+            self._mark_unavailable(f"session log {self.path} has no rate_limits snapshots")
         return False
 
 

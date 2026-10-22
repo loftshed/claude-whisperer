@@ -51,7 +51,11 @@ SCOPES = ("project", "cross-project")
 NATIVE_MESSAGING = {"claude": "SendMessage (find the session with ListAgents)"}
 # A harness's account is the config home it runs under: (environment override, default directory name in ~).
 # Profiles sit beside the default as ~/<default>-<label>, e.g. ~/.claude-personal.
-ACCOUNT_HOMES = {"claude": ("CLAUDE_CONFIG_DIR", ".claude"), "codex": ("CODEX_HOME", ".codex")}
+ACCOUNT_HOMES = {
+    "claude": ("CLAUDE_CONFIG_DIR", ".claude"),
+    "codex": ("CODEX_HOME", ".codex"),
+    "gemini": ("GEMINI_CLI_HOME", ".gemini"),
+}
 NATIVE_HARNESS_TOOLS = {
     "claude": "SendMessage (find the session with ListAgents)",
     "codex": "collaboration.send_message / list_agents or codex_tui.send_message_to_thread / list_threads; peer-mailbox only if unreachable on host",
@@ -347,6 +351,9 @@ def account_home(harness: str, transcript: str | None = None, environ: Mapping[s
     variable, default = ACCOUNT_HOMES[harness]
     environ = os.environ if environ is None else environ
     configured = Path(environ[variable]).expanduser() if environ.get(variable) else None
+    if configured is None and harness == "gemini" and environ.get("ANTIGRAVITY_APP_DATA_DIR"):
+        app_data = Path(environ["ANTIGRAVITY_APP_DATA_DIR"]).expanduser()
+        configured = app_data.parent if app_data.name == "antigravity-cli" else app_data
     if transcript:
         path = Path(transcript).expanduser()
         if configured and path.is_relative_to(configured):
