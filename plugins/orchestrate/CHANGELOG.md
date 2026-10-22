@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.29.0
+
+- feat(orchestrate): carry a cleared session's requests and tell senders about ended ones (#18)
+
 ## 0.28.0
 
 - feat(orchestrate): one accountable team lead with fenced, verified succession (#17)
