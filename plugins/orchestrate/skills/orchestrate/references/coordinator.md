@@ -73,9 +73,7 @@ Recover finished runs before changing from investigation to implementation. Unce
 require recovery rather than an optimistic relaunch. Every reader is audited for unexpected writes;
 this is a cooperative contract and final-state audit, not an OS sandbox against arbitrary effects.
 
-Each run has dedicated [mailbox sessions](mailbox.md#runs-conductor-and-worker). Workers can ask for
-missing context without ending their run; the conductor can reply or ask follow-up questions. `show`
-and `next` work during a foreground dispatch, and messaging does not acquire the task mutation lease.
+External executor runs (`--transport executor`) use dedicated [mailbox sessions](mailbox.md#runs-conductor-and-worker) so workers can ask for missing context without ending their run and the conductor can reply or ask follow-up questions. Native subagent dispatches (`--transport native`) communicate through the host's native parent-child agent/thread tools first and keep the run mailbox only for delegation tracking and fallback. `show` and `next` work during a foreground dispatch, and messaging does not acquire the task mutation lease.
 
 ## Native host bridge
 

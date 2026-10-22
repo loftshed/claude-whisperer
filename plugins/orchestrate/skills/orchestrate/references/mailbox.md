@@ -20,23 +20,31 @@ models or test idle activation. Restart an existing harness session after changi
 The checkout installer `plugins/orchestrate/install.sh` includes messaging setup. A native plugin
 copy can also run `scripts/install_mailbox.py` directly, so setup needs no separate AI intervention.
 
-**Native first.** Choose the transport for the recipient's harness. Use native tools for teammates in
-the current harness, including when the task comes from an outside coordinator. Send progress,
+**Native first.** Choose the transport for the recipient's harness and account. Use native tools for teammates in
+the current harness and account, including when the task comes from an outside coordinator. A session of
+the same harness under another account (another config home, such as `~/.claude-personal` beside
+`~/.claude`) is out of native reach: use the mailbox for it. Send progress,
 questions, and completion to that external coordinator through the peer mailbox. Different models,
 sessions, branches, or worktrees do not make communication external.
 
-Claude Code uses `SendMessage` and `ListAgents`; Antigravity/Gemini uses `send_message` and
-`invoke_subagent`; Codex uses native agent or thread tools; OpenCode uses its native agent tools.
+Claude Code uses `SendMessage` and `ListAgents` (addressed by Claude's native session name exposed in `nativeAddress`); Antigravity/Gemini uses `send_message` and
+`invoke_subagent` for its subagent tree; Codex uses `collaboration.spawn_agent` / `send_message` / `list_agents` for its subagent tree and `codex_tui` `list_threads` / `read_thread` / `send_message_to_thread` / `wait_threads` (by native thread ID, never generated mailbox aliases) for independent tasks on the same host; OpenCode uses its native agent tools.
 Check other native session/thread tools if one cannot reach a teammate. Do not route around that
-failure through the mailbox, except when a Codex peer thread's native reply is rejected because the
-originating thread is not loaded in its app-server host (in which case the caller can read the
-completed peer thread's output or accept the reply over `peer-mailbox`).
+failure through the mailbox, except when a separate top-level host process is genuinely unreachable through native tools (for example, a Codex thread not loaded in the caller's app-server host, or a separate top-level Antigravity window).
 
-Runner-assigned conductor and worker sessions retain their dedicated mailbox for the run's reporting
-contract, including when both sessions use the same harness. This exception applies only to those two
-assigned endpoints. Use native tools with other teammates and follow the run's delegation limits.
-`NATIVE_MESSAGING` in `scripts/peer_mailbox.py` lists the harnesses with an enforced mailbox guard;
-the native-first instruction also applies when the current host exposes native tools not in that list.
+External executor runs (`run_agent.py` with `--transport executor`) use their dedicated `run-<id>-conductor` / `run-<id>-worker` mailbox for the run's reporting contract. Natively dispatched subagents (`native_handoff` or `coordinator.py dispatch --transport native`) communicate with their parent through the host's native parent-child tools first and keep the run mailbox only for delegation tracking and fallback when native mid-run messaging is unavailable.
+`NATIVE_MESSAGING` in `scripts/peer_mailbox.py` lists the harnesses with an enforced mailbox guard; `peers`, `table()`, and hook colleague banners also surface `account`, `nativeTool`, and `nativeAddress` so callers can route natively without guessing.
+
+**Accounts.** Each peer records `accountHome`, the config home its harness runs under. Claude's comes
+from the profile whose `sessions/` metadata lists the session; otherwise the hook's transcript path,
+then `CLAUDE_CONFIG_DIR` or `CODEX_HOME` in the harness process (default `~/.claude`, `~/.codex`).
+`account` shows `default` or the profile suffix (`personal` for `~/.claude-personal`). The guard
+refuses only when both sessions share a harness and their accounts are not known to differ, so a peer
+whose account is unknown is still treated as reachable natively.
+
+**When native messaging cannot reach a same-account peer** (for example `ListAgents` does not list it),
+resend with `nativeUnreachable` (CLI: `--native-unreachable REASON`) saying what you tried. The reason
+travels on the message, and feedback records a fixed `native_unreachable_override` code so overuse shows.
 
 ## Readable identity and quick commands
 
@@ -55,7 +63,8 @@ python3 scripts/run_agent.py mailbox wait --session MY_ID --reply-to MESSAGE_ID 
 ```
 
 Send/ask also accept `--text` or `--body`. Block locally for replies, rather than repeated model-driven
-inbox polling. Use `--no-wake` for FYI/progress and avoid acknowledgement-only replies. A timeout is
+inbox polling. For a reply that may take longer than a few minutes, run `mailbox wait` as a background
+command with a long timeout and end the turn ([completion.md](completion.md#waiting-for-a-reply-or-anything-else)). Use `--no-wake` for FYI/progress and avoid acknowledgement-only replies. A timeout is
 not a reply; accepted delivery is not evidence of receipt or consideration.
 
 ## Tools

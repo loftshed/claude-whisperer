@@ -152,6 +152,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Local executor CLI (default: the --route's engine, else codex)",
     )
     parser.add_argument(
+        "--host", choices=EXECUTION_ENGINES, help="Calling harness; otherwise detected from its environment"
+    )
+    parser.add_argument(
+        "--transport",
+        choices=("auto", "native", "executor"),
+        default="auto",
+        help="Use native tools for a fresh same-harness task, or explicitly select an isolated CLI executor",
+    )
+    parser.add_argument(
         "--model",
         help=(
             "Exact live model ID, or a family selector (`gpt:sol`, `deepseek`) that resolves to the newest "
@@ -2486,6 +2495,8 @@ def detached_runner_command(
         str(repo),
         "--engine",
         args.engine,
+        "--transport",
+        "executor",
         "--timeout",
         args.timeout,
         "--out-dir",
@@ -3249,6 +3260,99 @@ HOST_MARKERS = {
 }
 
 
+def detect_host() -> str | None:
+    return next((host for host, keys in HOST_MARKERS.items() if any(os.environ.get(key) for key in keys)), None)
+
+
+def decide_transport(args: argparse.Namespace, host: str | None) -> str:
+    if args.transport == "executor":
+        return "executor"
+    executor_boundary = any(
+        (
+            args.detach,
+            args.session,
+            args.continue_last,
+            args.resume_result,
+            args.completion_event,
+            args.mailbox_run_id,
+            args.dry_run,
+            args.engine == "claude" and args.claude_config_dir,
+        )
+    )
+    if args.transport == "native":
+        if host != args.engine or executor_boundary or args.claude_config_dir:
+            raise RunnerError(
+                "--transport native requires the calling harness to match --engine and a fresh task without "
+                "CLI session, profile, detached, completion, mailbox, or dry-run options; use --transport executor",
+                4,
+            )
+        return "native"
+    return "native" if host == args.engine and not executor_boundary else "executor"
+
+
+def native_handoff(args: argparse.Namespace, host: str) -> int:
+    if args.job_dir or args.notify or args.completion_hook or args.steer_dir:
+        raise RunnerError("job, notification, and steering options require executor transport", 4)
+    cwd = args.cwd.expanduser().resolve()
+    if not cwd.is_dir():
+        raise RunnerError(f"target directory does not exist: {cwd}", 4)
+    repo = git_root(cwd)
+    if cwd != repo:
+        raise RunnerError(f"--cwd must be the Git repository root: {repo}", 4)
+    brief, task_spec = resolve_execution_brief(args, repo=repo)
+    _, add_dirs, allowed, tracked, enforced, _, _ = validated_run_options(args, task_spec=task_spec)
+    out_dir = prepare_out_dir(args.out_dir, repo)
+    scratch = prepare_scratch_dir(out_dir) if not enforced else None
+    submitted_path = out_dir / "submitted-brief.txt"
+    write_private_text(out_dir / "brief.txt", brief + "\n")
+    scratch_note = scratch_brief_note(scratch) if scratch else ""
+    write_private_text(submitted_path, f"{brief}\n{scratch_note}\n{REPORT_CONTRACT}\n")
+    tools = {
+        "codex": "collaboration.spawn_agent and native collaboration messaging for subagents, or codex_tui "
+        "thread tools for a separate task when the user requested one",
+        "claude": "Claude Code's native Agent and SendMessage tools",
+        "agy": "Antigravity's native invoke_subagent and send_message tools",
+        "opencode": "OpenCode's native subagent tools",
+    }[host]
+    instructions = (
+        f"Run the submitted brief using {tools}, within the user's delegation authority. "
+        "Use native parent-worker communication. Resolve the requested model and effort through the host's "
+        "available native controls; this handoff has not validated or run a model. "
+        "No workspace lease, executor, or verification gates have run. "
+        "Use coordinator.py dispatch --transport native when a durable lease and audit guard are needed. "
+        "Use --transport executor when an isolated CLI process or account profile is needed."
+    )
+    result_path = out_dir / "result.json"
+    write_json(
+        result_path,
+        {
+            "schema": RESULT_SCHEMA,
+            "status": "native_handoff",
+            "task_outcome": "not_run",
+            "transport": "native",
+            "host": host,
+            "engine": args.engine,
+            "model": args.model or preferred_model(args.engine),
+            "requested_effort": args.effort,
+            "repository": str(repo),
+            "submitted_brief_path": str(submitted_path),
+            "native_instructions": instructions,
+            "allowed_paths": allowed,
+            "tracked_paths": tracked,
+            "additional_directories": [str(path) for path in add_dirs],
+            "scratch_dir": str(scratch) if scratch else None,
+            "verification_commands": args.verify_command,
+            "deadline": args.deadline,
+        },
+    )
+    print("AGENT_STATUS=native_handoff")
+    print("AGENT_TRANSPORT=native")
+    print(f"AGENT_BRIEF={submitted_path}")
+    print(f"AGENT_RESULT={result_path}")
+    print(instructions)
+    return 0
+
+
 def doctor_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog=f"{Path(__file__).name} doctor",
@@ -3722,8 +3826,11 @@ def main() -> int:
         return init_main(argv[1:])
     if argv and argv[0] == "doctor":
         return doctor_main(argv[1:])
-    auto_prune()
     args = resolve_route(parse_args(argv))
+    host = args.host or detect_host()
+    if decide_transport(args, host) == "native":
+        return native_handoff(args, host)
+    auto_prune()
     if args.detach:
         return execute(args)
     repo = git_root(args.cwd.expanduser().resolve())

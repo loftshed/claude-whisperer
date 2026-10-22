@@ -129,6 +129,15 @@ class ContractTests(unittest.TestCase):
             next(p for p in rows if p["session"] == "fixture-reader")["displayLabel"],
             "Mock server · rebase fixes · gpt-6-astra · Codex",
         )
+        same_codex = MAILBOX.register(
+            self.base, session="fixture-codex-peer", harness="codex", cwd=os.getcwd(), pid=os.getpid()
+        )
+        rows = self.tool("peers")["result"]["structuredContent"]["peers"]
+        peer_row = next(p for p in rows if p["session"] == same_codex["session"])
+        self.assertEqual(peer_row["nativeAddress"], "fixture-codex-peer")
+        self.assertIn("codex_tui.send_message_to_thread", peer_row["nativeTool"])
+        cross_row = next(p for p in rows if p["session"] == "fixture-sender")
+        self.assertEqual((cross_row["nativeAddress"], cross_row["nativeTool"]), ("", ""))
 
     def test_modern_discovery_and_cacheable_catalog_without_a_handshake(self):
         discovered = self.rpc("server/discover")["result"]

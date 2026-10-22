@@ -565,6 +565,8 @@ def dispatch(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
         str(spec_path),
         "--engine",
         engine,
+        "--transport",
+        "executor",
         "--model",
         model_id,
         "--out-dir",
@@ -635,7 +637,7 @@ def dispatch(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
     if opened_mailbox != mailbox_info:
         raise CoordinationError("mailbox run does not match the recorded dispatch")
     with (run_dir / "brief.md").open("a", encoding="utf-8") as brief:
-        brief.write("\n\n" + MAILBOX.run_instructions(mailbox_run_id) + "\n")
+        brief.write("\n\n" + MAILBOX.run_instructions(mailbox_run_id, transport=args.transport) + "\n")
     if args.transport == "native":
         NATIVE.start(directory, run, RUNNER)
         save(directory, state)

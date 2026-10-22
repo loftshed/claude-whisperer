@@ -37,6 +37,24 @@ Keep waiting outside the language-model loop. Repeated status commands, sleeps, 
    query the completion and message inboxes once when a later caller resumes. A worker needing an
    answer may time out and report BLOCKED if no conductor remains active.
 
+## Waiting for a reply or anything else
+
+The same rule covers mailbox replies and conditions outside Orkest. Start one blocking command through
+the host's background-command primitive (Claude Code: Bash with `run_in_background: true`), give it a
+timeout longer than you would wait yourself, and end the turn. The host reports once when it exits, and
+the command's last output says what changed:
+
+```bash
+python3 <skill-directory>/scripts/run_agent.py mailbox wait --session MY_ID --reply-to SENT_MESSAGE_ID --timeout 3600
+start=$(git rev-parse HEAD); until [ "$(git rev-parse HEAD)" != "$start" ]; do sleep 5; done; git log --oneline -3
+until [ -f "$RESULT" ] || [ -f "$FAILED" ]; do sleep 5; done; ls -l "$RESULT" "$FAILED" 2>/dev/null
+while kill -0 "$PID" 2>/dev/null; do sleep 5; done; echo "process $PID exited"
+```
+
+Put failure states in the condition, so a crash ends the wait rather than looking like more waiting.
+Use `kill -0` rather than `pgrep`, which fails under a sandbox and reads as "already gone". The MCP
+`wait` tool blocks at most 600 s; use it for a reply expected within minutes, not for long waits.
+
 `wait` and `follow` never acknowledge events. A steered job's superseded event carries
 `superseded_by`, and both commands follow it to the job's final event. If `events follow` is interrupted, do not relaunch the
 work: on the next turn list the inbox once, review every unacknowledged `result_path`, and acknowledge
