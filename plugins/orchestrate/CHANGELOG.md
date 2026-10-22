@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.25.0
+
+- feat(orchestrate): route mailbox by account, hand native work to the host, add ork rooms (#14)
+
 ## 0.24.2
 
 - fix(orchestrate): harden cross-harness wakes, mailbox ergonomics, and model routing (#12)
