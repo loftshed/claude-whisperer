@@ -2452,6 +2452,23 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class RunnerVersionTests(unittest.TestCase):
+    def test_version_is_the_released_plugin_version(self) -> None:
+        manifest = json.loads((SKILL_DIR.parents[1] / ".claude-plugin" / "plugin.json").read_text())
+        self.assertEqual(RUNNER.RUNNER_VERSION, manifest["version"])
+
+    def test_only_metadata_version_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            skill_file = Path(directory) / "SKILL.md"
+            skill_file.write_text(
+                "---\nname: x\nversion: 9.9.9\nmetadata:\n  requirements: y\n  version: 1.2.3\n---\n\nversion: 8.8.8\n"
+            )
+            self.assertEqual(RUNNER.skill_version(skill_file), "1.2.3")
+            skill_file.write_text("---\nname: x\nversion: 9.9.9\n---\n\n  version: 8.8.8\n")
+            self.assertEqual(RUNNER.skill_version(skill_file), "unknown")
+            self.assertEqual(RUNNER.skill_version(Path(directory) / "missing.md"), "unknown")
+
+
 class StatusFormattingTests(unittest.TestCase):
     def outcome(self, text: str) -> str | None:
         report, extracted = RUNNER.extract_raw_final_report(text)
