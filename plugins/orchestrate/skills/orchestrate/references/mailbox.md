@@ -51,7 +51,8 @@ by Claude Code; to make it match, launch with `claude --name "$(ork name --model
 
 **Accounts.** Each peer records `accountHome`, the config home its harness runs under. Claude's comes
 from the profile whose `sessions/` metadata lists the session; otherwise the hook's transcript path,
-then `CLAUDE_CONFIG_DIR` or `CODEX_HOME` in the harness process (default `~/.claude`, `~/.codex`).
+then `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, or `GEMINI_CLI_HOME` / `ANTIGRAVITY_APP_DATA_DIR` in the harness
+process (default `~/.claude`, `~/.codex`, `~/.gemini`).
 `account` shows `default` or the profile suffix (`personal` for `~/.claude-personal`). The guard
 refuses only when both sessions share a harness and their accounts are not known to differ, so a peer
 whose account is unknown is still treated as reachable natively.

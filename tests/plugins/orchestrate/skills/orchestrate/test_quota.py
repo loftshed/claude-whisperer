@@ -493,6 +493,55 @@ class CodexCreditsWatchTests(unittest.TestCase):
         self.assertIsNotNone(self.process.poll())
         self.assertIn("AGENT_LIFECYCLE=credits_stop", out.getvalue())
 
+    def test_a_log_without_rate_limits_snapshots_marks_the_watch_unavailable_once(self) -> None:
+        watch = RUNNER.CodexCreditsWatch(
+            {"CODEX_HOME": self.home.name}, lambda: "thread-9", check_seconds=0, max_blind_lines=3
+        )
+        line = json.dumps({"timestamp": RUNNER.utc_now().replace("+00:00", "Z"), "type": "turn_context"}) + "\n"
+        self.log.write_text(line * 3, encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertFalse(watch.poll(self.process))
+            self.assertFalse(watch.poll(self.process))
+        self.assertIn("has no rate_limits snapshots", watch.unavailable)
+        self.assertEqual(out.getvalue().count("AGENT_LIFECYCLE=credits_watch_unavailable"), 1)
+
+    def test_pre_since_history_and_normal_preamble_do_not_flag_the_watch_unavailable(self) -> None:
+        watch = self.watch()
+        old = (
+            json.dumps(
+                {
+                    "timestamp": (dt.datetime.now(dt.UTC) - dt.timedelta(minutes=10))
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                    "type": "turn_context",
+                }
+            )
+            + "\n"
+        )
+        recent = json.dumps({"timestamp": RUNNER.utc_now().replace("+00:00", "Z"), "type": "turn_context"}) + "\n"
+        # 70 lines from an earlier segment plus 99 post-start lines, polled before the first snapshot at line 100.
+        self.log.write_text((old * 70) + (recent * 99), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertFalse(watch.poll(self.process))
+            self.assertIsNone(watch.unavailable)
+            with self.log.open("a", encoding="utf-8") as handle:
+                handle.write(rollout_line(rate_limits(used=40.0)))
+            self.assertFalse(watch.poll(self.process))
+        self.assertIsNone(watch.unavailable)
+        self.assertNotIn("credits_watch_unavailable", out.getvalue())
+
+    def test_a_snapshot_missing_window_and_credits_keys_marks_the_watch_unavailable(self) -> None:
+        watch = self.watch()
+        self.log.write_text(rollout_line({"limit_id": "codex", "plan_type": "pro"}), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertFalse(watch.poll(self.process))
+            self.assertFalse(watch.poll(self.process))
+        self.assertIn("lacks expected primary/secondary window and credits keys", watch.unavailable)
+        self.assertEqual(out.getvalue().count("AGENT_LIFECYCLE=credits_watch_unavailable"), 1)
+
 
 class DispatchableRecommendTests(unittest.TestCase):
     registry = {

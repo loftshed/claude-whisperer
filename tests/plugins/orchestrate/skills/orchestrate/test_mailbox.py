@@ -453,7 +453,30 @@ class MailboxTests(unittest.TestCase):
         )
         self.assertEqual(MAILBOX.account_home("claude", None, {}), str((home / ".claude").resolve()))
         self.assertEqual(MAILBOX.account_home("codex", None, {"CODEX_HOME": str(custom)}), str(custom.resolve()))
-        self.assertIsNone(MAILBOX.account_home("gemini", None, {}))
+        agy_transcript = str(home / ".gemini" / "antigravity-cli" / "brain" / "c1" / "transcript.jsonl")
+        self.assertEqual(MAILBOX.account_home("gemini", agy_transcript, {}), str((home / ".gemini").resolve()))
+        self.assertEqual(
+            MAILBOX.account_home("gemini", None, {"ANTIGRAVITY_APP_DATA_DIR": str(custom / "antigravity-cli")}),
+            str(custom.resolve()),
+        )
+        self.assertEqual(
+            MAILBOX.account_home("gemini", None, {"ANTIGRAVITY_APP_DATA_DIR": str(custom / "antigravity")}),
+            str(custom.resolve()),
+        )
+        self.assertEqual(
+            MAILBOX.account_home("gemini", None, {"GEMINI_CLI_HOME": str(custom)}),
+            str(custom.resolve()),
+        )
+        self.assertEqual(MAILBOX.account_home("gemini", None, {}), str((home / ".gemini").resolve()))
+        self.assertEqual(
+            MAILBOX.account_label({"harness": "gemini", "accountHome": str((home / ".gemini").resolve())}),
+            "default",
+        )
+        self.assertEqual(
+            MAILBOX.account_label({"harness": "gemini", "accountHome": str((home / ".gemini-work").resolve())}),
+            "work",
+        )
+        self.assertIsNone(MAILBOX.account_home("opencode", None, {}))
         self.assertEqual(MAILBOX.account_label({"harness": "claude"}), "")
 
     def test_claude_native_session_name_syncs_and_fallback_alias_resolves(self):

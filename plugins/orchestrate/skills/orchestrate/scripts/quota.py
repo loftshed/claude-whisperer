@@ -337,21 +337,34 @@ def _number(value: Any) -> float | None:
         return None
 
 
-def rate_limit_snapshots(text: str, since: dt.datetime | None = None) -> list[dict[str, Any]]:
-    """The rate_limits objects in Codex session-log (rollout) lines, oldest first. With `since`, lines
-    stamped earlier are skipped, so a resumed session's history does not count against a new run."""
-    found = []
+def rollout_records(text: str, since: dt.datetime | None = None) -> list[dict[str, Any]]:
+    """JSON records in Codex session-log (rollout) lines, oldest first. With `since`, lines stamped earlier
+    are skipped, so a resumed session's history does not count against a new run."""
+    records = []
     for line in text.splitlines():
         try:
             record = json.loads(line)
         except ValueError:
             continue
-        if since is not None and isinstance(record, dict) and isinstance(record.get("timestamp"), str):
+        if not isinstance(record, dict):
+            continue
+        if since is not None and isinstance(record.get("timestamp"), str):
             try:
                 if dt.datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00")) < since:
                     continue
             except ValueError:
                 pass
+        records.append(record)
+    return records
+
+
+def rate_limit_snapshots(
+    text: str, since: dt.datetime | None = None, *, records: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """The rate_limits objects in Codex session-log (rollout) lines, oldest first. With `since`, lines
+    stamped earlier are skipped, so a resumed session's history does not count against a new run."""
+    found = []
+    for record in rollout_records(text, since=since) if records is None else records:
         stack: list[Any] = [record]
         while stack:
             item = stack.pop()
@@ -362,6 +375,19 @@ def rate_limit_snapshots(text: str, since: dt.datetime | None = None) -> list[di
             elif isinstance(item, list):
                 stack.extend(item)
     return found
+
+
+def valid_rate_limits(snapshot: Any) -> bool:
+    """Whether a rate_limits object has the window or credit fields credit_spend relies on."""
+    if not isinstance(snapshot, dict):
+        return False
+    has_window = any(
+        isinstance(snapshot.get(key), dict) and _number(snapshot[key].get("used_percent")) is not None
+        for key in ("primary", "secondary")
+    )
+    credits = snapshot.get("credits")
+    has_credits = isinstance(credits, dict) and any(key in credits for key in ("balance", "has_credits", "unlimited"))
+    return has_window or has_credits
 
 
 def credit_spend(previous: dict[str, Any] | None, current: dict[str, Any]) -> str | None:
