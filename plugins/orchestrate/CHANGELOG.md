@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.30.0
+
+- feat(orchestrate): propose a deputy from quota facts and take over on standing evidence (#21)
+
 ## 0.29.2
 
 - fix(orchestrate): detect blind credits watch and map Gemini account home (#20)
