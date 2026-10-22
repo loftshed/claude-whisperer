@@ -51,6 +51,7 @@ SCOPES = ("project", "cross-project")
 NATIVE_MESSAGING = {"claude": "SendMessage (find the session with ListAgents)"}
 # A harness's account is the config home it runs under: (environment override, default directory name in ~).
 # Profiles sit beside the default as ~/<default>-<label>, e.g. ~/.claude-personal.
+# GEMINI_CLI_HOME is read by gemini-cli; Antigravity (agy) uses ANTIGRAVITY_APP_DATA_DIR under ~/.gemini.
 ACCOUNT_HOMES = {
     "claude": ("CLAUDE_CONFIG_DIR", ".claude"),
     "codex": ("CODEX_HOME", ".codex"),
@@ -353,7 +354,7 @@ def account_home(harness: str, transcript: str | None = None, environ: Mapping[s
     configured = Path(environ[variable]).expanduser() if environ.get(variable) else None
     if configured is None and harness == "gemini" and environ.get("ANTIGRAVITY_APP_DATA_DIR"):
         app_data = Path(environ["ANTIGRAVITY_APP_DATA_DIR"]).expanduser()
-        configured = app_data.parent if app_data.name == "antigravity-cli" else app_data
+        configured = app_data.parent if app_data.name.startswith("antigravity") else app_data
     if transcript:
         path = Path(transcript).expanduser()
         if configured and path.is_relative_to(configured):

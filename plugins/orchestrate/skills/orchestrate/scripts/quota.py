@@ -337,21 +337,32 @@ def _number(value: Any) -> float | None:
         return None
 
 
-def rate_limit_snapshots(text: str, since: dt.datetime | None = None) -> list[dict[str, Any]]:
-    """The rate_limits objects in Codex session-log (rollout) lines, oldest first. With `since`, lines
-    stamped earlier are skipped, so a resumed session's history does not count against a new run."""
-    found = []
+def rollout_records(text: str, since: dt.datetime | None = None) -> list[dict[str, Any]]:
+    """JSON records in Codex session-log (rollout) lines, oldest first. With `since`, lines stamped earlier
+    are skipped, so a resumed session's history does not count against a new run."""
+    records = []
     for line in text.splitlines():
         try:
             record = json.loads(line)
         except ValueError:
             continue
-        if since is not None and isinstance(record, dict) and isinstance(record.get("timestamp"), str):
+        if not isinstance(record, dict):
+            continue
+        if since is not None and isinstance(record.get("timestamp"), str):
             try:
                 if dt.datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00")) < since:
                     continue
             except ValueError:
                 pass
+        records.append(record)
+    return records
+
+
+def rate_limit_snapshots(text: str, since: dt.datetime | None = None) -> list[dict[str, Any]]:
+    """The rate_limits objects in Codex session-log (rollout) lines, oldest first. With `since`, lines
+    stamped earlier are skipped, so a resumed session's history does not count against a new run."""
+    found = []
+    for record in rollout_records(text, since=since):
         stack: list[Any] = [record]
         while stack:
             item = stack.pop()

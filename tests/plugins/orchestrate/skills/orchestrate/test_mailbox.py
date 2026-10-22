@@ -460,6 +460,10 @@ class MailboxTests(unittest.TestCase):
             str(custom.resolve()),
         )
         self.assertEqual(
+            MAILBOX.account_home("gemini", None, {"ANTIGRAVITY_APP_DATA_DIR": str(custom / "antigravity")}),
+            str(custom.resolve()),
+        )
+        self.assertEqual(
             MAILBOX.account_home("gemini", None, {"GEMINI_CLI_HOME": str(custom)}),
             str(custom.resolve()),
         )

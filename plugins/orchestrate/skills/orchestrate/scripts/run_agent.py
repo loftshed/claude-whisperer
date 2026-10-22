@@ -104,9 +104,10 @@ EXIT_ROUTE_NOT_ALLOWED = 17
 EXIT_POOL_ON_CREDITS = 18
 EXIT_STOPPED_CREDITS = 19
 CREDITS_CHECK_SECONDS = 5.0
-# Without a session log or usable rate_limits snapshots after this long (or this many records), the credits watch says it cannot protect the run.
+# Without a session log after 120 s, or after 150 post-start rollout records with no usable rate_limits,
+# the credits watch says it cannot protect the run.
 CREDITS_WATCH_GRACE_SECONDS = 120.0
-CREDITS_WATCH_MAX_BLIND_LINES = 50
+CREDITS_WATCH_MAX_BLIND_LINES = 150
 
 DEFAULT_OPENCODE_VARIANT = "high"
 OPENCODE_RUNTIME_CONFIG = {
@@ -1918,8 +1919,8 @@ class CodexCreditsWatch:
         whole = chunk[: chunk.rfind(b"\n") + 1]  # a line still being written is read next time
         self.offset += len(whole)
         text = whole.decode("utf-8", errors="replace")
-        self.lines_seen += sum(1 for line in text.splitlines() if line.strip())
         quota = bundled_module("quota")
+        self.lines_seen += len(quota.rollout_records(text, since=self.since))
         for snapshot in quota.rate_limit_snapshots(text, since=self.since):
             if not quota.valid_rate_limits(snapshot):
                 if self.previous is None and self.unavailable is None:
@@ -1943,14 +1944,7 @@ class CodexCreditsWatch:
             emit_lifecycle("credits_stop", reason=reason, balance=credits.get("balance"))
             interrupt_process(process)
             return True
-        if (
-            self.previous is None
-            and self.unavailable is None
-            and (
-                (self.lines_seen >= self.max_blind_lines)
-                or (self.lines_seen > 0 and time.monotonic() >= self.give_up_at)
-            )
-        ):
+        if self.previous is None and self.unavailable is None and self.lines_seen >= self.max_blind_lines:
             self._mark_unavailable(f"session log {self.path} has no rate_limits snapshots")
         return False
 
