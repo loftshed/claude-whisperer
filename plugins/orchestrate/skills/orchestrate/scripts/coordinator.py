@@ -8,6 +8,7 @@ ranking, run a model to poll another model, or retry an uncertain dispatch.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import functools
 import hashlib
@@ -45,10 +46,27 @@ MAILBOX = module("peer_mailbox")
 AUTHORITY = module("authority")
 SCHEMA = "agent-executor.task.v1"
 READ_ONLY_KINDS = {"consultation", "challenge", "investigation"}
+ABANDON_GRACE_SECONDS = 10.0
 
 
 class CoordinationError(ValueError):
     pass
+
+
+# The caller's authority over the team task being changed, set by main() for one action.
+FENCE: Any = None
+
+
+@contextlib.contextmanager
+def committing():
+    """The action's first durable write or side effect re-checks the caller's authority under the team lock."""
+    fence = FENCE
+    if fence is None or fence.committed:
+        yield
+        return
+    with fence.held():
+        yield
+    fence.committed = True
 
 
 def read(path: Path) -> dict[str, Any]:
@@ -169,7 +187,8 @@ def check_evidence(path: Path, *, now: dt.datetime | None = None) -> dict[str, A
 
 def save(directory: Path, state: dict[str, Any]) -> None:
     state["updated_at"] = RUNNER.utc_now()
-    RUNNER.write_json_atomic(directory / "task.json", state)
+    with committing():
+        RUNNER.write_json_atomic(directory / "task.json", state)
 
 
 def load(directory: Path) -> dict[str, Any]:
@@ -242,9 +261,12 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
         raise CoordinationError("task directory must be outside the repository")
     host = args.host
     if args.authority:
-        fence = AUTHORITY.Fence(args.authority, args.lead_session, args.lead_generation)
-        fence.release()
-        host = AUTHORITY.host_of(fence.record)
+        if (directory / "task.json").exists():
+            raise CoordinationError("task directory already holds a task")
+        # Registered first, so a task fenced to the team always appears in its handoffs.
+        host = AUTHORITY.host_of(
+            AUTHORITY.register_task(args.authority, directory, args.lead_session, args.lead_generation)
+        )
     elif not host:
         raise CoordinationError("init needs --host, or --authority for a team's task")
     duration = RUNNER.parse_duration(args.time_budget)
@@ -269,11 +291,9 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
         "cost_policy": "Measured invocation quota and deadline are enforced. Provider counters/estimates remain separate; no invoice or provider subscription-quota cap is claimed.",
     }
     if args.authority:
-        state["authority"] = {"team": args.authority}
+        state["authority"] = {"team": args.authority, "store": str(AUTHORITY.team_dir(args.authority))}
     directory.mkdir(parents=True, exist_ok=False, mode=0o700)
     save(directory, state)
-    if args.authority:
-        AUTHORITY.register_task(args.authority, directory, args.lead_session, args.lead_generation)
     return state
 
 
@@ -679,8 +699,6 @@ def dispatch(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
             save(directory, state)
             threading.Thread(target=process.wait, daemon=True).start()
             return run
-        # The run is recorded; a handover must not wait for the whole foreground run.
-        getattr(args, "release_authority", lambda: None)()
         run["process_exit_code"] = process.wait()
     if not import_result(run, state):
         run["status"] = "uncertain"
@@ -693,7 +711,7 @@ def dispatch(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
 
 def abandon(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -> dict[str, Any]:
     """End a live run a superseded lead left behind. A native run's guard audits what the worktree holds and
-    releases its lease; an executor run is interrupted and recorded when its runner exits. Never completed."""
+    releases its lease; an executor run's runner stops its executor and exits unaudited. Never completed."""
     run = next((value for value in state["runs"] if value["run_id"] == args.run_id), None)
     if run is None or run["status"] not in {"dispatching", "reserved", "active", "uncertain"}:
         raise CoordinationError("abandon needs a live run ID; recover first if it already finished")
@@ -706,16 +724,17 @@ def abandon(args: argparse.Namespace, directory: Path, state: dict[str, Any]) ->
             raise CoordinationError("a terminal packet is already recorded for this run; recover it instead")
         if alive:
             # Under the task lease, so this and a late native-complete cannot both write a terminal packet.
-            RUNNER.write_json_atomic(
-                request,
-                {
-                    "abandoned": True,
-                    "terminal": True,
-                    "event_id": "abandoned-" + run["run_id"],
-                    "native_handle": run.get("native_handle"),
-                    **note,
-                },
-            )
+            with committing():
+                RUNNER.write_json_atomic(
+                    request,
+                    {
+                        "abandoned": True,
+                        "terminal": True,
+                        "event_id": "abandoned-" + run["run_id"],
+                        "native_handle": run.get("native_handle"),
+                        **note,
+                    },
+                )
             until = time.monotonic() + 60
             while not Path(run["result_path"]).exists() and NATIVE.process_state(run) == "active":
                 if time.monotonic() > until:
@@ -727,9 +746,31 @@ def abandon(args: argparse.Namespace, directory: Path, state: dict[str, Any]) ->
         else:
             run.update(status="cancelled", abandoned=note, recovery="guard not running; nothing was audited")
     elif alive:
-        # The runner forwards the interrupt to its executor and still writes an audited result.
-        os.killpg(run["pid"], signal.SIGINT)
-        run["abandoned"] = {**note, "interrupt_sent": True}
+        # The runner stops its executor on these signals and exits, releasing the checkout's lease. It is
+        # never killed outright: its executor, in its own process group, would keep the lease.
+        with committing():
+            sent = []
+            for number in (signal.SIGINT, signal.SIGTERM):
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(run["pid"], number)
+                    sent.append(signal.Signals(number).name)
+                until = time.monotonic() + ABANDON_GRACE_SECONDS
+                while NATIVE.process_state(run) == "active" and time.monotonic() < until:
+                    time.sleep(0.1)
+                if NATIVE.process_state(run) != "active":
+                    break
+        run["abandoned"] = {**note, "signals": sent}
+        if not import_result(run, state):
+            if NATIVE.process_state(run) == "active":
+                run["recovery"] = (
+                    f"runner {run['pid']} survived {', '.join(sent)}; inspect it before the checkout is used"
+                )
+            else:
+                run.update(
+                    status="cancelled",
+                    recovery="abandoned: the runner stopped its executor without an audit; partial changes stay "
+                    "in the worktree (authority show lists them)",
+                )
     else:
         run.update(status="cancelled", abandoned=note, recovery="runner not running; recover its result if any")
     save(directory, state)
@@ -748,6 +789,8 @@ def review(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -> 
     if getattr(args, "authority_record", None):
         record["generation"] = args.authority_record["generation"]
     if args.decision in {"accept", "supported"}:
+        if run.get("abandoned"):
+            raise CoordinationError("an abandoned run is never accepted; take over or reject it")
         if result["status"] != "completed" or result.get("scope_violations") or result.get("history_violations"):
             raise CoordinationError("only a completed, audited run can be accepted or supported")
         if args.evidence is None and not args.review_id:
@@ -885,6 +928,7 @@ def host_action(args: argparse.Namespace, directory: Path, state: dict[str, Any]
 
 
 def main(argv: list[str] | None = None) -> int:
+    global FENCE
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
     route = commands.add_parser("route")
@@ -1010,17 +1054,18 @@ def main(argv: list[str] | None = None) -> int:
             # lease prevents duplicate decisions while its dispatch is running.
             with SUPPORT.workspace_lease(directory, RUNNER.default_agent_cache_dir() / "coordinator-locks"):
                 state = load(directory)
-                fence = None
                 # A team's task is fenced by default: every mutation names the lead's current generation.
                 # A pending successor may only recover and abandon; a native result's arrival is evidence.
                 if state.get("authority") and args.action != "native-complete":
-                    fence = AUTHORITY.Fence(
+                    FENCE = AUTHORITY.Fence(
                         state["authority"]["team"],
                         args.lead_session,
                         args.lead_generation,
                         allow_pending=args.action in {"abandon", "recover"},
+                        task_dir=directory,
+                        store=state["authority"].get("store"),
                     )
-                    args.authority_record, args.release_authority = fence.record, fence.release
+                    args.authority_record = FENCE.record
                 try:
                     if args.action == "dispatch":
                         output = dispatch(args, directory, state)
@@ -1037,8 +1082,7 @@ def main(argv: list[str] | None = None) -> int:
                     else:
                         output = host_action(args, directory, state)
                 finally:
-                    if fence is not None:
-                        fence.release()
+                    FENCE = None
         print(json.dumps(output, indent=2, ensure_ascii=True))
         return 0
     except (ValueError, OSError, RUNNER.RunnerError) as exc:

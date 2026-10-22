@@ -7,6 +7,7 @@ import io
 import json
 import os
 import subprocess
+import time
 import unittest
 from unittest import mock
 
@@ -245,6 +246,11 @@ class AuthorityTests(unittest.TestCase):
             *self.as_lead(1),
         )
         self.assertEqual(code, 0, run)
+        handle = self.fixture.external_path / "handle.json"
+        handle.write_text(json.dumps({"native_handle": "native-worker-1"}))
+        self.assertEqual(
+            self.task("native-attach", "--run-id", run["run_id"], "--packet", str(handle), *self.as_lead(1))[0], 0
+        )
         try:
             with self.assertRaisesRegex(SUPPORT.ContractError, "another executor"):
                 with SUPPORT.workspace_lease(self.repository, RUNNER.default_agent_cache_dir()):
@@ -260,10 +266,12 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual((abandoned["status"], abandoned["runner_status"]), ("finished", "abandoned"))
             with SUPPORT.workspace_lease(self.repository, RUNNER.default_agent_cache_dir()):
                 pass
-            # The predecessor's late result can no longer be recorded as a second terminal packet.
+            # The predecessor's genuine late result, for the attached handle, is not a second terminal packet.
             packet = self.fixture.external_path / "late.json"
-            packet.write_text(json.dumps({"native_handle": "x", "event_id": "late", "terminal": True}))
-            self.assertNotEqual(self.task("native-complete", "--run-id", run["run_id"], "--packet", str(packet))[0], 0)
+            packet.write_text(json.dumps({"native_handle": "native-worker-1", "event_id": "late", "terminal": True}))
+            code, late = self.task("native-complete", "--run-id", run["run_id"], "--packet", str(packet))
+            self.assertNotEqual(code, 0)
+            self.assertIn("differs from the persisted result", late)
             self.authority(
                 "accept",
                 "--session",
@@ -275,6 +283,8 @@ class AuthorityTests(unittest.TestCase):
                 "--digest",
                 self.digest(),
             )
+            accepted = self.task("review", "--run-id", run["run_id"], "--decision", "accept", *self.as_lead(2, DEPUTY))
+            self.assertIn("abandoned run is never accepted", accepted[1])
             code, decision = self.task(
                 "review", "--run-id", run["run_id"], "--decision", "takeover", *self.as_lead(2, DEPUTY)
             )
@@ -283,7 +293,33 @@ class AuthorityTests(unittest.TestCase):
             if COORDINATOR.NATIVE.process_state(run) == "active":
                 os.kill(run["pid"], 15)
 
-    def test_accept_moves_live_runs_conductor_mailboxes_to_the_successor(self) -> None:
+    def test_abandon_interrupts_an_inherited_executor_run_and_records_its_audit(self) -> None:
+        started, release = self.fixture.external_path / "started", self.fixture.external_path / "release"
+        with mock.patch.dict(
+            os.environ, {"FAKE_BLOCK": "1", "FAKE_STARTED": str(started), "FAKE_RELEASE": str(release)}
+        ):
+            code, run = self.investigate("blocked", *self.as_lead(1), "--background")
+            self.assertEqual(code, 0, run)
+            try:
+                deadline = time.monotonic() + 30
+                while not started.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(started.exists())
+                self.take_over()
+                code, abandoned = self.task(
+                    "abandon", "--run-id", run["run_id"], "--reason", "lead left", *self.as_lead(2, DEPUTY)
+                )
+                self.assertEqual(code, 0, abandoned)
+                self.assertEqual(abandoned["abandoned"]["signals"][0], "SIGINT")
+                self.assertEqual(abandoned["status"], "cancelled", abandoned)
+                self.assertIn("without an audit", abandoned["recovery"])
+                # Its executor is stopped too, so the checkout's write lease is free again.
+                with SUPPORT.workspace_lease(self.repository, RUNNER.default_agent_cache_dir()):
+                    pass
+            finally:
+                release.write_text("go")
+
+    def test_a_worker_question_after_a_takeover_reaches_the_successor(self) -> None:
         opened = MAILBOX.open_run(
             MAILBOX.root(),
             "authority-run",
@@ -299,12 +335,58 @@ class AuthorityTests(unittest.TestCase):
         )
         COORDINATOR.save(self.directory, state)
         self.take_over()
-        record = self.authority(
+        self.authority(
             "accept", "--session", DEPUTY, "--harness", "codex", "--expect-generation", "2", "--digest", self.digest()
         )
-        conductor = MAILBOX.load(MAILBOX.peer_path(MAILBOX.root(), opened["conductor"]))
-        self.assertEqual((conductor["harness"], conductor["conductorLead"]), ("codex", DEPUTY))
-        self.assertEqual(record["log"][-1]["moved_mailboxes"], [opened["conductor"]])
+        [live] = self.authority("show", "--harness", "codex")["state"]["runs"]
+        self.assertEqual(live["conductor_mailbox"], opened["conductor"])
+        worker = MAILBOX.load(MAILBOX.peer_path(MAILBOX.root(), opened["worker"]))
+        MAILBOX.send(
+            MAILBOX.root(), sender=worker, to=opened["conductor"], text="Which version?", kind="question", client_id="q"
+        )
+        code, action = self.task("next")
+        self.assertEqual((code, action["action"], action["messages"][0]["text"]), (0, "respond", "Which version?"))
+
+    def test_the_fence_refuses_an_unregistered_task_or_another_store(self) -> None:
+        record_path = AUTHORITY.team_dir("team") / "authority.json"
+        record = json.loads(record_path.read_text())
+        record["tasks"] = []
+        record_path.write_text(json.dumps(record))
+        self.assertIn("not registered with its team", self.task("recover", *self.as_lead(1))[1])
+        with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(self.fixture.external_path / "elsewhere")}):
+            self.assertIn("this process resolves", self.task("recover", *self.as_lead(1))[1])
+
+    def test_an_authority_change_waits_briefly_then_says_why(self) -> None:
+        with (
+            AUTHORITY.locked(AUTHORITY.team_dir("team"), exclusive=False),
+            mock.patch.object(AUTHORITY, "LOCK_WAIT_SECONDS", 0.2),
+        ):
+            with self.assertRaisesRegex(AUTHORITY.AuthorityError, "a coordinator action holds the team lock"):
+                AUTHORITY.locked(AUTHORITY.team_dir("team"), exclusive=True, wait_seconds=0.2).__enter__()
+
+    def test_git_status_parsing_and_unreadable_checkouts(self) -> None:
+        self.assertEqual(
+            AUTHORITY.porcelain_paths("R  allowed/new.txt\0allowed/old.txt\0?? allowed/x.txt\0 M a b.txt\0"),
+            ["a b.txt", "allowed/new.txt", "allowed/old.txt", "allowed/x.txt"],
+        )
+        self.take_over()
+        with mock.patch.object(AUTHORITY, "git", return_value=None):
+            state = AUTHORITY.show("team", "codex")["state"]
+            [checkout] = state["checkouts"].values()
+            self.assertEqual(checkout["error"], "git failed")
+            refused = self.authority(
+                "accept",
+                "--session",
+                DEPUTY,
+                "--harness",
+                "codex",
+                "--expect-generation",
+                "2",
+                "--digest",
+                state["digest"],
+                ok=False,
+            )
+        self.assertIn("cannot read the checkout state", refused)
 
 
 if __name__ == "__main__":

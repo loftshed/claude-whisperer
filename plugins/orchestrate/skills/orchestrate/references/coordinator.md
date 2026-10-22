@@ -218,7 +218,8 @@ compare-and-swap with `--expect-generation`; read the current state with `author
 - `accept` binds to the digest of the state it was shown: HEAD per checkout, whether the handoff HEAD
   is still an ancestor, live runs by identity and status, and uncommitted paths in the team's scope
   minus those a live writing run owns. Any change, or rewritten history, refuses it; show again.
-- On accept, live runs' conductor mailboxes move to the successor, so a worker's question reaches it.
+- `show` lists each live run's conductor mailbox; the successor reads a worker's questions through
+  `coordinator next`, which needs no generation.
 
 `coordinator.py init --authority T --lead-session S --lead-generation N` puts a task under the team.
 From then on every action except `show` and `next` needs `--lead-session` and `--lead-generation`
@@ -230,8 +231,9 @@ workers through the executor. A team's `--allow-credits` dispatch needs the appo
 
 `abandon --run-id R --reason ...` ends a live run a superseded lead left behind. A native run's guard
 outlives its worker and holds the checkout's write lease; abandon makes it audit what the worktree
-holds, release the lease and record `abandoned`, never completed. An executor run is interrupted and
-its runner still writes an audited result. Then review it (`takeover` or `reject`). Native corrections
+holds, release the lease and record `abandoned`, never completed. An executor run's runner stops its
+executor and exits without an audit; its partial changes stay in the worktree, listed by `show`. Then
+review a native one (`takeover` or `reject`); an abandoned run is never accepted. Native corrections
 need the original host's session, so the handoff marks them unavailable to a cross-harness successor.
 
 **Not fenced:** session IDs are guard rails against confused or superseded agents, not security; any

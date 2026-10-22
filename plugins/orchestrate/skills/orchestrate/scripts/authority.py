@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,8 @@ TEAM = r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
 # The coordinator host that a lead of each harness supervises from.
 HARNESS_HOST = {"claude": "claude", "codex": "codex", "gemini": "agy", "agy": "agy", "opencode": "opencode"}
 LIVE_RUN = {"dispatching", "reserved", "active", "uncertain"}
+# Coordinator actions hold the team lock only briefly; an authority change waits at most this long.
+LOCK_WAIT_SECONDS = 30.0
 WRITING_KINDS = {"implementation", "correction", "verification"}
 
 
@@ -79,11 +82,23 @@ def member(session: str, harness: str) -> dict[str, str]:
 
 
 @contextlib.contextmanager
-def locked(directory: Path, *, exclusive: bool) -> Iterator[None]:
+def locked(directory: Path, *, exclusive: bool, wait_seconds: float = LOCK_WAIT_SECONDS) -> Iterator[None]:
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor = os.open(directory / "authority.lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        until = time.monotonic() + wait_seconds
+        while True:
+            try:
+                fcntl.flock(descriptor, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= until:
+                    raise AuthorityError(
+                        "a coordinator action holds the team lock; retry in a moment"
+                        if exclusive
+                        else "an authority change holds the team lock; retry in a moment"
+                    ) from None
+                time.sleep(0.05)
         yield
     finally:
         os.close(descriptor)
@@ -198,23 +213,28 @@ def computed_state(record: dict[str, Any], successor_harness: str | None = None)
             runs.append(entry)
     checkouts = {}
     for repository in sorted(scope):
-        status = git(repository, "status", "--porcelain=v1", "-z", "--untracked-files=all") or ""
-        paths = sorted({item[3:] for item in status.split("\0") if len(item) > 3})
+        status = git(repository, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+        head = git(repository, "rev-parse", "HEAD")
+        if status is None or head is None:
+            # Fail closed: an unreadable checkout is unknown, never clean.
+            checkouts[repository] = {"head": None, "branch": None, "dirty_in_scope": None, "error": "git failed"}
+            continue
+        paths = porcelain_paths(status)
         inside = [
             path
             for path in paths
             if any(path == root or path.startswith(root.rstrip("/") + "/") for root in scope[repository])
             and not any(path == root or path.startswith(root.rstrip("/") + "/") for root in owned.get(repository, ()))
         ]
-        head = (git(repository, "rev-parse", "HEAD") or "").strip()
         checkouts[repository] = {
-            "head": head,
+            "head": head.strip(),
             "branch": (git(repository, "branch", "--show-current") or "").strip(),
             "dirty_in_scope": inside,
         }
     handoff_heads = (record.get("offer") or {}).get("heads") or (record.get("handoff") or {}).get("heads") or {}
     ancestry = {
-        repository: git(repository, "merge-base", "--is-ancestor", head, checkouts[repository]["head"]) is not None
+        repository: checkouts[repository]["head"] is not None
+        and git(repository, "merge-base", "--is-ancestor", head, checkouts[repository]["head"]) is not None
         for repository, head in handoff_heads.items()
         if repository in checkouts
     }
@@ -236,6 +256,22 @@ def computed_state(record: dict[str, Any], successor_harness: str | None = None)
         "handoff": record.get("handoff"),
         "offer": record.get("offer"),
     }
+
+
+def porcelain_paths(status: str) -> list[str]:
+    """Paths from `git status --porcelain=v1 -z`: a rename or copy entry is followed by its original path."""
+    items, paths, index = status.split("\0"), set(), 0
+    while index < len(items):
+        item = items[index]
+        index += 1
+        if len(item) < 4:
+            continue
+        paths.add(item[3:])
+        if item[0] in "RC" or item[1] in "RC":
+            if index < len(items) and items[index]:
+                paths.add(items[index])
+            index += 1
+    return sorted(paths)
 
 
 def show(team: str, successor_harness: str | None = None) -> dict[str, Any]:
@@ -334,6 +370,9 @@ def accept(team: str, caller: dict[str, str], expect_generation: int, digest: st
         state = computed_state(record, caller["harness"])
         if digest != state["digest"]:
             raise AuthorityError("the handoff state changed since it was shown; run show again and review it")
+        unknown = sorted(repository for repository, checkout in state["checkouts"].items() if checkout.get("error"))
+        if unknown:
+            raise AuthorityError("cannot read the checkout state of: " + ", ".join(unknown))
         rewritten = sorted(repository for repository, ancestor in state["ancestry"].items() if not ancestor)
         if rewritten:
             raise AuthorityError(
@@ -355,27 +394,13 @@ def accept(team: str, caller: dict[str, str], expect_generation: int, digest: st
                 offer=None,
             )
         record["status"] = "active"
-        moved = move_conductor_mailboxes(state["runs"], caller)
-        log(record, "accept", lead=caller, digest=digest, moved_mailboxes=moved)
+        log(record, "accept", lead=caller, digest=digest)
         save(directory, record)
         return record
 
 
-def move_conductor_mailboxes(runs: list[dict[str, Any]], lead: dict[str, str]) -> list[str]:
-    """Point live runs' conductor mailboxes at the successor, so a worker's question reaches it."""
-    mailbox = module("peer_mailbox")
-    moved = []
-    for run in runs:
-        session = run.get("conductor_mailbox")
-        if not session:
-            continue
-        with contextlib.suppress(OSError, ValueError, mailbox.MailboxError):
-            if mailbox.annotate(mailbox.root(), session, harness=lead["harness"], conductorLead=lead["session"]):
-                moved.append(session)
-    return moved
-
-
-def register_task(team: str, task_dir: Path, session: str, generation: int) -> dict[str, Any]:
+def register_task(team: str, task_dir: Path, session: str | None, generation: int | None) -> dict[str, Any]:
+    """Put a task under the team before the task exists, so the fence and every handoff see the same tasks."""
     directory = team_dir(team)
     with locked(directory, exclusive=True):
         record = require(directory)
@@ -403,28 +428,47 @@ def check(record: dict[str, Any], session: str | None, generation: int | None, *
 
 
 class Fence:
-    """A shared hold on the team's record while one coordinator mutation validates and records itself.
+    """The caller's authority over one team task, checked under brief shared holds of the team lock.
 
-    Authority changes take the lock exclusively and never take a task lease, so holding this inside a task
-    lease cannot deadlock. Release it before a long wait: a handover must not block for a whole run.
+    It checks when the action starts and again around the action's first durable write (its commit point),
+    so a long action (verification, a capture, a guard's audit) never blocks a handover, and an action
+    whose lead was superseded meanwhile cannot commit. Authority changes never take a task lease, so a
+    hold inside the task lease cannot deadlock.
     """
 
-    def __init__(self, team: str, session: str | None, generation: int | None, *, allow_pending: bool = False):
-        directory = team_dir(team)
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.descriptor: int | None = os.open(directory / "authority.lock", os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            fcntl.flock(self.descriptor, fcntl.LOCK_SH)
-            self.record = require(directory)
-            check(self.record, session, generation, allow_pending=allow_pending)
-        except BaseException:
-            self.release()
-            raise
+    def __init__(
+        self,
+        team: str,
+        session: str | None,
+        generation: int | None,
+        *,
+        allow_pending: bool = False,
+        task_dir: Path | None = None,
+        store: str | None = None,
+    ):
+        self.directory = team_dir(team)
+        if store is not None and Path(store) != self.directory:
+            raise AuthorityError(
+                f"this task's team record lives in {store}, but this process resolves {self.directory}: "
+                "run with the same AGENT_EXECUTOR_HOME / XDG_CACHE_HOME as the team"
+            )
+        self.session, self.generation, self.allow_pending = session, generation, allow_pending
+        self.task_dir = str(task_dir.resolve()) if task_dir is not None else None
+        self.committed = False
+        with self.held():
+            pass
+
+    @contextlib.contextmanager
+    def held(self) -> Iterator[dict[str, Any]]:
+        with locked(self.directory, exclusive=False):
+            self.record = require(self.directory)
+            check(self.record, self.session, self.generation, allow_pending=self.allow_pending)
+            if self.task_dir is not None and self.task_dir not in self.record.get("tasks", []):
+                raise AuthorityError("this task is not registered with its team; it cannot be changed under it")
+            yield self.record
 
     def release(self) -> None:
-        if self.descriptor is not None:
-            os.close(self.descriptor)
-            self.descriptor = None
+        """Kept for callers that release before a long wait; holds are already brief."""
 
 
 def main(argv: list[str] | None = None) -> int:
