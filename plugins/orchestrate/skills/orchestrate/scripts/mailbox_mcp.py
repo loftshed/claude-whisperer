@@ -589,6 +589,7 @@ class Server:
                 source="mcp",
                 state=state,
                 account=mailbox.account_home(self.harness, environ=self.environ),
+                effort=mailbox.runtime_effort(self.harness),
             )
         peer = mailbox.load(mailbox.peer_path(self.base, session))
         if not mailbox.valid_peer(peer) or not mailbox.is_live(peer):

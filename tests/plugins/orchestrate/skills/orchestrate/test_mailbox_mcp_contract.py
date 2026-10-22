@@ -109,7 +109,8 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(reader["harnessLabel"], "Codex CLI")
         self.assertEqual(reader["modelSource"], "declared")
         self.assertIn("gpt-6-sol · Codex CLI", rows["content"][0]["text"])
-        self.assertEqual(reader["name"], self.reader["name"])
+        # The model joins the name; the person-repo part the session started with stays.
+        self.assertEqual(reader["name"], f"{self.reader['name']}-gpt-6-sol")
         self.assertEqual(reader["checkout"], str(SCRIPTS.parents[4].resolve()))
         self.assertEqual(reader["repositoryName"], SCRIPTS.parents[4].resolve().name)
         self.assertTrue(rows["content"][0]["text"].startswith(args["focus"]))

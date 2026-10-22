@@ -193,6 +193,8 @@ export async function dispatchMember(id, memberId, options = {}) {
     id,
     (current) => {
       const agent = memberOf(current, memberId);
+      // A concurrent refused dispatch of this member may have cleared the intent; this one launched.
+      agent.dispatch ||= binding;
       agent.dispatch.runId = result.run_id;
       delete agent.dispatchError;
       return current;

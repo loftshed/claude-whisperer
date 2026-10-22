@@ -35,6 +35,13 @@ failure through the mailbox, except when a separate top-level host process is ge
 External executor runs (`run_agent.py` with `--transport executor`) use their dedicated `run-<id>-conductor` / `run-<id>-worker` mailbox for the run's reporting contract. Natively dispatched subagents (`native_handoff` or `coordinator.py dispatch --transport native`) communicate with their parent through the host's native parent-child tools first and keep the run mailbox only for delegation tracking and fallback when native mid-run messaging is unavailable.
 `NATIVE_MESSAGING` in `scripts/peer_mailbox.py` lists the harnesses with an enforced mailbox guard; `peers`, `table()`, and hook colleague banners also surface `account`, `nativeTool`, and `nativeAddress` so callers can route natively without guessing.
 
+**Names.** A peer's name reads `person-repo-model-effort`, for example `ada-orkest-opus-5.5-xhigh`.
+The first name is picked once per session (from `/usr/share/dict/propernames` when present) and
+differs from other live peers'; model and effort come from the runtime and are left out when unknown,
+never guessed. When they change, the name follows and earlier names keep resolving; `person-repo` and
+the session ID are the stable addresses. A Claude session's own name (what `ListAgents` shows) is set
+by Claude Code; to make it match, launch with `claude --name "$(ork name --model opus-5.5)"`.
+
 **Accounts.** Each peer records `accountHome`, the config home its harness runs under. Claude's comes
 from the profile whose `sessions/` metadata lists the session; otherwise the hook's transcript path,
 then `CLAUDE_CONFIG_DIR` or `CODEX_HOME` in the harness process (default `~/.claude`, `~/.codex`).
