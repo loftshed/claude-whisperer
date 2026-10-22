@@ -15,6 +15,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -41,6 +42,7 @@ POLICY = module("conductor_policy")
 NATIVE = module("native_bridge")
 QUOTA = module("quota")
 MAILBOX = module("peer_mailbox")
+AUTHORITY = module("authority")
 SCHEMA = "agent-executor.task.v1"
 READ_ONLY_KINDS = {"consultation", "challenge", "investigation"}
 
@@ -238,13 +240,20 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
     directory = args.task_dir.expanduser().resolve()
     if directory == repository or repository in directory.parents:
         raise CoordinationError("task directory must be outside the repository")
+    host = args.host
+    if args.authority:
+        fence = AUTHORITY.Fence(args.authority, args.lead_session, args.lead_generation)
+        fence.release()
+        host = AUTHORITY.host_of(fence.record)
+    elif not host:
+        raise CoordinationError("init needs --host, or --authority for a team's task")
     duration = RUNNER.parse_duration(args.time_budget)
     now = dt.datetime.now(dt.UTC)
     state = {
         "schema": SCHEMA,
         "task_id": uuid.uuid4().hex,
         "repository": str(repository),
-        "host": args.host,
+        "host": host,
         "status": "active",
         "created_at": now.isoformat(),
         "deadline": (now + dt.timedelta(seconds=duration)).isoformat(),
@@ -259,8 +268,12 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
         "evidence_policy": "host_receipts_required",
         "cost_policy": "Measured invocation quota and deadline are enforced. Provider counters/estimates remain separate; no invoice or provider subscription-quota cap is claimed.",
     }
+    if args.authority:
+        state["authority"] = {"team": args.authority}
     directory.mkdir(parents=True, exist_ok=False, mode=0o700)
     save(directory, state)
+    if args.authority:
+        AUTHORITY.register_task(args.authority, directory, args.lead_session, args.lead_generation)
     return state
 
 
@@ -535,7 +548,11 @@ def dispatch(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
     model_id = exact_model(engine, model_id)
     if engine == "codex" and effort is None and args.transport != "native":
         raise CoordinationError("recorded Codex dispatch requires explicit --effort for reproducible correction")
-    is_native = native(state["host"], engine, model_id)
+    authority = getattr(args, "authority_record", None)
+    if authority and args.allow_credits and not authority.get("allow_credits"):
+        raise CoordinationError("the user did not allow this team to spend credits; appoint with --allow-credits")
+    host = AUTHORITY.host_of(authority) if authority else state["host"]
+    is_native = native(host, engine, model_id)
     if is_native and args.transport != "native":
         raise CoordinationError("this executor is native to the host; use native tools and retain ownership there")
     if not is_native and args.transport == "native":
@@ -611,6 +628,8 @@ def dispatch(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
         "effort": effort,
         "variant": variant,
         "billing_mode": billing,
+        "host": host,
+        "generation": authority["generation"] if authority else None,
         "allow_credits": bool(args.allow_credits),
         "verification_commands": verification,
         "event_id": event_path.stem,
@@ -660,12 +679,59 @@ def dispatch(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -
             save(directory, state)
             threading.Thread(target=process.wait, daemon=True).start()
             return run
+        # The run is recorded; a handover must not wait for the whole foreground run.
+        getattr(args, "release_authority", lambda: None)()
         run["process_exit_code"] = process.wait()
     if not import_result(run, state):
         run["status"] = "uncertain"
         run["recovery"] = (
             "Runner exited without a terminal result; inspect artifacts before taking over. No automatic retry."
         )
+    save(directory, state)
+    return run
+
+
+def abandon(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -> dict[str, Any]:
+    """End a live run a superseded lead left behind. A native run's guard audits what the worktree holds and
+    releases its lease; an executor run is interrupted and recorded when its runner exits. Never completed."""
+    run = next((value for value in state["runs"] if value["run_id"] == args.run_id), None)
+    if run is None or run["status"] not in {"dispatching", "reserved", "active", "uncertain"}:
+        raise CoordinationError("abandon needs a live run ID; recover first if it already finished")
+    authority = getattr(args, "authority_record", None)
+    note = {"reason": args.reason, "at": RUNNER.utc_now(), "generation": authority["generation"] if authority else None}
+    alive = NATIVE.process_state(run) == "active"
+    if run.get("transport") == "native":
+        request = directory / "runs" / run["run_id"] / "completion.json"
+        if request.exists():
+            raise CoordinationError("a terminal packet is already recorded for this run; recover it instead")
+        if alive:
+            # Under the task lease, so this and a late native-complete cannot both write a terminal packet.
+            RUNNER.write_json_atomic(
+                request,
+                {
+                    "abandoned": True,
+                    "terminal": True,
+                    "event_id": "abandoned-" + run["run_id"],
+                    "native_handle": run.get("native_handle"),
+                    **note,
+                },
+            )
+            until = time.monotonic() + 60
+            while not Path(run["result_path"]).exists() and NATIVE.process_state(run) == "active":
+                if time.monotonic() > until:
+                    raise CoordinationError("the native guard is still auditing; recover this run shortly")
+                time.sleep(0.1)
+            run["abandoned"] = note
+            if not import_result(run, state):
+                run.update(status="uncertain", recovery="guard exited without an abandoned result; inspect artifacts")
+        else:
+            run.update(status="cancelled", abandoned=note, recovery="guard not running; nothing was audited")
+    elif alive:
+        # The runner forwards the interrupt to its executor and still writes an audited result.
+        os.killpg(run["pid"], signal.SIGINT)
+        run["abandoned"] = {**note, "interrupt_sent": True}
+    else:
+        run.update(status="cancelled", abandoned=note, recovery="runner not running; recover its result if any")
     save(directory, state)
     return run
 
@@ -679,6 +745,8 @@ def review(args: argparse.Namespace, directory: Path, state: dict[str, Any]) -> 
         raise CoordinationError("result changed since collection")
     result = read(result_path)
     record = {"run_id": args.run_id, "decision": args.decision, "at": RUNNER.utc_now()}
+    if getattr(args, "authority_record", None):
+        record["generation"] = args.authority_record["generation"]
     if args.decision in {"accept", "supported"}:
         if result["status"] != "completed" or result.get("scope_violations") or result.get("history_violations"):
             raise CoordinationError("only a completed, audited run can be accepted or supported")
@@ -825,7 +893,8 @@ def main(argv: list[str] | None = None) -> int:
     recommend.add_argument("--packet", type=Path, required=True)
     init = commands.add_parser("init")
     init.add_argument("--task-spec", type=Path, required=True)
-    init.add_argument("--host", choices=("codex", "agy", "claude", "opencode", "other"), required=True)
+    init.add_argument("--host", choices=("codex", "agy", "claude", "opencode", "other"))
+    init.add_argument("--authority", help="team whose lead may change this task (see authority.py)")
     init.add_argument("--time-budget", default="1h")
     init.add_argument("--invocation-allowance", type=int, default=5)
     for action in (
@@ -845,9 +914,15 @@ def main(argv: list[str] | None = None) -> int:
         "ack",
         "native-attach",
         "native-complete",
+        "abandon",
     ):
         sub = init if action == "init" else commands.add_parser(action)
         sub.add_argument("--task-dir", type=Path, required=True)
+        sub.add_argument("--lead-session", help="for a team's task: the lead's own session")
+        sub.add_argument("--lead-generation", type=int, help="for a team's task: the lead's authority generation")
+        if action == "abandon":
+            sub.add_argument("--run-id", required=True)
+            sub.add_argument("--reason", required=True)
         if action == "dispatch":
             sub.add_argument(
                 "--kind",
@@ -935,18 +1010,35 @@ def main(argv: list[str] | None = None) -> int:
             # lease prevents duplicate decisions while its dispatch is running.
             with SUPPORT.workspace_lease(directory, RUNNER.default_agent_cache_dir() / "coordinator-locks"):
                 state = load(directory)
-                if args.action == "dispatch":
-                    output = dispatch(args, directory, state)
-                elif args.action == "recover":
-                    output = recover(directory, state)
-                elif args.action == "review":
-                    output = review(args, directory, state)
-                elif args.action == "reverify":
-                    output = reverify(args, directory, state)
-                elif args.action == "show":
-                    output = state
-                else:
-                    output = host_action(args, directory, state)
+                fence = None
+                # A team's task is fenced by default: every mutation names the lead's current generation.
+                # A pending successor may only recover and abandon; a native result's arrival is evidence.
+                if state.get("authority") and args.action != "native-complete":
+                    fence = AUTHORITY.Fence(
+                        state["authority"]["team"],
+                        args.lead_session,
+                        args.lead_generation,
+                        allow_pending=args.action in {"abandon", "recover"},
+                    )
+                    args.authority_record, args.release_authority = fence.record, fence.release
+                try:
+                    if args.action == "dispatch":
+                        output = dispatch(args, directory, state)
+                    elif args.action == "recover":
+                        output = recover(directory, state)
+                    elif args.action == "review":
+                        output = review(args, directory, state)
+                    elif args.action == "reverify":
+                        output = reverify(args, directory, state)
+                    elif args.action == "abandon":
+                        output = abandon(args, directory, state)
+                    elif args.action == "show":
+                        output = state
+                    else:
+                        output = host_action(args, directory, state)
+                finally:
+                    if fence is not None:
+                        fence.release()
         print(json.dumps(output, indent=2, ensure_ascii=True))
         return 0
     except (ValueError, OSError, RUNNER.RunnerError) as exc:

@@ -211,6 +211,67 @@ describe("room execution", () => {
   });
 });
 
+describe("rooms under a team", () => {
+  it("run only the team's tasks, pass the lead's generation and show the lead", async () => {
+    const root = await directory();
+    const cwd = await directory();
+    const taskDir = await directory();
+    const room = await newRoom(parseTeam("claude:haiku"), {
+      id: "team-room",
+      cwd,
+      root,
+      authority: "team",
+    });
+    const task = {
+      schema: "agent-executor.task.v1",
+      task_id: "t",
+      repository: room.cwd,
+      runs: [],
+      decisions: [],
+    };
+    const calls = [];
+    const run = async (args) => {
+      calls.push(args);
+      if (args[0] === "show") return structuredClone(task);
+      const request = args[args.indexOf("--request-id") + 1];
+      task.runs.push({
+        run_id: "r1",
+        request_id: request,
+        status: "active",
+        engine: "claude",
+        transport: "executor",
+      });
+      return { run_id: "r1" };
+    };
+    await expect(dispatchMember(room.id, "haiku-1", { root, taskDir, run })).rejects.toThrow(
+      "not under the room's team team",
+    );
+    task.authority = { team: "team" };
+    const lead = async (team) => ({
+      team,
+      generation: 3,
+      status: "active",
+      lead: { session: "s" },
+    });
+    await dispatchMember(room.id, "haiku-1", {
+      root,
+      taskDir,
+      run,
+      leadSession: "s",
+      leadGeneration: 3,
+      authority: lead,
+    });
+    const dispatch = calls.find((args) => args[0] === "dispatch");
+    expect(dispatch.slice(dispatch.indexOf("--lead-session"))).toEqual([
+      "--lead-session",
+      "s",
+      "--lead-generation",
+      "3",
+    ]);
+    expect((await observeRoom(room.id, { root, run, authority: lead })).lead.generation).toBe(3);
+  });
+});
+
 describe("room CLI", () => {
   it("creates and lists rooms", async () => {
     const root = await directory();
