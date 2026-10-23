@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- docs(orchestrate): add plugin README covering installation, CLI entry points, `consult`, bounded delegation, `peer-mailbox`, team succession, and `stooges` rooms
+
 ## 0.30.0
 
 - feat(orchestrate): propose a deputy from quota facts and take over on standing evidence (#21)
