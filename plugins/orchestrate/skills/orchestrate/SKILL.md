@@ -116,7 +116,9 @@ a task's invocation allowance, and for a blocked worker asking its conductor.
 Delegate substantial, self-contained work so you can advance other authorized parts while it runs.
 Prepare integration, check evidence, or finish independent work instead of waiting when useful work
 is available. Wait only when the next useful action depends on the worker, and keep its leased
-worktree frozen.
+worktree frozen. Batch related moves or structural refactors and run scoped checks (lint, types,
+imports, and narrowly affected tests) during iteration; reserve full test or visual suites for one
+combined integration checkpoint rather than running them between every move.
 
 Before implementation delegation, state the objective, exact scope, acceptance criteria, versions
 and conventions, decisions to preserve, failed attempts and evidence pointers (the task-spec
