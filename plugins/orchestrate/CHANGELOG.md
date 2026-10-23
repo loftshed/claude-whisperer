@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.31.2
+
+- fix(orchestrate): judge sessions of a shared process by their own activity (#25)
+
 ## 0.31.1
 
 - fix(orchestrate): batch related moves and scope iterative development checks (#24)
