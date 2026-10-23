@@ -82,6 +82,13 @@ class MailboxTests(unittest.TestCase):
     def peer(self, session, harness, cwd, pid=None):
         return MAILBOX.register(self.base, session=session, harness=harness, cwd=cwd, pid=pid or os.getpid())
 
+    def own_process(self):
+        """A pid no setUp peer shares: they all record this test process."""
+        process = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        return process.pid
+
     def test_names_are_a_person_the_repo_the_model_and_the_effort(self):
         # person-model-effort-repo-hex, leaving out what is not known yet; the hex is the session's last byte.
         self.assertRegex(self.claude["name"], r"^[a-z]+-example-app-11$")
@@ -632,10 +639,38 @@ class MailboxTests(unittest.TestCase):
         self.assertIsNone(MAILBOX.load(broken).get("readAt"))
 
     def test_a_peer_whose_own_process_still_runs_stays_live_however_idle(self):
-        peer = self.peer("codex-session-idle", "codex", "/work/a")
+        peer = self.peer("codex-session-idle", "codex", "/work/a", pid=self.own_process())
         path = MAILBOX.peer_path(self.base, peer["session"])
         MAILBOX.write(path, {**MAILBOX.load(path), "lastSeenAt": "2000-01-01T00:00:00Z"})
         self.assertIn(peer["session"], [item["session"] for item in MAILBOX.peers(self.base)])
+
+    def test_sessions_sharing_one_process_are_judged_by_their_own_activity(self):
+        pid = self.own_process()
+        self.assertNotIn("sharedProcess", self.peer("conversation-done", "gemini", str(self.repository), pid=pid))
+        self.peer("conversation-working", "gemini", str(self.repository), pid=pid)
+        self.peer("conversation-recent", "gemini", str(self.repository), pid=pid)
+        quiet = MAILBOX.stamp(MAILBOX.now() - MAILBOX.SHARED_PROCESS_IDLE_TTL - dt.timedelta(minutes=1))
+        for session, state in (("conversation-done", "idle"), ("conversation-working", "busy")):
+            path = MAILBOX.peer_path(self.base, session)
+            self.assertTrue(MAILBOX.load(path)["sharedProcess"])  # marked when a later session registered
+            MAILBOX.write(path, {**MAILBOX.load(path), "lastSeenAt": quiet, "state": state})
+        listed = [peer["session"] for peer in MAILBOX.peers(self.base)]
+        self.assertNotIn("conversation-done", listed)
+        self.assertIn("conversation-working", listed)
+        self.assertIn("conversation-recent", listed)
+        self.assertFalse(MAILBOX.peer_path(self.base, "conversation-done").exists())
+        self.peer("conversation-done", "gemini", str(self.repository), pid=pid)  # its next turn
+        self.assertIn("conversation-done", [peer["session"] for peer in MAILBOX.peers(self.base)])
+
+    def test_a_session_left_alone_on_its_process_is_present_with_it_again(self):
+        pid = self.own_process()
+        self.peer("thread-left", "codex", str(self.repository), pid=pid)
+        self.peer("thread-gone", "codex", str(self.repository), pid=pid)
+        MAILBOX.unregister(self.base, "thread-gone")
+        self.assertNotIn("sharedProcess", self.peer("thread-left", "codex", str(self.repository), pid=pid))
+        path = MAILBOX.peer_path(self.base, "thread-left")
+        MAILBOX.write(path, {**MAILBOX.load(path), "lastSeenAt": "2000-01-01T00:00:00Z"})
+        self.assertIn("thread-left", [peer["session"] for peer in MAILBOX.peers(self.base)])
 
     def test_a_message_with_a_foreign_id_is_skipped(self):
         sent = MAILBOX.send(self.base, sender=self.codex, to=self.claude["name"], text="ok")
@@ -2113,6 +2148,15 @@ class RunMailboxTests(unittest.TestCase):
         self.assertEqual((removed["peers"], removed["messages"]), (2, 1))
         self.assertIsNone(MAILBOX.load(MAILBOX.peer_path(self.base, self.info["worker"])))
         self.assertFalse(MAILBOX.inbox_dir(self.base, self.info["conductor"]).exists())
+
+    def test_the_runner_prunes_runs_closed_for_a_week(self):
+        self.result_path.write_text(
+            json.dumps({"finished_at": MAILBOX.stamp(MAILBOX.now() - dt.timedelta(days=8)), "status": "completed"})
+        )
+        with mock.patch.dict(os.environ, {"AGENT_EXECUTOR_HOME": str(self.directory)}):
+            RUNNER.auto_prune()
+        self.assertEqual(MAILBOX.run_peers(self.base, self.info["run"]), {})
+        self.assertEqual([peer["session"] for peer in MAILBOX.peers(self.base)], [self.interactive["session"]])
 
 
 class McpServerTests(unittest.TestCase):

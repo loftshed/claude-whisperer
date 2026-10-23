@@ -42,6 +42,9 @@ RUN_FIELDS = ("session", "name", "harness", "cwd", "role", "run", "counterpart",
 MAX_AGE = dt.timedelta(days=7)
 # A peer without a known pid counts as live this long after it was last seen.
 UNKNOWN_PID_TTL = dt.timedelta(hours=2)
+# An idle session whose process hosts other sessions too (one daemon, many conversations) counts as live this long
+# after it was last seen; the running process says nothing about it.
+SHARED_PROCESS_IDLE_TTL = dt.timedelta(hours=3)
 HARNESSES = ("claude", "codex", "opencode", "gemini", "unknown")
 STATES = ("idle", "busy", "waiting")
 SCOPES = ("project", "cross-project")
@@ -545,11 +548,15 @@ def is_run_record(peer: dict[str, Any] | None) -> bool:
 
 
 def run_peers(base: Path, run: str) -> dict[str, dict[str, Any]]:
+    """The run's records, read from the two session ids open_run gives them rather than a scan of every peer."""
     found = {}
-    for path in sorted((base / "peers").glob("*.json")):
+    if not re.fullmatch(RUN_ID, run):
+        return found
+    for role in ("conductor", "worker"):
+        path = peer_path(base, f"run-{run}-{role}")
         peer = load(path)
-        if is_run_record(peer) and peer.get("run") == run and owns(base, path, peer):
-            found[peer["role"]] = peer
+        if is_run_record(peer) and peer["run"] == run and peer["role"] == role and owns(base, path, peer):
+            found[role] = peer
     return found
 
 
@@ -827,14 +834,16 @@ def is_live(peer: dict[str, Any], moment: dt.datetime | None = None) -> bool:
         return False
     alive = pid_alive(peer.get("pid"))
     if alive and peer.get("pidBirth"):
-        # The recorded process itself is still running: present however long it has been idle.
         current = process_started(peer["pid"])
-        if current == peer["pidBirth"]:
-            return True
-        if current is not None:
+        if current is not None and current != peer["pidBirth"]:
             return False  # the recorded process ended and its pid now belongs to another one
+        if current is not None and not peer.get("sharedProcess"):
+            return True  # the session's own process is still running: present however long it has been idle
     if moment - seen > MAX_AGE:
         return False
+    if alive and peer.get("sharedProcess") and peer.get("state") == "idle":
+        # Mid-turn sessions stay; an idle one is judged by its own activity and registers again on its next turn.
+        return moment - seen <= SHARED_PROCESS_IDLE_TTL
     return alive if alive is not None else moment - seen <= UNKNOWN_PID_TTL
 
 
@@ -1129,10 +1138,37 @@ def register(
             ]
         if pid and (pid != previous_pid or not peer.get("pidBirth")):
             peer["pidBirth"] = process_started(pid)
+        cohosted = co_hosted(base, peer)
+        if cohosted:
+            peer["sharedProcess"] = True
+        else:
+            peer.pop("sharedProcess", None)
         write(path, peer)
         if harness == "gemini":
             persist_agy_control(base, session, peer.get("pid"))
-        return peer
+    # After this session's own lock is released: two sessions of one process may register at once.
+    for other in cohosted:
+        if not other.get("sharedProcess"):
+            annotate(base, other["session"], sharedProcess=True)
+    return peer
+
+
+def co_hosted(base: Path, peer: dict[str, Any]) -> list[dict[str, Any]]:
+    """Other ordinary sessions recorded on this one's process, as when one daemon hosts many conversations.
+    A finished conversation of such a process never registers again, so it is marked from here."""
+    pid, birth = peer.get("pid"), peer.get("pidBirth")
+    if not isinstance(pid, int) or not birth or is_run_peer(peer):
+        return []
+    return [
+        other
+        for path in (base / "peers").glob("*.json")
+        if valid_peer(other := load(path))
+        and other["session"] != peer["session"]
+        and not is_run_peer(other)
+        and other.get("pid") == pid
+        and other.get("pidBirth") == birth
+        and owns(base, path, other)
+    ]
 
 
 def persist_agy_control(base: Path, session: str, pid: int | None) -> None:

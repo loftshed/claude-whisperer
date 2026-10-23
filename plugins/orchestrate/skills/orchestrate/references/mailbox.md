@@ -389,7 +389,10 @@ anything. A sender cannot close the wrapper early.
 | Others      | HTTP `register` result; stdio launch identity                | `clientInfo.name`                      |
 
 Presence ends with the harness process (its pid is recorded); a peer without a pid expires two hours
-after it was last seen. Messages are pruned after seven days (`mailbox prune`).
+after it was last seen. When one process hosts several sessions, such as an Antigravity window or a
+Codex app server, the process proves none of them present: an idle one drops out three hours after it
+was last seen and registers again on its next turn, while a busy one stays. Messages are pruned after
+seven days (`mailbox prune`, which the runner also runs once a day).
 
 ## Install
 
@@ -451,7 +454,8 @@ resource/context costs and the scope of native-client and synthetic evaluation e
 - **Run the CLI from Claude Code with the sandbox off.** The store is under `~/.cache/agent-executor`,
   outside the sandbox's write allowlist. The MCP server and hooks are not sandboxed.
 - **`no live peer`.** The target's session ended, or it never registered: it has no hooks and has not
-  called a mailbox tool yet.
+  called a mailbox tool yet. A session that shares its process with others also drops out after three
+  idle hours; it is back once it takes another turn.
 
 Task listings show purpose, model, and harness separately. Model defaults to `model unknown`;
 never infer it from the harness or branch. A hook's explicit `model` string (or `model.id`) is
