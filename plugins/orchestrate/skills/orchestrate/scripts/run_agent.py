@@ -3258,11 +3258,15 @@ def prune_state(older_than_seconds: float, *, dry_run: bool = False) -> dict[str
 
 
 def auto_prune() -> None:
-    """At most once a day, drop state older than 30 days. Best effort; never fails a run."""
+    """At most once a day, drop mailbox runs closed for a week and state older than 30 days.
+    Best effort; never fails a run."""
     marker = default_agent_cache_dir() / "last-prune"
     try:
         if marker.exists() and time.time() - marker.stat().st_mtime < 24 * 60 * 60:
             return
+        with contextlib.suppress(OSError, ValueError, RunnerError):  # MailboxError is a ValueError
+            mailbox = bundled_module("peer_mailbox")
+            mailbox.prune(mailbox.root())
         prune_state(AUTO_PRUNE_SECONDS)
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.touch()
