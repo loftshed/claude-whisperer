@@ -5,11 +5,6 @@
   },
   "plugins": [
     {
-      "name": "bailout",
-      "source": "./plugins/bailout",
-      "description": "Explicitly arm automatic usage handoffs per session, or write a manual checkpoint or handoff."
-    },
-    {
       "name": "monitor",
       "source": "./plugins/monitor",
       "description": "Remaining quota across Claude Code profiles, Codex and Antigravity, and where to spend it: MCP server, skill, CLI/TUI, macOS menu bar app."

@@ -48,12 +48,12 @@ class InstallMailboxTests(unittest.TestCase):
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
     def test_hooks_preserve_other_settings_and_back_up_the_previous_contents(self):
-        original = '{"permissions":{"deny":["Bash(rm *)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"bailout stop"}]}]}}\n'
+        original = '{"permissions":{"deny":["Bash(rm *)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"other-tool stop"}]}]}}\n'
         self.path.write_text(original)
         installer.install_hooks(self.path, self.script, "codex")
         settings = json.loads(self.path.read_text())
         self.assertEqual(settings["permissions"], {"deny": ["Bash(rm *)"]})
-        self.assertEqual(settings["hooks"]["Stop"][0], {"hooks": [{"type": "command", "command": "bailout stop"}]})
+        self.assertEqual(settings["hooks"]["Stop"][0], {"hooks": [{"type": "command", "command": "other-tool stop"}]})
         self.assertEqual(
             settings["hooks"]["SessionStart"],
             [
