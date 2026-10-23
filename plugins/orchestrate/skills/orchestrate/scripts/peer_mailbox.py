@@ -1924,12 +1924,14 @@ def escape(value: Any) -> str:
     return str(value).replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def render(message: dict[str, Any]) -> str:
+def render(message: dict[str, Any], recipient: str | None = None) -> str:
+    """One message in its wrapper. `to` names the recipient, so a session sees its own name on every message."""
     sender = message["from"]
-    attributes = (
-        f'id="{escape(message["id"])}" from="{escape(sender.get("name"))}" '
-        f'harness="{escape(sender.get("harness"))}" cwd="{escape(sender.get("cwd"))}" sent="{escape(message["sentAt"])}"'
-    )
+    addressed = message.get("to") if isinstance(message.get("to"), dict) else {}
+    attributes = f'id="{escape(message["id"])}" from="{escape(sender.get("name"))}" '
+    if recipient := recipient or addressed.get("name"):
+        attributes += f'to="{escape(recipient)}" '
+    attributes += f'harness="{escape(sender.get("harness"))}" cwd="{escape(sender.get("cwd"))}" sent="{escape(message["sentAt"])}"'
     if message.get("replyTo"):
         attributes += f' reply-to="{escape(message["replyTo"])}"'
     # A peer cannot close the wrapper early and pose as the harness or the user.
@@ -1937,10 +1939,10 @@ def render(message: dict[str, Any]) -> str:
     return f"<peer-message {attributes}>\n{body}\n</peer-message>"
 
 
-def render_all(found: list[dict[str, Any]]) -> str:
+def render_all(found: list[dict[str, Any]], recipient: str | None = None) -> str:
     if not found:
         return ""
-    blocks = "\n\n".join(render(message) for message in found)
+    blocks = "\n\n".join(render(message, recipient) for message in found)
     hint = (
         "Reply only when an answer or action is needed, using send(to=sender, replyTo=id). "
         "Keep a relaxed, friendly, natural teammate tone—no stiff formality needed, and feel free to credit "
@@ -2479,7 +2481,7 @@ def hook(
     if gemini and event == "Stop" and payload.get("terminationReason") in ANTIGRAVITY_NO_CONTINUE:
         return {}
     delivered = take(base, session)
-    context = render_all(delivered)
+    context = render_all(delivered, me["name"])
     hint = "\n".join(value for value in (cleared_notice, team_notice, identity_hint, availability_hint) if value)
     if hint:
         context = hint + ("\n\n" + context if context else "")
@@ -2506,24 +2508,22 @@ def hook(
     # Who else works in this repository: at session start, and again whenever that set changes.
     others = [] if me.get("delegatedRun") else colleagues(base, me)
     seen = sorted(peer["session"] for peer in others)
+    rule_shown = False
     if event == "SessionStart" or seen != me.get("seenColleagues", []):
         notice = describe_colleagues(others, me)
+        rule_shown = bool(others and notice)
         if not notice and me.get("seenColleagues") and not me.get("delegatedRun"):
             notice = "The other agent sessions in this project have ended; none is working here now."
         if notice:
             context = f"{notice}\n\n{context}" if context else notice
         annotate(base, session, seenColleagues=seen)
-    if (
-        context
-        and others
-        and not is_run_peer(me)
-        and (event == "SessionStart" or me["name"] != me.get("announcedName"))
-    ):
-        # Only where other agents are around: the name is what they call this session.
-        context = (
-            f"Your agent name is {me['name']}; give that name when you introduce yourself or sign a message. "
-            f"{NAME_RULE}.\n\n{context}"
-        )
+    if others and not is_run_peer(me) and (event == "SessionStart" or me["name"] != me.get("announcedName")):
+        # Only where other agents are around: the name is what they call this session. It goes out on its own
+        # when nothing else does, so a rename (a model learned late, an upgrade) is never held back. The roster
+        # states the naming rule itself, so it is repeated here only when the roster is not part of this context.
+        rule = "" if rule_shown else f" {NAME_RULE}."
+        announcement = f"Your agent name is {me['name']}; use it when you introduce yourself or sign a message.{rule}"
+        context = f"{announcement}\n\n{context}" if context else announcement
         annotate(base, session, announcedName=me["name"])
     if gemini:
         return {"injectSteps": [{"ephemeralMessage": context}]} if context else {}

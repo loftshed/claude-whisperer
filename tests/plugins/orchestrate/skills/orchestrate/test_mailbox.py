@@ -133,10 +133,10 @@ class MailboxTests(unittest.TestCase):
             MAILBOX.readable_name("ada", "orkest", "claude-opus-5-5", "xhigh", "76"), "ada-opus-5.5-xhigh-orkest-76"
         )
         # Claude Code's own derived name lends its hex suffix, so orkest-76 reads as ...-orkest-76.
-        session = "20cd2469-c84c-45b6-8aaf-4637f53ae5e9"
+        session = "0f5e7c2a-1b3d-4e6f-8a9b-c0d1e2f3a4b5"
         self.assertEqual(MAILBOX.session_tag(session, "orkest-76", "derived"), "76")
-        self.assertEqual(MAILBOX.session_tag(session, "my-chosen-name", "user"), "e9")
-        self.assertEqual(MAILBOX.session_tag(session), "e9")
+        self.assertEqual(MAILBOX.session_tag(session, "my-chosen-name", "user"), "b5")
+        self.assertEqual(MAILBOX.session_tag(session), "b5")
         self.assertRegex(MAILBOX.session_tag("fixture-reader"), r"^[0-9a-f]{2}$")
         names = MAILBOX.person_names()
         self.assertGreaterEqual(len(names), len(MAILBOX.FALLBACK_PERSON_NAMES))
@@ -1243,11 +1243,23 @@ class MailboxTests(unittest.TestCase):
             self.assertEqual((me["harness"], me["state"]), ("claude", "idle"))
             # The session learns its own full name at start, and is not told again while it stays the same.
             self.assertIn(f"Your agent name is {me['name']};", started["hookSpecificOutput"]["additionalContext"])
+            # The roster states the naming rule, so the injection carries it once.
+            self.assertEqual(started["hookSpecificOutput"]["additionalContext"].count("never shorten it"), 1)
             MAILBOX.send(self.base, sender=self.codex, to=me["name"], text="review my diff?")
             delivered = MAILBOX.hook({**payload, "hook_event_name": "UserPromptSubmit"}, base=self.base)
             self.assertIn("review my diff?", delivered["hookSpecificOutput"]["additionalContext"])
             self.assertNotIn("Your agent name is", delivered["hookSpecificOutput"]["additionalContext"])
+            # Every delivered message names its recipient, so the session sees its own name when it replies.
+            self.assertIn(f'to="{me["name"]}"', delivered["hookSpecificOutput"]["additionalContext"])
             self.assertEqual(MAILBOX.resolve(self.base, me["name"], sender=self.codex)["state"], "busy")
+            # A rename on a quiet turn (the model learned late, or an upgrade) is announced on its own, once.
+            quiet = {**payload, "hook_event_name": "UserPromptSubmit", "model": "claude-opus-5-5"}
+            renamed = MAILBOX.hook(quiet, base=self.base)["hookSpecificOutput"]["additionalContext"]
+            me = MAILBOX.resolve(self.base, "claude-session-5555", sender=self.codex)
+            self.assertIn("-opus-5.5-", me["name"])
+            self.assertTrue(renamed.startswith(f"Your agent name is {me['name']};"))
+            self.assertIn("never shorten it", renamed)
+            self.assertIsNone(MAILBOX.hook(quiet, base=self.base))
             self.assertIsNone(MAILBOX.hook({**payload, "hook_event_name": "Stop"}, base=self.base))
             MAILBOX.send(self.base, sender=self.codex, to=me["name"], text="also check tests")
             blocked = MAILBOX.hook({**payload, "hook_event_name": "Stop"}, base=self.base)
