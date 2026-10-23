@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.31.1
+
+- fix(orchestrate): batch related moves and scope iterative development checks (#24)
+
 ## 0.31.0
 
 - feat(orchestrate): name peers person-model-effort-repo-hex and use full names (#23)
