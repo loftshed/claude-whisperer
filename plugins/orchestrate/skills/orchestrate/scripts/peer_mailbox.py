@@ -1925,12 +1925,13 @@ def escape(value: Any) -> str:
 
 
 def render(message: dict[str, Any], recipient: str | None = None) -> str:
-    """One message in its wrapper. `to` names the recipient, so a session sees its own name on every message."""
+    """One message in its wrapper. `recipient` carries the reader's own name, so a session sees it on every message;
+    it is not called `to`, which a reply could copy into send(to=...)."""
     sender = message["from"]
     addressed = message.get("to") if isinstance(message.get("to"), dict) else {}
     attributes = f'id="{escape(message["id"])}" from="{escape(sender.get("name"))}" '
     if recipient := recipient or addressed.get("name"):
-        attributes += f'to="{escape(recipient)}" '
+        attributes += f'recipient="{escape(recipient)}" '
     attributes += f'harness="{escape(sender.get("harness"))}" cwd="{escape(sender.get("cwd"))}" sent="{escape(message["sentAt"])}"'
     if message.get("replyTo"):
         attributes += f' reply-to="{escape(message["replyTo"])}"'

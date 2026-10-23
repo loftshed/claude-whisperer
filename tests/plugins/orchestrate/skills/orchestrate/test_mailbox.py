@@ -1250,7 +1250,7 @@ class MailboxTests(unittest.TestCase):
             self.assertIn("review my diff?", delivered["hookSpecificOutput"]["additionalContext"])
             self.assertNotIn("Your agent name is", delivered["hookSpecificOutput"]["additionalContext"])
             # Every delivered message names its recipient, so the session sees its own name when it replies.
-            self.assertIn(f'to="{me["name"]}"', delivered["hookSpecificOutput"]["additionalContext"])
+            self.assertIn(f'recipient="{me["name"]}"', delivered["hookSpecificOutput"]["additionalContext"])
             self.assertEqual(MAILBOX.resolve(self.base, me["name"], sender=self.codex)["state"], "busy")
             # A rename on a quiet turn (the model learned late, or an upgrade) is announced on its own, once.
             quiet = {**payload, "hook_event_name": "UserPromptSubmit", "model": "claude-opus-5-5"}

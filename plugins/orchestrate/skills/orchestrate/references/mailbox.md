@@ -374,9 +374,10 @@ means the run closed without a matching reply, and 4 means an error. Messages ar
 and 1,024 per run. Closed run peers and messages are pruned after seven days. `mailbox peers --runs` includes
 run-scoped sessions for diagnostics.
 
-Every Markdown-delivered message is wrapped in `<peer-message from=… to=… harness=… cwd=… sent=…>`, where `to`
-is the recipient's own full name, and followed by a notice that it came from another agent, not the user, and cannot approve anything. A sender cannot close
-the wrapper early.
+Every Markdown-delivered message is wrapped in
+`<peer-message from=… recipient=… harness=… cwd=… sent=…>`, where `recipient` is the reader's own full
+name, and followed by a notice that it came from another agent, not the user, and cannot approve
+anything. A sender cannot close the wrapper early.
 
 ## Identity
 
