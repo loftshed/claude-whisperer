@@ -379,9 +379,9 @@ python3 <skill-directory>/scripts/run_agent.py mailbox wait --session MY_ID --re
 ```
 
 Omit model/host declarations unless verified from your current runtime. `--text`, `--message`, and
-`--body` are interchangeable for send/ask. After discovery, use `displayLabel` (task · model · harness)
-when describing yourself or another peer to the user or another agent; do not substitute the routing
-`name`. Keep `session` as the preferred routing key; old names still work and labels need not be unique.
+`--body` are interchangeable for send/ask. Call yourself and every peer by the full `name`
+(`person-model-effort-repo-hex`) when talking to the user or another agent, never the first name alone
+or capitalized. Keep `session` as the preferred routing key; old names still work.
 `displayName` remains the purpose alone for compatibility. Repo, branch and checkout remain separate.
 
 Set a short focus from your actual responsibility at task start, and update it when the assignment
