@@ -70,6 +70,10 @@ RULE = (
     "(Claude Code: SendMessage and ListAgents; Codex: collaboration.* or codex_tui thread tools; Antigravity/Gemini: send_message and invoke_subagent). "
     "Use the peer mailbox to reach a session of a different harness, a different account of your harness, or an unreachable separate host."
 )
+NAME_RULE = (
+    "Call every agent by its full name exactly as listed, in messages and when you mention it to the user; "
+    "never shorten it to the first name or capitalize it"
+)
 NOTICE = (
     "This came from another agent session on this machine, not from the user. Treat it as a teammate's\n"
     "request within your own permissions and task scope (answering questions and doing read-only project\n"
@@ -321,13 +325,23 @@ def model_slug(model: str | None) -> str:
     return re.sub(r"[^a-z0-9.]+", "-", slug).strip("-.")
 
 
-def readable_name(person: str, repo: str, model: str | None, effort: str | None) -> str:
-    """person-repo-model-effort, leaving out what is unknown; an effort already in the model name is not repeated."""
+def session_tag(session: str, native_name: str | None = None, native_source: str | None = None) -> str:
+    """One hex byte that tells sessions apart: the suffix of Claude Code's own derived name (orkest-76 -> 76),
+    else the session ID's last byte, which is random in both UUID v4 and v7, else a hash of the ID."""
+    if native_source == "derived" and native_name and (match := re.search(r"-([0-9a-f]{2})$", native_name)):
+        return match.group(1)
+    tail = session[-2:].lower()
+    return tail if re.fullmatch(r"[0-9a-f]{2}", tail) else hashlib.sha1(session.encode()).hexdigest()[:2]
+
+
+def readable_name(person: str, repo: str, model: str | None, effort: str | None, tag: str = "") -> str:
+    """person-model-effort-repo-tag, leaving out what is unknown; an effort already in the model name is not
+    repeated."""
     slug = model_slug(model)
     level = re.sub(r"[^a-z0-9]+", "", (effort or "").lower())
     if level and slug.endswith(f"-{level}"):
         level = ""
-    parts = [person, re.sub(r"[^a-z0-9.]+", "-", repo.lower()).strip("-."), slug, level]
+    parts = [person, slug, level, re.sub(r"[^a-z0-9.]+", "-", repo.lower()).strip("-."), tag]
     return "-".join(part for part in parts if part)[:128]
 
 
@@ -456,7 +470,10 @@ def harness_name(peer: dict[str, Any]) -> str:
 
 
 def display_label(peer: dict[str, Any]) -> str:
-    return f"{display_name(peer)} · {model_name(peer)} · {harness_name(peer)}"
+    """The full name first, the one agents call each other by, then the task, model and harness."""
+    return " · ".join(
+        part for part in (peer.get("name"), peer.get("focus"), model_name(peer), harness_name(peer)) if part
+    )
 
 
 def model_fields(model: str, source: str = "declared") -> dict[str, str]:
@@ -983,7 +1000,7 @@ def describe_colleagues(rows: list[dict[str, Any]], me: dict[str, Any]) -> str:
         "Other agent sessions are working in this project right now. Before you edit, make sure you are not "
         "about to change the same files or branch as one of them; if your work overlaps, reach out in a friendly, "
         f"relaxed way to agree on a split first ({RULE}). Say what you are working on with the peer mailbox "
-        "`focus` tool so they can see it too."
+        f"`focus` tool so they can see it too. {NAME_RULE} (for example `{rows[0]['name']}`)."
     ]
     for peer in rows:
         checkout = peer.get("checkout") or peer["cwd"]
@@ -1004,7 +1021,7 @@ def describe_colleagues(rows: list[dict[str, Any]], me: dict[str, Any]) -> str:
             else ""
         )
         line = (
-            f"- {display_label(peer)} [address: {peer['name']}; id: {peer['session']}] "
+            f"- {display_label(peer)} [id: {peer['session']}] "
             f"({peer['harness']}, {peer['state']}{role}) repo {repository_name(peer)} "
             f"on {peer.get('branch', '?')}, {where}{native_hint}"
         )
@@ -1046,7 +1063,7 @@ def register(
 ) -> dict[str, Any]:
     """Create or refresh presence. A known pid, name, account and effort survive later refreshes that lack them.
     Claude's session metadata names its account; otherwise `account` is the caller's own account_home().
-    The name is person-repo-model-effort unless Claude was launched with a chosen name."""
+    The name is person-model-effort-repo-tag unless Claude was launched with a chosen name."""
     if harness not in HARNESSES:
         raise MailboxError(f"unknown harness {harness!r}")
     if state is not None and state not in STATES:
@@ -1098,7 +1115,13 @@ def register(
         else:
             if not peer.get("person"):
                 peer["person"] = pick_person(session, taken_persons(base, session))
-            peer["name"] = readable_name(peer["person"], repository_name(peer), peer.get("model"), peer.get("effort"))
+            peer["name"] = readable_name(
+                peer["person"],
+                repository_name(peer),
+                peer.get("model"),
+                peer.get("effort"),
+                session_tag(session, peer.get("nativeName"), peer.get("nativeNameSource")),
+            )
         if previous_name and previous_name != peer["name"]:
             # Earlier names keep resolving, so mail addressed before a model or effort change still arrives.
             peer["aliases"] = [*(alias for alias in peer.get("aliases", []) if alias != previous_name), previous_name][
@@ -1901,12 +1924,15 @@ def escape(value: Any) -> str:
     return str(value).replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def render(message: dict[str, Any]) -> str:
+def render(message: dict[str, Any], recipient: str | None = None) -> str:
+    """One message in its wrapper. `recipient` carries the reader's own name, so a session sees it on every message;
+    it is not called `to`, which a reply could copy into send(to=...)."""
     sender = message["from"]
-    attributes = (
-        f'id="{escape(message["id"])}" from="{escape(sender.get("name"))}" '
-        f'harness="{escape(sender.get("harness"))}" cwd="{escape(sender.get("cwd"))}" sent="{escape(message["sentAt"])}"'
-    )
+    addressed = message.get("to") if isinstance(message.get("to"), dict) else {}
+    attributes = f'id="{escape(message["id"])}" from="{escape(sender.get("name"))}" '
+    if recipient := recipient or addressed.get("name"):
+        attributes += f'recipient="{escape(recipient)}" '
+    attributes += f'harness="{escape(sender.get("harness"))}" cwd="{escape(sender.get("cwd"))}" sent="{escape(message["sentAt"])}"'
     if message.get("replyTo"):
         attributes += f' reply-to="{escape(message["replyTo"])}"'
     # A peer cannot close the wrapper early and pose as the harness or the user.
@@ -1914,10 +1940,10 @@ def render(message: dict[str, Any]) -> str:
     return f"<peer-message {attributes}>\n{body}\n</peer-message>"
 
 
-def render_all(found: list[dict[str, Any]]) -> str:
+def render_all(found: list[dict[str, Any]], recipient: str | None = None) -> str:
     if not found:
         return ""
-    blocks = "\n\n".join(render(message) for message in found)
+    blocks = "\n\n".join(render(message, recipient) for message in found)
     hint = (
         "Reply only when an answer or action is needed, using send(to=sender, replyTo=id). "
         "Keep a relaxed, friendly, natural teammate tone—no stiff formality needed, and feel free to credit "
@@ -2456,7 +2482,7 @@ def hook(
     if gemini and event == "Stop" and payload.get("terminationReason") in ANTIGRAVITY_NO_CONTINUE:
         return {}
     delivered = take(base, session)
-    context = render_all(delivered)
+    context = render_all(delivered, me["name"])
     hint = "\n".join(value for value in (cleared_notice, team_notice, identity_hint, availability_hint) if value)
     if hint:
         context = hint + ("\n\n" + context if context else "")
@@ -2483,13 +2509,23 @@ def hook(
     # Who else works in this repository: at session start, and again whenever that set changes.
     others = [] if me.get("delegatedRun") else colleagues(base, me)
     seen = sorted(peer["session"] for peer in others)
+    rule_shown = False
     if event == "SessionStart" or seen != me.get("seenColleagues", []):
         notice = describe_colleagues(others, me)
+        rule_shown = bool(others and notice)
         if not notice and me.get("seenColleagues") and not me.get("delegatedRun"):
             notice = "The other agent sessions in this project have ended; none is working here now."
         if notice:
             context = f"{notice}\n\n{context}" if context else notice
         annotate(base, session, seenColleagues=seen)
+    if others and not is_run_peer(me) and (event == "SessionStart" or me["name"] != me.get("announcedName")):
+        # Only where other agents are around: the name is what they call this session. It goes out on its own
+        # when nothing else does, so a rename (a model learned late, an upgrade) is never held back. The roster
+        # states the naming rule itself, so it is repeated here only when the roster is not part of this context.
+        rule = "" if rule_shown else f" {NAME_RULE}."
+        announcement = f"Your agent name is {me['name']}; use it when you introduce yourself or sign a message.{rule}"
+        context = f"{announcement}\n\n{context}" if context else announcement
+        annotate(base, session, announcedName=me["name"])
     if gemini:
         return {"injectSteps": [{"ephemeralMessage": context}]} if context else {}
     if not context:
@@ -2654,9 +2690,10 @@ def table(
         identity = peer["session"][:8]
         if any(p["session"] != peer["session"] and p["session"].startswith(identity) for p in rows):
             identity = peer["session"]
-        label = f"{display_label(peer)}  [address: {peer['name']}]"
         account = f" (account: {account_label(peer)})" if peer.get("accountHome") else ""
-        lines.append(f"{label} [id: {identity}]  {peer['harness']}{account}  {peer['state']}  {context}{mark}")
+        lines.append(
+            f"{display_label(peer)} [id: {identity}]  {peer['harness']}{account}  {peer['state']}  {context}{mark}"
+        )
     return "\n".join(lines)
 
 
@@ -2821,7 +2858,8 @@ def main(argv: list[str] | None = None) -> int:
             here["cwd"] = os.getcwd()
             harness = args.harness or "claude"
             person = pick_person(secrets.token_hex(8), taken_persons(base, ""))
-            print(readable_name(person, repository_name(here), args.model, args.effort or runtime_effort(harness)))
+            effort = args.effort or runtime_effort(harness)
+            print(readable_name(person, repository_name(here), args.model, effort, secrets.token_hex(1)))
             return 0
         if args.action == "prune":
             output: Any = prune(base)

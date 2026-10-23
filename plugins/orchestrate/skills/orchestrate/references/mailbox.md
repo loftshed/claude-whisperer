@@ -42,12 +42,16 @@ session the old one's unread mail and the requests it read in the last day but n
 flagged `carried`, plus its names as addresses, its person and what it was working on. Senders are told
 that the conversation behind their message is gone. Mail sent over native `SendMessage` is not covered.
 
-**Names.** A peer's name reads `person-repo-model-effort`, for example `ada-orkest-opus-5.5-xhigh`.
-The first name is picked once per session (from `/usr/share/dict/propernames` when present) and
-differs from other live peers'; model and effort come from the runtime and are left out when unknown,
-never guessed. When they change, the name follows and earlier names keep resolving; `person-repo` and
-the session ID are the stable addresses. A Claude session's own name (what `ListAgents` shows) is set
-by Claude Code; to make it match, launch with `claude --name "$(ork name --model opus-5.5)"`.
+**Names.** A peer's name reads `person-model-effort-repo-hex`, for example
+`ada-opus-5.5-xhigh-orkest-76`. Agents call each other by that whole name, in messages and to the
+user, never by the first name alone; each session's hook tells it its own name. The first name is
+picked once per session (from `/usr/share/dict/propernames` when present) and differs from other live
+peers'; model and effort come from the runtime and are left out when unknown, never guessed. The hex
+byte is the suffix of Claude Code's own name for the session (`orkest-76`), otherwise the session ID's
+last byte. When model or effort change, the name follows and earlier names keep resolving;
+`person-repo` and the session ID are the stable addresses. A Claude session's own name (what
+`ListAgents` shows and `SendMessage` takes) is set by Claude Code, and a hook cannot change it; to make
+it match, launch with `claude --name "$(ork name --model opus-5.5)"`.
 
 **Accounts.** Each peer records `accountHome`, the config home its harness runs under. Claude's comes
 from the profile whose `sessions/` metadata lists the session; otherwise the hook's transcript path,
@@ -63,8 +67,8 @@ travels on the message, and feedback records a fixed `native_unreachable_overrid
 
 ## Readable identity and quick commands
 
-Use `displayLabel` (task · model · harness) in conversation. Route to the stable `session` ID;
-legacy `name` aliases remain accepted. `displayName` stays purpose-only. Keep repo, branch and
+Call peers by their full `name` in conversation; `displayLabel` adds task, model and harness after it.
+Route to the stable `session` ID; earlier names remain accepted. `displayName` stays purpose-only. Keep repo, branch and
 checkout context separate. Set/update your actual responsibility with `focus`; optional `model`
 and `harnessLabel` on MCP register/focus are declarations from your runtime, never guesses.
 CLI focus uses `--model` and `--harness-label`. Without a precise host declaration, Gemini/Antigravity
@@ -370,9 +374,10 @@ means the run closed without a matching reply, and 4 means an error. Messages ar
 and 1,024 per run. Closed run peers and messages are pruned after seven days. `mailbox peers --runs` includes
 run-scoped sessions for diagnostics.
 
-Every Markdown-delivered message is wrapped in `<peer-message from=… harness=… cwd=… sent=…>` and followed by a
-notice that it came from another agent, not the user, and cannot approve anything. A sender cannot close
-the wrapper early.
+Every Markdown-delivered message is wrapped in
+`<peer-message from=… recipient=… harness=… cwd=… sent=…>`, where `recipient` is the reader's own full
+name, and followed by a notice that it came from another agent, not the user, and cannot approve
+anything. A sender cannot close the wrapper early.
 
 ## Identity
 

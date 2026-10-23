@@ -83,11 +83,11 @@ class MailboxTests(unittest.TestCase):
         return MAILBOX.register(self.base, session=session, harness=harness, cwd=cwd, pid=pid or os.getpid())
 
     def test_names_are_a_person_the_repo_the_model_and_the_effort(self):
-        # person-repo-model-effort, leaving out what is not known yet.
-        self.assertRegex(self.claude["name"], r"^[a-z]+-example-app$")
-        self.assertRegex(self.codex["name"], r"^[a-z]+-example-app$")
+        # person-model-effort-repo-hex, leaving out what is not known yet; the hex is the session's last byte.
+        self.assertRegex(self.claude["name"], r"^[a-z]+-example-app-11$")
+        self.assertRegex(self.codex["name"], r"^[a-z]+-example-app-22$")
         self.assertNotEqual(self.claude["person"], self.codex["person"])
-        self.assertEqual(self.claude["name"], f"{self.claude['person']}-example-app")
+        self.assertEqual(self.claude["name"], f"{self.claude['person']}-example-app-11")
         self.assertEqual(sorted(peer["harness"] for peer in MAILBOX.peers(self.base)), ["claude", "codex"])
         person = self.claude["person"]
         renamed = MAILBOX.register(
@@ -99,7 +99,7 @@ class MailboxTests(unittest.TestCase):
             effort="xhigh",
         )
         self.assertEqual(renamed["person"], person)
-        self.assertEqual(renamed["name"], f"{person}-example-app-opus-5.5-xhigh")
+        self.assertEqual(renamed["name"], f"{person}-opus-5.5-xhigh-example-app-11")
         # The earlier name and the stable person-repo address both still reach the session.
         for address in (self.claude["name"], f"{person}-example-app", renamed["name"]):
             self.assertEqual(MAILBOX.resolve(self.base, address, sender=self.codex)["session"], self.claude["session"])
@@ -126,9 +126,18 @@ class MailboxTests(unittest.TestCase):
             self.assertEqual(MAILBOX.model_slug(model), slug, model)
         self.assertEqual(
             MAILBOX.readable_name("ada", "My Repo", "gemini-3.8-flash-high", "high"),
-            "ada-my-repo-gemini-3.8-flash-high",
+            "ada-gemini-3.8-flash-high-my-repo",
         )
         self.assertEqual(MAILBOX.readable_name("ada", "orkest", None, None), "ada-orkest")
+        self.assertEqual(
+            MAILBOX.readable_name("ada", "orkest", "claude-opus-5-5", "xhigh", "76"), "ada-opus-5.5-xhigh-orkest-76"
+        )
+        # Claude Code's own derived name lends its hex suffix, so orkest-76 reads as ...-orkest-76.
+        session = "0f5e7c2a-1b3d-4e6f-8a9b-c0d1e2f3a4b5"
+        self.assertEqual(MAILBOX.session_tag(session, "orkest-76", "derived"), "76")
+        self.assertEqual(MAILBOX.session_tag(session, "my-chosen-name", "user"), "b5")
+        self.assertEqual(MAILBOX.session_tag(session), "b5")
+        self.assertRegex(MAILBOX.session_tag("fixture-reader"), r"^[0-9a-f]{2}$")
         names = MAILBOX.person_names()
         self.assertGreaterEqual(len(names), len(MAILBOX.FALLBACK_PERSON_NAMES))
         first = MAILBOX.pick_person("seed", set())
@@ -142,7 +151,7 @@ class MailboxTests(unittest.TestCase):
                 {
                     "sessionId": "claude-named-session",
                     "pid": os.getpid(),
-                    "name": "ada-example-app-opus-5.5-high",
+                    "name": "ada-opus-5.5-high-example-app-3f",
                     "nameSource": "user",
                 }
             ),
@@ -150,7 +159,7 @@ class MailboxTests(unittest.TestCase):
         )
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(sessions_dir.parent)}):
             peer = self.peer("claude-named-session", "claude", str(self.repository))
-        self.assertEqual(peer["name"], "ada-example-app-opus-5.5-high")
+        self.assertEqual(peer["name"], "ada-opus-5.5-high-example-app-3f")
         self.assertNotIn("person", peer)
 
     def test_runtime_effort_comes_from_the_hook_or_the_claude_process(self):
@@ -161,7 +170,7 @@ class MailboxTests(unittest.TestCase):
         result = mailbox_cli(
             self.base, "name", "--model", "claude-opus-5-5", "--effort", "high", cwd=self.repository, check=True
         )
-        self.assertRegex(result.stdout.strip(), r"^[a-z]+-example-app-opus-5\.5-high$")
+        self.assertRegex(result.stdout.strip(), r"^[a-z]+-opus-5\.5-high-example-app-[0-9a-f]{2}$")
 
     def test_task_display_name_updates_without_changing_routing(self):
         original = self.claude["name"]
@@ -173,12 +182,12 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(MAILBOX.display_name(refreshed), "Designer · translation parity")
         listing = MAILBOX.table([refreshed], refreshed["session"])
         self.assertTrue(
-            listing.startswith("Designer · translation parity · model unknown · Claude Code  [address: " + original)
+            listing.startswith(original + " · Designer · translation parity · model unknown · Claude Code [id: ")
         )
-        self.assertIn(
-            "- Designer · translation parity · model unknown · Claude Code [address: " + original,
-            MAILBOX.describe_colleagues([refreshed], self.codex),
-        )
+        banner = MAILBOX.describe_colleagues([refreshed], self.codex)
+        self.assertIn("- " + original + " · Designer · translation parity · model unknown · Claude Code [id: ", banner)
+        # Agents are told to call each other by the whole name, with a real one as the example.
+        self.assertIn(f"never shorten it to the first name or capitalize it (for example `{original}`)", banner)
         MAILBOX.set_focus(self.base, self.claude["session"], "Mock server · rebase fixes")
         MAILBOX.set_focus(self.base, self.codex["session"], "Mock server · rebase fixes")
         MAILBOX.send(self.base, sender=self.codex, to=original, text="alias still works")
@@ -225,7 +234,9 @@ class MailboxTests(unittest.TestCase):
 
     def test_models_are_explicit_and_refreshes_preserve_them(self):
         peer = MAILBOX.set_focus(self.base, self.claude["session"], "Review parity", model="claude-fable-5.1")
-        self.assertEqual(MAILBOX.display_label(peer), "Review parity · claude-fable-5.1 · Claude Code")
+        self.assertEqual(
+            MAILBOX.display_label(peer), f"{peer['name']} · Review parity · claude-fable-5.1 · Claude Code"
+        )
         self.assertEqual(peer["modelSource"], "declared")
         refreshed = self.peer(self.claude["session"], "claude", str(self.repository))
         self.assertEqual(refreshed["model"], "claude-fable-5.1")
@@ -272,7 +283,7 @@ class MailboxTests(unittest.TestCase):
             )
         after_slash = MAILBOX.load(MAILBOX.peer_path(self.base, self.claude["session"]))
         self.assertEqual(after_slash["model"], "Sonnet 5.5")
-        self.assertEqual(after_slash["name"], f"{self.claude['person']}-example-app-sonnet-5.5")
+        self.assertEqual(after_slash["name"], f"{self.claude['person']}-sonnet-5.5-example-app-11")
         self.assertIn(self.claude["name"], after_slash["aliases"])
         with transcript.open("a", encoding="utf-8") as handle:
             handle.write(
@@ -298,7 +309,7 @@ class MailboxTests(unittest.TestCase):
             )
         after_turn = MAILBOX.load(MAILBOX.peer_path(self.base, self.claude["session"]))
         self.assertEqual(after_turn["model"], "claude-sonnet-5-5")
-        self.assertEqual(after_turn["name"], f"{self.claude['person']}-example-app-sonnet-5.5")
+        self.assertEqual(after_turn["name"], f"{self.claude['person']}-sonnet-5.5-example-app-11")
         result = mailbox_cli(
             self.base,
             "focus",
@@ -354,7 +365,7 @@ class MailboxTests(unittest.TestCase):
         )
         rows = json.loads(mailbox_cli(self.base, "peers", "--format", "json", cwd=self.repository, check=True).stdout)
         row = next(p for p in rows if p["session"] == self.codex["session"])
-        self.assertEqual(row["displayLabel"], "Review parity · gpt-6.1-sol · Codex CLI")
+        self.assertEqual(row["displayLabel"], f"{row['name']} · Review parity · gpt-6.1-sol · Codex CLI")
         self.assertEqual(row["displayName"], "Review parity")
         self.assertEqual(row["name"], self.codex["name"])
         self.assertIn("model unknown · Claude Code", MAILBOX.display_label(self.claude))
@@ -488,7 +499,7 @@ class MailboxTests(unittest.TestCase):
         )
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(sessions_dir.parent)}):
             peer = self.peer("claude-native-session", "claude", str(self.repository))
-        self.assertEqual(peer["name"], f"{peer['person']}-example-app")
+        self.assertEqual(peer["name"], f"{peer['person']}-example-app-61")  # Claude Code's suffix carries over
         self.assertEqual(peer["nativeName"], "example-app-61")
         self.assertEqual(peer["nativeNameSource"], "derived")
         self.assertEqual(
@@ -1226,18 +1237,29 @@ class MailboxTests(unittest.TestCase):
             "transcript_path": "/u/.claude/x.jsonl",
         }
         with mock.patch.object(MAILBOX, "harness_pid", return_value=os.getpid()):
-            self.assertIn(
-                "codex",
-                MAILBOX.hook({**payload, "hook_event_name": "SessionStart"}, base=self.base)["hookSpecificOutput"][
-                    "additionalContext"
-                ],
-            )
+            started = MAILBOX.hook({**payload, "hook_event_name": "SessionStart"}, base=self.base)
+            self.assertIn("codex", started["hookSpecificOutput"]["additionalContext"])
             me = MAILBOX.resolve(self.base, "claude-session-5555", sender=self.codex)
             self.assertEqual((me["harness"], me["state"]), ("claude", "idle"))
+            # The session learns its own full name at start, and is not told again while it stays the same.
+            self.assertIn(f"Your agent name is {me['name']};", started["hookSpecificOutput"]["additionalContext"])
+            # The roster states the naming rule, so the injection carries it once.
+            self.assertEqual(started["hookSpecificOutput"]["additionalContext"].count("never shorten it"), 1)
             MAILBOX.send(self.base, sender=self.codex, to=me["name"], text="review my diff?")
             delivered = MAILBOX.hook({**payload, "hook_event_name": "UserPromptSubmit"}, base=self.base)
             self.assertIn("review my diff?", delivered["hookSpecificOutput"]["additionalContext"])
+            self.assertNotIn("Your agent name is", delivered["hookSpecificOutput"]["additionalContext"])
+            # Every delivered message names its recipient, so the session sees its own name when it replies.
+            self.assertIn(f'recipient="{me["name"]}"', delivered["hookSpecificOutput"]["additionalContext"])
             self.assertEqual(MAILBOX.resolve(self.base, me["name"], sender=self.codex)["state"], "busy")
+            # A rename on a quiet turn (the model learned late, or an upgrade) is announced on its own, once.
+            quiet = {**payload, "hook_event_name": "UserPromptSubmit", "model": "claude-opus-5-5"}
+            renamed = MAILBOX.hook(quiet, base=self.base)["hookSpecificOutput"]["additionalContext"]
+            me = MAILBOX.resolve(self.base, "claude-session-5555", sender=self.codex)
+            self.assertIn("-opus-5.5-", me["name"])
+            self.assertTrue(renamed.startswith(f"Your agent name is {me['name']};"))
+            self.assertIn("never shorten it", renamed)
+            self.assertIsNone(MAILBOX.hook(quiet, base=self.base))
             self.assertIsNone(MAILBOX.hook({**payload, "hook_event_name": "Stop"}, base=self.base))
             MAILBOX.send(self.base, sender=self.codex, to=me["name"], text="also check tests")
             blocked = MAILBOX.hook({**payload, "hook_event_name": "Stop"}, base=self.base)

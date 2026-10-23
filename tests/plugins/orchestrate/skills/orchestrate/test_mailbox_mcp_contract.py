@@ -105,12 +105,15 @@ class ContractTests(unittest.TestCase):
         reader = next(p for p in rows["structuredContent"]["peers"] if p["session"] == "fixture-reader")
         self.assertEqual(reader["displayName"], args["focus"])
         self.assertEqual(reader["model"], "gpt-6-sol")
-        self.assertEqual(reader["displayLabel"], "Designer · translation parity · gpt-6-sol · Codex CLI")
+        self.assertEqual(
+            reader["displayLabel"], f"{reader['name']} · Designer · translation parity · gpt-6-sol · Codex CLI"
+        )
         self.assertEqual(reader["harnessLabel"], "Codex CLI")
         self.assertEqual(reader["modelSource"], "declared")
         self.assertIn("gpt-6-sol · Codex CLI", rows["content"][0]["text"])
-        # The model joins the name; the person-repo part the session started with stays.
-        self.assertEqual(reader["name"], f"{self.reader['name']}-gpt-6-sol")
+        # The model joins the name after the person; the rest of the name the session started with stays.
+        person = self.reader["name"].split("-")[0]
+        self.assertEqual(reader["name"], self.reader["name"].replace(f"{person}-", f"{person}-gpt-6-sol-", 1))
         self.assertEqual(reader["checkout"], str(SCRIPTS.parents[4].resolve()))
         # The repository is named after its shared Git directory, so a linked worktree keeps the main name.
         common_dir = subprocess.run(
@@ -121,7 +124,7 @@ class ContractTests(unittest.TestCase):
             check=True,
         ).stdout.strip()
         self.assertEqual(reader["repositoryName"], Path(common_dir).parent.name)
-        self.assertTrue(rows["content"][0]["text"].startswith(args["focus"]))
+        self.assertTrue(rows["content"][0]["text"].startswith(f"{reader['name']} · {args['focus']}"))
         self.tool("register", {"cwd": os.getcwd(), "harness": "codex"})
         self.assertEqual(MAILBOX.load(MAILBOX.peer_path(self.base, "fixture-reader"))["focus"], args["focus"])
         self.tool("focus", {"text": "Mock server · rebase fixes", "model": "gpt-6-astra", "harnessLabel": "Codex"})
@@ -136,7 +139,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(next(p for p in rows if p["session"] == "fixture-reader")["harness"], "codex")
         self.assertEqual(
             next(p for p in rows if p["session"] == "fixture-reader")["displayLabel"],
-            "Mock server · rebase fixes · gpt-6-astra · Codex",
+            f"{reader['name'].replace('gpt-6-sol', 'gpt-6-astra')} · Mock server · rebase fixes · gpt-6-astra · Codex",
         )
         same_codex = MAILBOX.register(
             self.base, session="fixture-codex-peer", harness="codex", cwd=os.getcwd(), pid=os.getpid()
