@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.30.1
 
 - docs(orchestrate): add plugin README covering installation, CLI entry points, `consult`, bounded delegation, `peer-mailbox`, team succession, and `stooges` rooms
 
