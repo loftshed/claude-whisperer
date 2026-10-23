@@ -205,7 +205,7 @@ def render_brief(spec: dict[str, Any]) -> str:
 
 # Development checks
 
-Use these focused commands while implementing and address failures caused by this task:
+Batch related moves and use these focused commands while implementing (do not run full test or visual suites between every individual move) and address failures caused by this task:
 
 {numbered_list(values["development_checks"]) if values["development_checks"] else "No development checks were supplied; explain why in the final report."}
 

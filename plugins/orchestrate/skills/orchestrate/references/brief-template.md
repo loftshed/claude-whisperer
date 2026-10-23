@@ -68,6 +68,7 @@ match the runner path scope exactly, and comply with the report contract.
 - State what must remain unchanged; execution agents otherwise tend to broaden cleanup.
 - Separate command-level evidence from broader completion claims; a passing focused check does not complete unrelated gates.
 - Keep deterministic acceptance gates in runner `--verify-command` arguments. The executor may use narrower development checks; the runner observes final gate exit codes outside the model.
+- Put only fast, narrowly scoped checks (targeted lint, typecheck, import checks, and directly affected unit tests) in `development_checks`. Batch related moves and run full test or visual suites once at the integration checkpoint rather than between every individual move.
 - Keep the final-response headings identical to the runner contract above. The runner also injects
   this contract, but contradictory headings in a brief can make an otherwise correct run fail as
   `malformed_report`.

@@ -53,6 +53,7 @@ class BriefRendererTests(unittest.TestCase):
         self.assertIn("# Objective\n\nAdd the bounded implementation.", rendered)
         self.assertIn("senior-specialist craft", rendered)
         self.assertIn("relaxed, friendly, and natural", rendered)
+        self.assertIn("do not run full test or visual suites between every individual move", rendered)
         self.assertIn("trusted senior specialist", RUNNER.REPORT_CONTRACT)
         self.assertEqual(
             RENDERER.REPORT_HEADINGS, ("STATUS", "FILES CHANGED", "COMMANDS RUN", "VERIFICATION", "RISKS OR BLOCKERS")
