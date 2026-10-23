@@ -1,29 +1,51 @@
-# Claude Whisperer
+# orkest
 
-Private personal plugin marketplace and versioned skill backup.
+Personal plugin marketplace and local multi-agent toolkit for Claude Code, Codex, Antigravity (Gemini), and OpenCode.
 
-| Plugin                                                | Version | What it does                                                                                                                               |
-| ----------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`monitor`](plugins/monitor/README.md)                | 0.13.0  | Remaining quota across Claude Code profiles, Codex and Antigravity, and where to spend it: MCP server, skill, CLI/TUI, macOS menu bar app. |
-| [`bailout`](plugins/bailout/skills/bailout/README.md) | 1.2.0   | Manual handoffs and automatic usage checkpoints that stay inactive until you explicitly arm the session.                                   |
-| `orchestrate`                                         | 0.30.0  | Bounded agent execution, consultation, evidence, and audit across Codex, Antigravity, Claude Code and OpenCode.                            |
+| Plugin                                         | Version | What it does                                                                                                                                         |
+| ---------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`monitor`](plugins/monitor/README.md)         | 0.13.0  | Remaining quota across Claude Code profiles, Codex and Antigravity, and where to spend it: MCP server, skill, CLI/TUI, macOS menu bar app.           |
+| [`orchestrate`](plugins/orchestrate/README.md) | 0.30.0  | Cross-harness consultation, bounded delegation, peer mailbox, team succession, and swarm rooms across Claude Code, Codex, Antigravity, and OpenCode. |
 
-orchestrate adds a native `claude` engine, keeps hosted models off OpenRouter, reads routes from `~/.config/agent-executor/config.json` (`routes`, `init`, `doctor`), and installs from a checkout with `plugins/orchestrate/install.sh`, which links every harness to one copy. Routing calibration is still deferred; model profiles remain provisional. See the [checkpoint and resume notes](plugins/orchestrate/skills/orchestrate/references/design-completion.md).
+`monitor` is the quota source: `orchestrate`'s launch gate, `quota` command, Stooges room header, and deputy succession all read `monitor`'s cache (`~/.cache/monitor/snapshot.json`) and `~/.config/monitor/config.json`, where an account's `billing` (`work` or `personal`) defines its context.
 
-```text
-/plugin marketplace add loftshed/orkest
-/plugin install orchestrate@orkest
-/plugin install monitor@orkest
+## Install
+
+Keep `<checkout>` outside `~/Documents`, `~/Desktop`, and `~/Downloads`: macOS asks again for each tool version that reads those folders.
+
+```sh
+gh repo clone loftshed/orkest <checkout>
+
+# 1. Quota monitor (CLI, macOS menu bar app, skill links, and MCP registrations)
+<checkout>/plugins/monitor/install.sh
+~/.local/bin/monitor mcp-install
+
+# 2. Orchestrate (skill hub, route config, peer-mailbox daemon, and turn hooks)
+<checkout>/plugins/orchestrate/install.sh
 ```
 
-monitor also has a CLI, a menu bar app and MCP registrations for Codex and agy, installed from a checkout: see [its README](plugins/monitor/README.md#install).
+### Plugin marketplace (optional)
+
+You can also register `<checkout>` (or `loftshed/orkest` on GitHub) as a plugin marketplace in Claude Code and Codex:
+
+```sh
+claude plugin marketplace add <checkout>
+claude plugin install monitor@orkest --scope user
+claude plugin install orchestrate@orkest --scope user
+
+codex plugin marketplace add <checkout>
+codex plugin add monitor@orkest
+```
+
+If Claude Code loads `orchestrate` from the plugin marketplace, run `<checkout>/plugins/orchestrate/install.sh --no-claude` so `install.sh` links the remaining harnesses and sets up the mailbox without creating a duplicate skill in `~/.claude/skills/orchestrate`.
 
 ## Development
 
 ```sh
-yarn install   # installs the linters and wires the git hooks
-yarn check     # lint gate: validator, ESLint, Prettier, markdownlint, cspell, ruff, shellcheck
-yarn test      # every plugin's test suite
+yarn install                  # dev dependencies and git hooks
+yarn check                    # lint gate: marketplace validator, ESLint, Prettier, markdownlint, cspell, ruff, shellcheck
+yarn test                     # Vitest (JavaScript) and unittest (orchestrate Python)
+node scripts/release.js plan  # preview the next automated plugin release
 ```
 
-Tests live in `tests/`, mirroring the repository layout. See [CLAUDE.md](CLAUDE.md) for conventions. Plugin versions and releases are automatic: commit with conventional subjects and CI publishes on `main` ([how](docs/releases.md)).
+Tests live in `tests/`, mirroring the `plugins/` and `scripts/` directory layout. See [CLAUDE.md](CLAUDE.md) for repository conventions and [docs/README.md](docs/README.md) for [release automation](docs/releases.md) and design records.
