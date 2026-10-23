@@ -197,6 +197,21 @@ describe("ork quota", () => {
   });
 });
 
+describe("ork gate", () => {
+  it("passes the gate's output and exit code through", async () => {
+    const app = await sandbox();
+    const env = { ...process.env, AGENT_GATE_DIR: path.join(app.dir, "gate") };
+    const { stdout } = await exec(process.execPath, [cli, "gate", "status"], { env });
+    expect(stdout).toContain("gate: free");
+    await expect(
+      exec(process.execPath, [cli, "gate", "--", "rm", "-rf", "nothing"], { env }),
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("test, build, typecheck and lint commands only"),
+    });
+  });
+});
+
 describe("ork command validation", () => {
   it.each([
     ["routes", "--runs-dir", "/tmp"],

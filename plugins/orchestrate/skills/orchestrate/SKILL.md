@@ -118,7 +118,8 @@ Prepare integration, check evidence, or finish independent work instead of waiti
 is available. Wait only when the next useful action depends on the worker, and keep its leased
 worktree frozen. Batch related moves or structural refactors and run scoped checks (lint, types,
 imports, and narrowly affected tests) during iteration; reserve full test or visual suites for one
-combined integration checkpoint rather than running them between every move.
+combined integration checkpoint rather than running them between every move. Run that checkpoint
+through `ork gate --heavy -- <command>` so it waits for other agents' heavy runs on the machine.
 
 Before implementation delegation, state the objective, exact scope, acceptance criteria, versions
 and conventions, decisions to preserve, failed attempts and evidence pointers (the task-spec
