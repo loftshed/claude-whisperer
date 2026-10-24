@@ -201,6 +201,15 @@ wakes for still-unread mail for two minutes, the same message included, and then
 route, and how to repair it. It reads local records and sends nothing: being live is not the same as
 being wakeable.
 
+A wake that did not get its mail read leaves a pending intent, one per recipient; quiet sends never
+do. The HTTP mailbox daemon retries it every few seconds while the mail is unread and the recipient is
+strictly idle, backing off from 2 seconds to 5 minutes. It never retries mid-turn, through a Claude
+session waiting for input, or after the recipient's own user cancelled its last turn. A submitted
+notice that has not led to the mail being read within 20 seconds counts as lost and may be submitted
+again. After 6 attempts or 30 minutes the intent becomes recovery-needed until
+`run_agent.py mailbox wake-retry [--to PEER]` gives it another chance; `wake-health` shows pending
+intents.
+
 Headless Claude and Gemini/Antigravity workers use a persistent streaming listener. Launch it once in the project:
 
 ```sh
