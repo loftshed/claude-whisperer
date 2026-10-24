@@ -129,12 +129,12 @@ Details: [`skills/orchestrate/references/rooms.md`](skills/orchestrate/reference
 
 ### Heavy-run gate (`ork gate`)
 
-When several agents share one machine, `ork gate` keeps their test suites, builds and project-wide checks from running all at once. A focused run takes one of two slots. A `--heavy` run (whole suite, production build, project-wide typecheck or lint) waits for every slot, and waiters are told who holds the gate. Inside the gate, Vitest and Jest are capped at two workers, the command runs at nice 10, and a heavy or failed run's full output is saved to a log, so nobody reruns a suite to get back output that scrolled away.
+When several agents share one machine, `ork gate` keeps their test suites, builds and project-wide checks from running all at once. A focused run takes one of two slots. A `--heavy` run (whole suite, production build, project-wide typecheck or lint) waits for every slot, and waiters are told who holds the gate. Inside the gate, Vitest and Jest are capped at two workers, the command runs at nice 10, every completed run is recorded in a shared ledger with an advisory source-metadata digest, and a heavy or failed run's full output is saved to a log, so nobody reruns a suite to get back output that scrolled away.
 
 ```sh
 ork gate --heavy -- yarn test                       # a whole suite, as the final check
 ork gate -- ./node_modules/.bin/vitest run src/a.test.ts
-ork gate status
+ork gate status [--all] [--json]
 ork gate install                                    # PreToolUse hook for Claude Code, Codex and Antigravity
 ```
 
