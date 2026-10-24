@@ -5,7 +5,7 @@ Personal plugin marketplace and local multi-agent toolkit for Claude Code, Codex
 | Plugin                                         | Version | What it does                                                                                                                                         |
 | ---------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`monitor`](plugins/monitor/README.md)         | 0.13.0  | Remaining quota across Claude Code profiles, Codex and Antigravity, and where to spend it: MCP server, skill, CLI/TUI, macOS menu bar app.           |
-| [`orchestrate`](plugins/orchestrate/README.md) | 0.33.1  | Cross-harness consultation, bounded delegation, peer mailbox, team succession, and swarm rooms across Claude Code, Codex, Antigravity, and OpenCode. |
+| [`orchestrate`](plugins/orchestrate/README.md) | 0.33.2  | Cross-harness consultation, bounded delegation, peer mailbox, team succession, and swarm rooms across Claude Code, Codex, Antigravity, and OpenCode. |
 
 `monitor` is the quota source: `orchestrate`'s launch gate, `quota` command, Stooges room header, and deputy succession all read `monitor`'s cache (`~/.cache/monitor/snapshot.json`) and `~/.config/monitor/config.json`, where an account's `billing` (`work` or `personal`) defines its context.
 

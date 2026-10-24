@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.33.2
+
+- fix(orchestrate): retry wakes that did not reach an idle recipient, within bounds (#31)
+
 ## 0.33.1
 
 - fix(orchestrate): give wakes recipient-owned routes, honest phases and a health check (#29)
