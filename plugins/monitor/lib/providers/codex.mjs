@@ -64,7 +64,24 @@ export function parseCodexRateLimits(result) {
   if (result.ordinaryUsageAllowed === false) notes.push("ordinary usage not allowed right now");
   if (windows.length === 0)
     throw new Error("codex reported no rate-limit windows (not signed in with ChatGPT?)");
-  return { plan, windows, pools, notes, credits };
+  const bank = result.rateLimitResetCredits;
+  const resetCredits =
+    bank && Number.isSafeInteger(bank.availableCount) && bank.availableCount >= 0
+      ? {
+          availableCount: bank.availableCount,
+          // The count can exceed the detail list. Never treat omitted details as zero available resets.
+          credits: Array.isArray(bank.credits)
+            ? bank.credits.map((credit) => ({
+                status: credit?.status,
+                expiresAt:
+                  Number.isFinite(credit?.expiresAt) && credit.expiresAt > 0
+                    ? credit.expiresAt * 1000
+                    : null,
+              }))
+            : null,
+        }
+      : null;
+  return { plan, windows, pools, notes, credits, resetCredits };
 }
 
 // Talks JSON-RPC to `codex app-server` over stdio; Codex authenticates with its own stored login.

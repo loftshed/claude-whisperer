@@ -8,11 +8,11 @@ It reads the rate-limit windows of each account (Claude Code, Codex/ChatGPT, Ant
 - **macOS menu bar app**: one pill per provider: `[CW ☠3h]  [CP 98·75 3d]  [CX 45 5d]  [AG G 76·3 2h │ C 100·27 1d⏳]`. Each pool shows its 5-hour % left (if it has a 5-hour limit), then its weekly % left followed by the time until the weekly rollover (`3d` rounded to the nearest day, or `2h` once under a day). A pool whose week is used up shows ☠ and the time until it is back; a pool near its rollover with capacity left shows its time in orange with ⏳. Antigravity has two pools, Gemini (G) and Claude & GPT-OSS (C). Numbers are coloured by how much is left; the dropdown has details, reset times and a ranking, and each account and the ranking collapse to one line with their ▾/▸ toggle (remembered across launches). **Double-click** the item (or choose **Menu Bar Style** in the dropdown) to cycle between **Full Pills**, **Compact Weekly Numbers** (`CW 44 CP 90 CX 35 AG 53·100`), and **Icon Only** (a small status icon with no persistent numbers — hover over it to see your remaining quota and top recommendation). A single click opens the dropdown a moment later; right-click opens it at once.
 - **MCP server**: `get_usage` and `recommend` tools, so agents can check quota before choosing where to run work.
 
-When ChatGPT's weekly allowance is exhausted, its full pill shows the remaining credit balance with a coin, still followed by the time until the included week is back, such as `CX 62,261.91 🪙 2d`; the compact pill shows the balance alone. The dropdown uses the coin too; the terminal view and MCP usage report label credits as `cr`. A zero balance means no credits remain; `∞` means unlimited credits. If the balance is unavailable, the pill keeps the exhausted-week symbol. Percentages resume at the weekly reset and the balance leaves the pill; the expanded dropdown, terminal view and MCP usage report list it whenever it is known. In the ranking, a Codex pool with credits is **on credits** rather than blocked: it can still take work, metered against the balance, and ranks after every pool with free quota.
+When ChatGPT's weekly allowance is exhausted, its full pill shows the remaining credit balance with a coin, still followed by the time until the included week is back, such as `CX 62,261.91 🪙 2d`; the compact pill shows the balance alone. The dropdown uses the coin too; the terminal view and MCP usage report label credits as `cr`. A zero balance means no credits remain; `∞` means unlimited credits. If the balance is unavailable, the pill keeps the exhausted-week symbol. Percentages resume once a provider refresh confirms the refill and the balance leaves the pill; the expanded dropdown, terminal view and MCP usage report list it whenever it is known. In the ranking, a Codex pool with credits is **on credits** rather than blocked: it can still take work, metered against the balance, and ranks after every pool with free quota.
 
 ```text
  Claude · personal  subscription
-   5-hour                 ██████████████ 100% left   reset since last check
+   5-hour                 ██████████████ 100% left   not started
    weekly                 ████████████▌·  89% left   resets Mon 4:59 PM (in 3d 4h)
 
  Where to spend next  (pts = weekly % left minus what even use would leave)
@@ -32,9 +32,33 @@ Each provider's own CLI reports its limits, so monitor never reads, copies or st
 | Codex / ChatGPT                                | `codex app-server` JSON-RPC `account/rateLimits/read`                                                    | 0 tokens, ~1 s |
 | Antigravity (Gemini, plus its Claude/GPT pool) | `agy -p /usage --output-format json`                                                                     | 0 tokens, ~4 s |
 
-Providers are queried in parallel. Results are cached in `~/.cache/monitor/snapshot.json` (default max age 180 s) behind a lock, so the menu bar, TUI and MCP server never query twice at once. If a refresh fails, the last good reading is kept and marked stale. A window whose reset time has passed is shown as full again without a refetch.
+Providers are queried in parallel. Results are cached in `~/.cache/monitor/snapshot.json` (default max age 180 s) behind a lock, so the menu bar, TUI and MCP server never query twice at once. If a refresh fails, the last good reading is kept and marked stale. A passed reset time is marked as awaiting a provider refresh; the last measured allowance stays visible until the provider confirms a refill.
 
 The default Claude profile must run with `CLAUDE_CONFIG_DIR` **unset**: Claude Code derives its keychain entry from whether the variable is set, so pointing it at `~/.claude` explicitly finds no login. Leave `configDir` out for the default profile.
+
+## Resets and rollover dates
+
+The dropdown, terminal report and MCP usage view show observed weekly refills and changes to the reported rollover. History starts when this version first refreshes, retains up to 20 observations for 30 days, and cannot identify whether a change was manual, promotional or a provider correction. The current window row is the latest reported date; dates in history are not additional promised refills.
+
+[Codex resets can replace the weekly schedule](https://help.openai.com/en/articles/20001498-how-resets-work-in-codex). A full unused window may move when use starts. Codex also reports available banked resets, and sometimes their expiry dates. These are separate from the weekly rollover and from paid usage credits. Missing bank details mean unknown, not zero. Monitor only reads them; it never redeems or purchases a reset.
+
+[Claude free resets preserve the usual weekly rollover](https://support.claude.com/en/articles/17007452-what-is-a-limit-reset). The current Claude CLI quota output does not supply a banked-reset inventory. Monitor records observed refills and uses the reported weekly deadline for spending advice. Antigravity continues to use its reported quota windows; no banked-reset balance is inferred.
+
+Optional announcement notes belong to an account's `resetAnnouncements` in `~/.config/monitor/config.json`:
+
+```json
+{
+  "resetAnnouncements": [
+    {
+      "title": "Provider reset announcement",
+      "at": "2027-01-15T18:00:00Z",
+      "url": "https://example.com/original-announcement"
+    }
+  ]
+}
+```
+
+Replace the example with a verified original source and an explicit date with timezone. Notes expire at that time, link to the source in the app, and remain labelled as eligibility unverified. They never change quota, rollover dates or pacing. There is no automatic social-feed polling; a post alone cannot establish whether an account or pool is covered.
 
 ## Ranking
 
@@ -47,7 +71,7 @@ Percentages are relative to each account's own allowance; 1% of one plan is not 
   3. **On credits** (`status: "credits"`): the included allowance is used up but the account has a credit balance (Codex), so every request is metered against credits that persist. Any task size fits; free quota goes first because it is lost at reset.
   4. **Nearly empty**: under 10% usable right now ("small tasks only"), whatever their surplus. A cheap pool that stalls mid-task costs more than it saves.
   5. **Blocked** (a window exhausted, no credits), soonest back first; then accounts with no data.
-- Every provider reports exact reset times (Codex and Antigravity as timestamps, Claude as local times), and a window past its reset counts as full again without waiting for a refetch.
+- Pacing uses the provider's current reported reset time. Some times are estimates or rounded text; a full unused window may not have started yet. Old schedules and announcement notes never shorten the spending deadline.
 
 Pools are the independently limited groups inside an account: Antigravity's Gemini pool and its Claude/GPT pool, or Claude's all-models limit and a per-model weekly cap such as Fable. A per-model cap is hidden from the ranking unless it binds harder than its parent.
 

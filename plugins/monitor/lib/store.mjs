@@ -16,6 +16,7 @@ import { detectConfig } from "./init.mjs";
 import { fetchAntigravity } from "./providers/antigravity.mjs";
 import { fetchClaude } from "./providers/claude.mjs";
 import { fetchCodex } from "./providers/codex.mjs";
+import { observeResets } from "./resets.mjs";
 
 const FETCHERS = { claude: fetchClaude, codex: fetchCodex, antigravity: fetchAntigravity };
 
@@ -177,6 +178,11 @@ async function fetchAccount(account, config, previous) {
       fetchedAt: Date.now(),
       durationMs: Date.now() - started,
       ...data,
+      resetHistory: observeResets(
+        data,
+        previous?.provider === account.provider ? previous : null,
+        started,
+      ),
     };
   } catch (error) {
     // Keep the last good reading so an outage shows stale numbers rather than nothing.
@@ -240,5 +246,6 @@ export async function getAccounts({ maxAgeSeconds, force = false, config = loadC
     route: account.route,
     routes: account.routes ?? {},
     billing: account.billing ?? null,
+    resetAnnouncements: account.resetAnnouncements ?? [],
   }));
 }
