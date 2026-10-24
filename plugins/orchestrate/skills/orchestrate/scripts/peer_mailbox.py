@@ -46,6 +46,8 @@ UNKNOWN_PID_TTL = dt.timedelta(hours=2)
 # after it was last seen; the running process says nothing about it.
 SHARED_PROCESS_IDLE_TTL = dt.timedelta(hours=3)
 HARNESSES = ("claude", "codex", "opencode", "gemini", "unknown")
+# Process names a harness runs under, where they differ from its name: Antigravity's CLI process is agy.
+HARNESS_PROCESSES = {"gemini": ("agy", "antigravity", "gemini")}
 STATES = ("idle", "busy", "waiting")
 SCOPES = ("project", "cross-project")
 # The rule for every harness: a session messages peers of its own harness and account with that harness's
@@ -804,6 +806,7 @@ def harness_pid(harness: str, start: int | None = None) -> int | None:
     """The long-lived harness process above this one, so presence ends when the session does."""
     if harness == "claude" and os.environ.get("CLAUDE_PID", "").isdigit():
         return int(os.environ["CLAUDE_PID"])
+    names = HARNESS_PROCESSES.get(harness, (harness,))
     pid = start or os.getppid()
     for _ in range(6):
         try:
@@ -815,7 +818,7 @@ def harness_pid(harness: str, start: int | None = None) -> int | None:
         if not line:
             break
         parent, _, command = line.partition(" ")
-        if harness in Path(command.strip()).name.lower():
+        if any(name in Path(command.strip()).name.lower() for name in names):
             return pid
         if not parent.strip().isdigit() or int(parent) <= 1:
             break
@@ -1179,14 +1182,69 @@ def co_hosted(base: Path, peer: dict[str, Any]) -> list[dict[str, Any]]:
 
 def persist_agy_control(base: Path, session: str, pid: int | None) -> None:
     """Keep the Antigravity language-server endpoint and token in an owner-only file, never in the peer record."""
+    import mailbox_wake
+
     address = os.environ.get("ANTIGRAVITY_LS_ADDRESS")
     token = os.environ.get("ANTIGRAVITY_CSRF_TOKEN")
-    active = os.environ.get("ANTIGRAVITY_CONVERSATION_ID")
-    if not address or not token or (active and active != session):
+    # Only a shell that names this very conversation may record its endpoint: an unset id proves nothing.
+    if not address or not token or os.environ.get("ANTIGRAVITY_CONVERSATION_ID") != session:
         return
+    if not re.fullmatch(mailbox_wake.LOOPBACK_ADDRESS, address):
+        return  # the token must never be sent off this machine
     path = base / "wakes" / session_key(session) / "agy-control.json"
     write(path, {"lsAddress": address, "csrfToken": token, "pid": pid, "updatedAt": stamp()})
     path.chmod(0o600)
+
+
+def check_attach_shell(session: str | None, harness: str | None) -> None:
+    """Refuse an Antigravity attachment from a shell that does not belong to that conversation, before the
+    command registers the session, so a rejected attempt leaves no record behind."""
+    if harness == "gemini" and (not session or os.environ.get("ANTIGRAVITY_CONVERSATION_ID") != session):
+        raise MailboxError("this shell does not belong to that Antigravity conversation; nothing was recorded")
+
+
+def attach_wake_route(base: Path, me: dict[str, Any]) -> dict[str, Any]:
+    """Record this session's own wake route from the runtime that holds it, then report its health.
+    Antigravity puts its control endpoint only in the agent's tool shell, so neither its hooks nor the
+    mailbox daemon can learn it; the agent attaches it once, from that shell."""
+    import mailbox_wake
+
+    if me.get("harness") == "gemini" and not (me.get("listener") or {}).get("adapter"):
+        address = os.environ.get("ANTIGRAVITY_LS_ADDRESS")
+        token = os.environ.get("ANTIGRAVITY_CSRF_TOKEN")
+        if not address or not token:
+            raise MailboxError(
+                "run this from the Antigravity agent's own tool shell; its control endpoint is not set here"
+            )
+        if os.environ.get("ANTIGRAVITY_CONVERSATION_ID") != me["session"]:
+            raise MailboxError("this shell does not belong to that Antigravity conversation; nothing was recorded")
+        if not re.fullmatch(mailbox_wake.LOOPBACK_ADDRESS, address):
+            raise MailboxError("the Antigravity control endpoint is not loopback; nothing was recorded")
+        persist_agy_control(base, me["session"], me.get("pid"))
+    return {"session": me["session"], "name": me.get("name"), **mailbox_wake.wake_health(me, base=base)}
+
+
+def wake_route_hint(base: Path, me: dict[str, Any]) -> str:
+    """An Antigravity conversation with no recorded wake route is told once how to attach one."""
+    import mailbox_wake
+
+    if me.get("harness") != "gemini" or (me.get("listener") or {}).get("adapter"):
+        return ""
+    if mailbox_wake.agy_route(base, me["session"])[0] is not None:
+        return ""
+    command = shlex.join(
+        [
+            "python3",
+            str(Path(__file__).with_name("run_agent.py")),
+            "mailbox",
+            "attach-wake-route",
+            "--session",
+            me["session"],
+            "--harness",
+            "gemini",
+        ]
+    )
+    return f"Peers cannot wake this conversation while it is idle yet. Run this once from your own shell: {command}"
 
 
 def drop_if_dead(path: Path, moment: dt.datetime) -> bool:
@@ -1618,6 +1676,7 @@ def send(
             if entry.get("wakeAttempted"):
                 result["wake"] = {
                     "status": "uncertain",
+                    "phase": "unknown",
                     "reason": "delivery recovered; previous activation outcome is unknown and is not retried",
                 }
             else:
@@ -2523,9 +2582,12 @@ def hook(
             annotate(base, session, httpAvailabilityIssue=issue)
     if gemini and event == "Stop" and payload.get("terminationReason") in ANTIGRAVITY_NO_CONTINUE:
         return {}
+    route_hint = wake_route_hint(base, me) if event == "SessionStart" else ""
     delivered = take(base, session)
     context = render_all(delivered, me["name"])
-    hint = "\n".join(value for value in (cleared_notice, team_notice, identity_hint, availability_hint) if value)
+    hint = "\n".join(
+        value for value in (cleared_notice, team_notice, identity_hint, availability_hint, route_hint) if value
+    )
     if hint:
         context = hint + ("\n\n" + context if context else "")
     if event == "Stop":
@@ -2816,6 +2878,8 @@ def main(argv: list[str] | None = None) -> int:
         "feedback",
         "feedback-summary",
         "name",
+        "attach-wake-route",
+        "wake-health",
     ):
         sub = commands.add_parser(name)
         if name == "name":
@@ -2829,7 +2893,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         sub.add_argument("--harness", choices=HARNESSES)
         sub.add_argument("--format", choices=("text", "json", "context"), default="text")
-        if name in {"peers", "send", "inbox", "wait", "history", "feedback-summary"}:
+        if name in {"peers", "send", "inbox", "wait", "history", "feedback-summary", "wake-health"}:
             sub.add_argument(
                 "--scope", choices=SCOPES, default="project", help="cross-project requires explicit opt-in"
             )
@@ -2908,6 +2972,22 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "feedback-summary":
             me = caller(args, base) if session_arg(args) else workspace(os.getcwd())
             output = feedback_module().summary(base, peer=None if args.scope == "cross-project" else me)
+        elif args.action == "wake-health":
+            # Read-only: whether each live peer can be woken while idle, without sending anything.
+            import mailbox_wake
+
+            me = caller(args, base) if session_arg(args) else workspace(os.getcwd())
+            output = [
+                {"name": peer["name"], "session": peer["session"], "harness": peer["harness"]}
+                | mailbox_wake.wake_health(peer, base=base)
+                for peer in scoped_peers(base, me, scope=args.scope)
+            ]
+            if args.format != "json":
+                for row in output:
+                    state = "wakeable" if row["wakeable"] else "not wakeable"
+                    repair = f" (repair: {row['repair']})" if row.get("repair") else ""
+                    print(f"{row['name']}: {state} via {row['route']}: {row['reason']}{repair}")
+                return 0
         elif args.action == "peers":
             me = caller(args, base) if session_arg(args) else workspace(os.getcwd())
             caller_harness = args.harness or me.get("harness") or detect_harness()
@@ -2933,6 +3013,8 @@ def main(argv: list[str] | None = None) -> int:
                 for peer in rows
             ]
         else:
+            if args.action == "attach-wake-route":
+                check_attach_shell(session_arg(args), args.harness or detect_harness())  # before registering anyone
             me = caller(args, base)
             if args.action == "feedback":
                 output = feedback_module().submit(
@@ -2995,6 +3077,10 @@ def main(argv: list[str] | None = None) -> int:
                         if is_run_peer(me)
                         else mark_read(base, me["session"], args.ids)
                     }
+                elif args.action == "attach-wake-route":
+                    if is_run_peer(me):
+                        raise MailboxError("run sessions are woken by their runner, not an attached route")
+                    output = attach_wake_route(base, me)
                 elif args.action == "focus":
                     if is_run_peer(me):
                         raise MailboxError("focus is for interactive sessions")

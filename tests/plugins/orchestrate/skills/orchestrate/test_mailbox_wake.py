@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -164,6 +165,84 @@ class AntigravityWakeTests(unittest.TestCase):
         self.assertEqual(mailbox_wake.wake(self.target, message, base=self.base)["status"], "unavailable")
         self.assertEqual(len(peer_mailbox.incoming(self.base, "agy-target")), 1)
 
+    def marker(self, message_id, requested_at):
+        path = self.base / "wakes" / peer_mailbox.session_key("agy-target") / "agy-wake.json"
+        peer_mailbox.write(path, {"id": message_id, "requestedAt": requested_at})
+
+    def test_a_stale_or_future_notice_for_the_same_message_no_longer_blocks_a_wake(self):
+        with AgyServer() as server:
+            self.control(server.address)
+            self.mail("x")
+            message = peer_mailbox.incoming(self.base, "agy-target")[0]["id"]
+            self.marker(message, "2000-01-01T00:00:00Z")
+            stale = mailbox_wake.wake(self.target, message, base=self.base)
+            again = mailbox_wake.wake(self.target, message, base=self.base)  # a fresh notice still deduplicates
+            self.marker(message, "2099-01-01T00:00:00Z")
+            future = mailbox_wake.wake(self.target, message, base=self.base)
+        self.assertEqual((stale["status"], stale["phase"]), ("scheduled", "submitted"))
+        self.assertEqual(again["status"], "scheduled")
+        self.assertEqual(future["status"], "scheduled")
+        self.assertEqual(len(server.sends()), 2)  # the stale one and the future-dated one, not the fresh repeat
+
+    def test_wake_health_reports_the_route_without_sending(self):
+        missing = mailbox_wake.wake_health(self.target, base=self.base)
+        self.assertFalse(missing["wakeable"])
+        self.assertIn("attach-wake-route", missing["repair"])
+        with AgyServer() as server:
+            self.control(server.address)
+            listening = mailbox_wake.wake_health(self.target, base=self.base)
+        self.assertEqual((listening["route"], listening["wakeable"]), ("agy-control", True))
+        self.assertEqual(server.calls, [])
+        self.control("127.0.0.1:1")
+        self.assertIn("not listening", mailbox_wake.wake_health(self.target, base=self.base)["reason"])
+        self.control("example.com:80")
+        self.assertIn("not loopback", mailbox_wake.wake_health(self.target, base=self.base)["reason"])
+
+    def test_attach_wake_route_records_only_this_shells_own_loopback_endpoint(self):
+        control = self.base / "wakes" / peer_mailbox.session_key("agy-target") / "agy-control.json"
+        shell = {
+            "ANTIGRAVITY_LS_ADDRESS": "127.0.0.1:4555",
+            "ANTIGRAVITY_CSRF_TOKEN": "secret",
+            "ANTIGRAVITY_CONVERSATION_ID": "agy-target",
+        }
+        with patch.dict("os.environ", {}, clear=True), self.assertRaises(peer_mailbox.MailboxError):
+            peer_mailbox.attach_wake_route(self.base, self.target)
+        with patch.dict("os.environ", {**shell, "ANTIGRAVITY_CONVERSATION_ID": "another"}, clear=True):
+            with self.assertRaises(peer_mailbox.MailboxError):
+                peer_mailbox.attach_wake_route(self.base, self.target)
+        with patch.dict("os.environ", {**shell, "ANTIGRAVITY_LS_ADDRESS": "example.com:80"}, clear=True):
+            with self.assertRaises(peer_mailbox.MailboxError):
+                peer_mailbox.attach_wake_route(self.base, self.target)
+        self.assertFalse(control.exists())
+        with patch.dict("os.environ", shell, clear=True):
+            result = peer_mailbox.attach_wake_route(self.base, self.target)
+        self.assertEqual(result["route"], "agy-control")
+        self.assertNotIn("secret", json.dumps(result))
+        self.assertEqual(peer_mailbox.load(control)["lsAddress"], "127.0.0.1:4555")
+        self.assertEqual(control.stat().st_mode & 0o777, 0o600)
+
+    def test_session_start_tells_a_conversation_without_a_route_how_to_attach_once(self):
+        payload = {"conversationId": "agy-target", "workspacePaths": [str(SCRIPTS)]}
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(peer_mailbox, "harness_pid", return_value=None),
+        ):
+            first = peer_mailbox.hook(payload, harness="gemini", event="SessionStart", base=self.base)
+            self.control("127.0.0.1:4555")
+            routed = peer_mailbox.hook(payload, harness="gemini", event="SessionStart", base=self.base)
+        self.assertIn("attach-wake-route", first["injectSteps"][0]["ephemeralMessage"])
+        self.assertNotIn("attach-wake-route", json.dumps(routed))
+
+    def test_a_shell_naming_no_conversation_records_nothing_for_any_session(self):
+        endpoint = {"ANTIGRAVITY_LS_ADDRESS": "127.0.0.1:4555", "ANTIGRAVITY_CSRF_TOKEN": "secret"}
+        store = Path(self.temporary.name) / "cli"
+        with patch.dict("os.environ", {**endpoint, "AGENT_EXECUTOR_HOME": str(store)}, clear=True):
+            code = peer_mailbox.main(["attach-wake-route", "--session", "unverified", "--harness", "gemini"])
+            peer_mailbox.register(store / "mailbox-v1", session="plain", harness="gemini", cwd=str(SCRIPTS))
+        self.assertNotEqual(code, 0)
+        self.assertFalse(peer_mailbox.peer_path(store / "mailbox-v1", "unverified").exists())
+        self.assertEqual(list((store / "mailbox-v1").glob("wakes/*/agy-control.json")), [])
+
     def test_stream_json_listener_sessions_still_use_the_listener(self):
         self.mail("x")
         message = peer_mailbox.incoming(self.base, "agy-target")[0]["id"]
@@ -177,6 +256,87 @@ class AntigravityWakeTests(unittest.TestCase):
 
 
 class MailboxWakeTests(unittest.TestCase):
+    def test_codex_wakes_reach_the_recipients_own_profile_daemon(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary) / "mailbox"
+            sender_home, recipient_home = Path(temporary) / "codex-a", Path(temporary) / "codex-b"
+            sender_home.mkdir()
+            recipient_home.mkdir()
+            sender = peer_mailbox.register(base, session="sender", harness="gemini", cwd=str(SCRIPTS))
+            peer_mailbox.register(
+                base, session="target", harness="codex", cwd=str(SCRIPTS), account=str(recipient_home)
+            )
+            opened = []
+
+            def socket_for(path):
+                opened.append(Path(path))
+                return NativeQueue()
+
+            with (
+                patch.dict("os.environ", {"CODEX_HOME": str(sender_home)}),
+                patch.object(mailbox_wake, "CodexSocket", side_effect=socket_for),
+            ):
+                result = peer_mailbox.send(base, sender=sender, to="target", text="hi", wake=True)
+        self.assertEqual(result["wake"]["status"], "scheduled")
+        self.assertEqual(opened, [recipient_home / mailbox_wake.CODEX_CONTROL_SOCKET])
+
+    def test_a_recorded_codex_home_that_is_gone_never_falls_back_to_the_senders(self):
+        with patch.dict("os.environ", {"CODEX_HOME": "/sender/profile"}):
+            gone = mailbox_wake.codex_home({"accountHome": "/removed/profile"})
+            unrecorded = mailbox_wake.codex_home({})
+        self.assertEqual(gone, Path("/removed/profile"))
+        self.assertEqual(unrecorded, Path("/sender/profile"))
+
+    def test_a_transport_failure_after_connecting_is_unknown_not_unsent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            sender = peer_mailbox.register(base, session="sender", harness="gemini", cwd=str(SCRIPTS))
+            peer_mailbox.register(base, session="target", harness="codex", cwd=str(SCRIPTS))
+            with patch.object(mailbox_wake, "CodexSocket", side_effect=TimeoutError("read timed out")):
+                timed_out = peer_mailbox.send(base, sender=sender, to="target", text="a", wake=True)["wake"]
+            with patch.object(mailbox_wake, "CodexSocket", side_effect=ConnectionRefusedError()):
+                refused = peer_mailbox.send(base, sender=sender, to="target", text="b", wake=True)["wake"]
+        self.assertEqual((timed_out["status"], timed_out["phase"]), ("unavailable", "unknown"))
+        self.assertEqual((refused["status"], refused["phase"]), ("unavailable", "not-sent"))
+
+    def test_wake_results_say_what_they_prove(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            sender = peer_mailbox.register(base, session="sender", harness="gemini", cwd=str(SCRIPTS))
+            peer_mailbox.register(base, session="target", harness="codex", cwd=str(SCRIPTS))
+            peer_mailbox.register(base, session="other", harness="unknown", cwd=str(SCRIPTS))
+            with patch.object(mailbox_wake, "CodexSocket", return_value=NativeQueue()):
+                submitted = peer_mailbox.send(base, sender=sender, to="target", text="a", wake=True)["wake"]
+            with patch.object(mailbox_wake, "CodexSocket", return_value=NativeQueue(state="active")):
+                busy = peer_mailbox.send(base, sender=sender, to="target", text="b", wake=True)["wake"]
+            unsupported = peer_mailbox.send(base, sender=sender, to="other", text="c", wake=True)["wake"]
+        self.assertEqual((submitted["status"], submitted["phase"]), ("scheduled", "submitted"))
+        self.assertEqual((busy["status"], busy["phase"]), ("queued", "not-sent"))
+        self.assertEqual((unsupported["status"], unsupported["phase"]), ("unsupported", "not-sent"))
+
+    def test_antigravity_presence_follows_its_agy_process(self):
+        chain = {100: "200 zsh", 200: "300 /opt/antigravity/bin/agy", 300: "1 launchd"}
+
+        def ps(command, **_kwargs):
+            return subprocess.CompletedProcess(command, 0, stdout=chain.get(int(command[-1]), ""), stderr="")
+
+        with patch.object(peer_mailbox.subprocess, "run", side_effect=ps):
+            self.assertEqual(peer_mailbox.harness_pid("gemini", start=100), 200)
+            self.assertEqual(peer_mailbox.harness_pid("codex", start=100), 100)  # no codex above: the start
+
+    def test_claude_records_are_read_from_the_recipients_profile_first(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = Path(temporary) / "claude-profile"
+            (profile / "sessions").mkdir(parents=True)
+            target = {"session": "s", "harness": "claude", "accountHome": str(profile)}
+            self.assertEqual(mailbox_wake.claude_session_dirs(target)[0], profile / "sessions")
+            base = Path(temporary) / "mailbox"
+            peer_mailbox.register(base, session="s", harness="claude", cwd=str(SCRIPTS))
+            with patch.object(mailbox_wake, "claude_session_dirs", return_value=[profile / "sessions"]):
+                health = mailbox_wake.wake_health(target, base=base)
+        self.assertEqual((health["route"], health["wakeable"]), ("claude-socket", False))
+        self.assertIn("listen --engine claude", health["repair"])
+
     def test_burst_requests_share_one_pending_turn_and_all_mail_is_delivered(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

@@ -1163,6 +1163,16 @@ class MailboxTests(unittest.TestCase):
         peer_line = next(line for line in result.stdout.splitlines() if "[id: codex-cl]" in line)
         self.assertIn("same repository", peer_line)
 
+    def test_cli_wake_health_lists_each_peers_route_without_sending(self):
+        result = mailbox_cli(self.base, "wake-health", "--format", "json", cwd=self.repository, check=True)
+        rows = {row["session"]: row for row in json.loads(result.stdout)}
+        self.assertEqual(set(rows), {self.claude["session"], self.codex["session"]})
+        self.assertEqual(
+            (rows[self.claude["session"]]["route"], rows[self.claude["session"]]["wakeable"]), ("claude-socket", False)
+        )
+        self.assertTrue(all({"route", "wakeable", "reason"} <= set(row) for row in rows.values()))
+        self.assertEqual(list((self.base / "inbox").glob("*/*.json")), [])
+
     def test_cli_peers_outside_git_keeps_the_hooked_project(self):
         repo = self.git_checkout("was-here")
         self.hook("codex-was-1", "codex", repo, "SessionStart")

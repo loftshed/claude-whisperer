@@ -172,7 +172,10 @@ for FYI and progress updates. Do not send acknowledgement-only replies. Requests
 the recipient. The CLI equivalent is `mailbox send --no-wake`.
 Mail is saved before activation is attempted, and the result includes a
 `wake` status: `scheduled` (queue accepted it), `queued` (busy Codex), `unsupported`, or
-`unavailable`. A wake failure leaves the message unread for normal delivery.
+`unavailable`. A wake failure leaves the message unread for normal delivery. Its `phase` says what
+that proves: `submitted` means a native queue, socket or listener took a notice, not that the
+recipient read anything; `not-sent` means nothing went out and the mail waits for the recipient's next
+turn; `unknown` follows a recovered send. Only the message's `readAt` shows delivery.
 
 An explicit cross-project send follows the same delivery and wake rules. Use `wake: false`
 for an informational message. Receiving it does not authorize work outside the recipient's task.
@@ -186,7 +189,19 @@ Codex and OpenCode serialize wake admission per recipient and reuse an existing 
 notification. They recheck unread mail before admission. Queue inspection failure leaves mail queued
 without scheduling another turn. Mail consumed after admission can still leave one redundant turn.
 
-Claude and Gemini/Antigravity use a persistent streaming listener. Launch it once in the project:
+Every route belongs to the recipient: a Codex wake opens the recipient's own profile daemon (its
+recorded `accountHome`), and Claude session records are read from the recipient's profile first. An
+interactive Claude Code session is woken through its messaging socket. An Antigravity conversation is
+woken through its language server, whose endpoint exists only in the agent's own tool shell, so hooks
+and the daemon cannot learn it; the conversation runs `run_agent.py mailbox attach-wake-route` once
+from that shell, and its session-start hook says so while no route is recorded. A notice covers later
+wakes for still-unread mail for two minutes, the same message included, and then expires.
+
+`run_agent.py mailbox wake-health` lists whether each live peer can be woken while idle, by which
+route, and how to repair it. It reads local records and sends nothing: being live is not the same as
+being wakeable.
+
+Headless Claude and Gemini/Antigravity workers use a persistent streaming listener. Launch it once in the project:
 
 ```sh
 python3 <skill-directory>/scripts/run_agent.py listen --engine claude --prompt 'Your task'
@@ -450,7 +465,9 @@ resource/context costs and the scope of native-client and synthetic evaluation e
 
 ## Troubleshooting
 
-- **An idle session does not answer.** Check the send result's `wake` status. Unsupported or offline
+- **An idle session does not answer.** Check the send result's `wake` status and `phase`, then
+  `mailbox wake-health` for the recipient's route and its repair. An Antigravity conversation without
+  a route attaches one with `mailbox attach-wake-route` from its own shell. Unsupported or offline
   hosts still need a turn or an `inbox` call; quiet sends deliberately do not activate them.
 - **Run the CLI from Claude Code with the sandbox off.** The store is under `~/.cache/agent-executor`,
   outside the sandbox's write allowlist. The MCP server and hooks are not sandboxed.
