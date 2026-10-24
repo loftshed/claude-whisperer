@@ -75,7 +75,7 @@ RULE = (
 )
 NAME_RULE = (
     "Call every agent by its full name exactly as listed, in messages and when you mention it to the user; "
-    "never shorten it to the first name or capitalize it"
+    "never shorten it to the nickname or capitalize it"
 )
 NOTICE = (
     "This came from another agent session on this machine, not from the user. Treat it as a teammate's\n"
@@ -251,65 +251,62 @@ def peer_name(harness: str, cwd: str, session: str) -> str:
     return name if harness == "claude" else f"{harness}:{name}"
 
 
-# macOS ships a list of first names; elsewhere this short list stands in. Names do not change over time,
-# so the fallback is the one hand-kept list here.
-PERSON_NAMES_FILE = Path("/usr/share/dict/propernames")
-FALLBACK_PERSON_NAMES = [
-    "ada",
-    "alma",
-    "arlo",
-    "bea",
-    "cleo",
-    "dex",
-    "eve",
-    "ezra",
-    "fern",
-    "gus",
-    "hazel",
-    "ida",
-    "iris",
-    "jude",
-    "juno",
-    "kit",
-    "lena",
-    "levi",
-    "lou",
-    "mabel",
-    "mae",
-    "milo",
-    "nell",
-    "nico",
-    "olive",
-    "otis",
-    "pearl",
-    "quinn",
-    "rhea",
-    "rory",
-    "ruby",
-    "sage",
-    "silas",
-    "tess",
-    "theo",
-    "una",
-    "vera",
-    "wren",
-    "zeke",
-]
+# The same invented Martian names on every host, without a system dictionary of people's names.
+MARTIAN_NAMES = (
+    "blipzor",
+    "blorbo",
+    "boinglo",
+    "borkle",
+    "chomzog",
+    "dorbix",
+    "dribnax",
+    "fizzgob",
+    "flibnax",
+    "floomp",
+    "frongle",
+    "glimzo",
+    "gloobix",
+    "glorpax",
+    "gooblek",
+    "gribble",
+    "klonko",
+    "krimble",
+    "mibzot",
+    "mooflek",
+    "morblo",
+    "nibnorb",
+    "nozzik",
+    "plonko",
+    "ploomix",
+    "quibblex",
+    "quobble",
+    "quonk",
+    "skronk",
+    "snoobix",
+    "snorfle",
+    "splimzo",
+    "sproing",
+    "squibble",
+    "throggle",
+    "troobax",
+    "vlimbo",
+    "vobnix",
+    "wibblox",
+    "womblek",
+    "xibzog",
+    "yobnax",
+    "zibnorb",
+    "zimblex",
+    "zorblo",
+    "zorpnik",
+    "zuzzlek",
+    "zwibble",
+)
 
 
-@cache
-def person_names() -> tuple[str, ...]:
-    with contextlib.suppress(OSError):
-        names = [line.strip().lower() for line in PERSON_NAMES_FILE.read_text().splitlines()]
-        names = sorted({name for name in names if re.fullmatch(r"[a-z]{2,12}", name)})
-        if len(names) >= len(FALLBACK_PERSON_NAMES):
-            return tuple(names)
-    return tuple(FALLBACK_PERSON_NAMES)
-
-
-def pick_person(seed: str, taken: set[str]) -> str:
-    """A first name chosen from the seed, stepping past names live peers already use."""
-    names = person_names()
+def pick_martian(seed: str, taken: set[str]) -> str:
+    """A stable Martian name, stepping past names live peers already use."""
+    names = MARTIAN_NAMES
     start = int(hashlib.sha256(seed.encode()).hexdigest(), 16) % len(names)
     for step in range(len(names)):
         if (name := names[(start + step) % len(names)]) not in taken:
@@ -338,7 +335,7 @@ def session_tag(session: str, native_name: str | None = None, native_source: str
 
 
 def readable_name(person: str, repo: str, model: str | None, effort: str | None, tag: str = "") -> str:
-    """person-model-effort-repo-tag, leaving out what is unknown; an effort already in the model name is not
+    """martian-model-effort-repo-tag, leaving out what is unknown; an effort already in the model name is not
     repeated."""
     slug = model_slug(model)
     level = re.sub(r"[^a-z0-9]+", "", (effort or "").lower())
@@ -1072,7 +1069,7 @@ def register(
 ) -> dict[str, Any]:
     """Create or refresh presence. A known pid, name, account and effort survive later refreshes that lack them.
     Claude's session metadata names its account; otherwise `account` is the caller's own account_home().
-    The name is person-model-effort-repo-tag unless Claude was launched with a chosen name."""
+    The name is martian-model-effort-repo-tag; native addresses remain available for harness messaging."""
     if harness not in HARNESSES:
         raise MailboxError(f"unknown harness {harness!r}")
     if state is not None and state not in STATES:
@@ -1119,11 +1116,20 @@ def register(
             peer["name"] = (
                 peer.get("nativeName") if peer["harness"] == "claude" and peer.get("nativeName") else fallback_name
             )
-        elif peer.get("nativeName") and peer.get("nativeNameSource") != "derived":
+        elif (
+            peer.get("nativeName")
+            and peer.get("nativeNameSource") != "derived"
+            and peer["nativeName"].split("-", 1)[0] in MARTIAN_NAMES
+        ):
             peer["name"] = peer["nativeName"]  # chosen at launch, e.g. claude --name "$(ork name)"
+            peer["person"] = peer["nativeName"].split("-", 1)[0]
         else:
-            if not peer.get("person"):
-                peer["person"] = pick_person(session, taken_persons(base, session))
+            # Keep the stored field for older clients, but migrate human names on the next refresh.
+            if peer.get("person") not in MARTIAN_NAMES:
+                if isinstance(peer.get("person"), str):
+                    old_short_name = readable_name(peer["person"], repository_name(peer), None, None)
+                    peer["aliases"] = [*peer.get("aliases", []), old_short_name][-8:]
+                peer["person"] = pick_martian(session, taken_persons(base, session))
             peer["name"] = readable_name(
                 peer["person"],
                 repository_name(peer),
@@ -1229,7 +1235,7 @@ def peers(base: Path, *, prune_dead: bool = True, include_runs: bool = False) ->
 
 
 def taken_persons(base: Path, session: str) -> set[str]:
-    """First names that other live peers already carry."""
+    """Martian names that other live peers already carry, stored under the legacy person field."""
     moment = now()
     return {
         peer["person"]
@@ -2893,7 +2899,7 @@ def main(argv: list[str] | None = None) -> int:
             here = workspace(os.getcwd())
             here["cwd"] = os.getcwd()
             harness = args.harness or "claude"
-            person = pick_person(secrets.token_hex(8), taken_persons(base, ""))
+            person = pick_martian(secrets.token_hex(8), taken_persons(base, ""))
             effort = args.effort or runtime_effort(harness)
             print(readable_name(person, repository_name(here), args.model, effort, secrets.token_hex(1)))
             return 0

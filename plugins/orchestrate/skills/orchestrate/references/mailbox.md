@@ -42,14 +42,15 @@ session the old one's unread mail and the requests it read in the last day but n
 flagged `carried`, plus its names as addresses, its person and what it was working on. Senders are told
 that the conversation behind their message is gone. Mail sent over native `SendMessage` is not covered.
 
-**Names.** A peer's name reads `person-model-effort-repo-hex`, for example
-`ada-opus-5.5-xhigh-orkest-76`. Agents call each other by that whole name, in messages and to the
-user, never by the first name alone; each session's hook tells it its own name. The first name is
-picked once per session (from `/usr/share/dict/propernames` when present) and differs from other live
-peers'; model and effort come from the runtime and are left out when unknown, never guessed. The hex
+**Names.** A peer's name reads `martian-model-effort-repo-hex`, for example
+`blipzor-opus-5.5-xhigh-orkest-76`. Agents call each other by that whole name, in messages and to the
+user, never by the nickname alone; each session's hook tells it its own name. The nickname comes from
+a fixed pool of invented Martian names, stays with the session, and avoids names other live peers use
+until the pool is exhausted. Model and effort come from the runtime and are left out when unknown. The hex
 byte is the suffix of Claude Code's own name for the session (`orkest-76`), otherwise the session ID's
 last byte. When model or effort change, the name follows and earlier names keep resolving;
-`person-repo` and the session ID are the stable addresses. A Claude session's own name (what
+`martian-repo` and the session ID are the stable addresses. Existing human names migrate on refresh,
+and their earlier full names and short addresses still resolve. A Claude session's own name (what
 `ListAgents` shows and `SendMessage` takes) is set by Claude Code, and a hook cannot change it; to make
 it match, launch with `claude --name "$(ork name --model opus-5.5)"`.
 
