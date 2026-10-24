@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.33.1
+
+- fix(orchestrate): give wakes recipient-owned routes, honest phases and a health check (#29)
+
 ## 0.33.0
 
 - feat(orchestrate): give agents Martian names (#28)
