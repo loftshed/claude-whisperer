@@ -1066,9 +1066,15 @@ def set_focus(
     model: str | None = None,
     harness_label: str | None = None,
     channels: list[str] | None = None,
+    task_details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One line on what this session is working on, shown to every agent in the same project. `channels` also
     joins those channels; focus text alone never changes membership."""
+    import mailbox_tasks
+
+    details = mailbox_tasks.validate(task_details or {})
+    if not text.strip():
+        raise MailboxError("task focus cannot be empty")
     peer = load(peer_path(base, session))
     if valid_peer(peer) and not is_run_peer(peer):
         peer = annotate(
@@ -1084,6 +1090,7 @@ def set_focus(
         import mailbox_channels
 
         peer = mailbox_channels.update(base, session, join=channels)
+    mailbox_tasks.save(base, peer, **details)
     return peer
 
 
@@ -2112,6 +2119,9 @@ def prune(base: Path) -> dict[str, int]:
     import mailbox_channels
 
     mailbox_channels.prune_operations(base)
+    import mailbox_tasks
+
+    mailbox_tasks.prune(base)
     return removed
 
 
@@ -3001,6 +3011,7 @@ def main(argv: list[str] | None = None) -> int:
         "join",
         "leave",
         "channels",
+        "tasks",
     ):
         sub = commands.add_parser(name)
         if name == "name":
@@ -3014,7 +3025,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         sub.add_argument("--harness", choices=HARNESSES)
         sub.add_argument("--format", choices=("text", "json", "context"), default="text")
-        if name in {"peers", "send", "inbox", "wait", "history", "feedback-summary", "wake-health", "wake-retry"}:
+        if name in {
+            "peers",
+            "send",
+            "inbox",
+            "wait",
+            "history",
+            "feedback-summary",
+            "wake-health",
+            "wake-retry",
+            "tasks",
+        }:
             sub.add_argument(
                 "--scope", choices=SCOPES, default="project", help="cross-project requires explicit opt-in"
             )
@@ -3028,6 +3049,9 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--before", help="page back from this post id")
         if name == "peers":
             sub.add_argument("--runs", action="store_true", help="include run-scoped worker/conductor sessions")
+        if name == "tasks":
+            sub.add_argument("--limit", type=int, default=10)
+            sub.add_argument("--offset", type=int, default=0)
         if name == "hook":
             sub.add_argument("--event", help="lifecycle event, for hosts whose payload does not name it")
         if name == "send":
@@ -3061,6 +3085,11 @@ def main(argv: list[str] | None = None) -> int:
         if name == "ack":
             sub.add_argument("ids", nargs="+")
         if name == "focus":
+            import mailbox_tasks
+
+            for field, maximum in mailbox_tasks.LIMITS.items():
+                sub.add_argument(f"--{field}", help=f"short task note, at most {maximum} characters")
+            sub.add_argument("--status", choices=mailbox_tasks.STATUSES)
             sub.add_argument("--harness-label", help="actual host name, e.g. Antigravity; omit if not known")
             sub.add_argument("--model", help="current model ID/name verified from your runtime; omit if unknown")
             sub.add_argument(
@@ -3145,6 +3174,14 @@ def main(argv: list[str] | None = None) -> int:
             reopened = wake_recovery.reopen(base, sessions)
             # Only the chosen recipients: a project-scoped retry never wakes anyone outside that scope.
             output = {"reopened": reopened, "outcomes": wake_recovery.reconcile(base, sessions=sessions)}
+        elif args.action == "tasks":
+            import mailbox_tasks
+
+            me = caller(args, base) if session_arg(args) else workspace(os.getcwd())
+            output = mailbox_tasks.listing(base, me, scope=args.scope, limit=args.limit, offset=args.offset)
+            if args.format != "json":
+                print(mailbox_tasks.render(output))
+                return 0
         elif args.action == "peers":
             me = caller(args, base) if session_arg(args) else workspace(os.getcwd())
             caller_harness = args.harness or me.get("harness") or detect_harness()
@@ -3262,6 +3299,11 @@ def main(argv: list[str] | None = None) -> int:
                         model=args.model,
                         harness_label=args.harness_label,
                         channels=args.channel,
+                        task_details={
+                            key: getattr(args, key)
+                            for key in (*mailbox_tasks.LIMITS, "status")
+                            if getattr(args, key) is not None
+                        },
                     )
                 elif args.action in {"join", "leave"}:
                     import mailbox_channels
