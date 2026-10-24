@@ -46,7 +46,14 @@ node plugins/monitor/macos/install-observer.mjs
 
 This installs a separate login agent, `local.monitor.observer`, which checks the existing Monitor cache once a minute. It does not restart the menu bar app, query providers, spend tokens or redeem resets. Keep Monitor running so its cache receives fresh readings. When the computer sleeps or Monitor stops refreshing, the recorder cannot fill that gap.
 
-Daily JSONL files in `~/.local/share/monitor-observations/` retain 60 days of quota readings. Each fresh cache reading records its original fetch time, percentage used and remaining, reported reset timestamps, plan, refresh success/failure and banked-reset count if supplied. Repeated reads of the same cache are skipped; fresh readings with unchanged percentages are kept. No reset cause or permanent weekly schedule is inferred. No prompts, credentials, provider error text or conversation contents are copied.
+Daily JSONL files in `~/.local/share/monitor-observations/` keep at most **500 records total**, expiring records after **14 days**. A fresh reading is saved at most once every **12 hours per account**, plus notable changes:
+
+- A daily-or-longer allowance rises by at least 5 percentage points or drops by at least 25 points between readings.
+- Its reported reset time moves by more than 30 minutes, appears or disappears.
+- The plan, quota windows or available banked-reset count changes.
+- Refresh status changes from success to failure or back. Repeated failures are not logged again.
+
+Routine usage changes and ordinary short-window rollovers do not add records. Each event includes the immediately preceding reading for comparison. The latest reading is overwritten in a small state file rather than appended to history. Checkpoints require a fresh provider reading; stale cache data is not logged again. No reset cause or permanent weekly schedule is inferred. No prompts, credentials, provider error text or conversation contents are copied.
 
 `status.json` shows the last recorder check and the age of each account's reading. Files are private to the current user. `observationId` supports deduplication if a crash repeats a row. The installed script lives outside the checkout, so switching branches does not change the recorder.
 
