@@ -4,6 +4,9 @@ Agent sessions use one authenticated loopback HTTP daemon to list peers and exch
 `<agent-executor cache>/mailbox-v1/` (`peers/<session>.json`, `inbox/<session>/<id>.json`, with `:` in a
 session id written as `%3A`). Nothing leaves the machine.
 
+For a compact record of current work that survives an agent leaving, use
+[task notes](task-notes.md): update `focus` with `done`, `next`, `blocker` and `refs`, then read `tasks` on demand.
+
 ## Setup and repair
 
 Run `python3 scripts/run_agent.py doctor --repair-messaging` from this skill directory to install

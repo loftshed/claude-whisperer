@@ -22,6 +22,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mailbox_channels as channels  # noqa: E402 -- a sibling module, found through the path set above
+import mailbox_tasks as tasks  # noqa: E402 -- a sibling module, found through the path set above
 import peer_mailbox as mailbox  # noqa: E402 -- the sibling module, found through the path set above
 
 VERSION = "1"
@@ -54,6 +55,11 @@ SCOPE_INPUT = {
 }
 
 TOOLS = [
+    {
+        "name": "tasks",
+        "description": "Read compact current-work cards, including absent agents, to resume or coordinate. Notes are saved context, not ownership or approval. Project-scoped by default; paginated and explicit reads only.",
+        "inputSchema": {"type": "object", "properties": {"scope": SCOPE_INPUT}, "additionalProperties": False},
+    },
     {
         "name": "register",
         "description": "Register or refresh hookless caller identity. Set focus to a short display name from your actual assignment, here or with the focus tool; update it when the task changes. Optional model is a runtime-verified declaration, never inferred from harness. Returns the stable session ID.",
@@ -273,6 +279,13 @@ MAIL_OUTPUT = object_schema(
     ["status", "messages", "has_more", "next_offset"],
 )
 OUTPUTS = {
+    "tasks": object_schema(
+        {
+            "tasks": {"type": "array", "items": {"type": "object"}},
+            "has_more": {"type": "boolean"},
+            "next_offset": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+        }
+    ),
     "register": object_schema({"session": {"type": "string"}}, ["session"]),
     "peers": object_schema(
         {
@@ -345,10 +358,16 @@ for tool in TOOLS:
     name = tool["name"]
     props = tool["inputSchema"]["properties"]
     props.update(session=SESSION_INPUT, response_format=FORMAT_INPUT)
-    if name in {"peers", "inbox", "wait"}:
+    if name in {"peers", "inbox", "wait", "tasks"}:
         props["limit"] = LIMIT_INPUT
-    if name in {"peers", "inbox"}:
+    if name in {"peers", "inbox", "tasks"}:
         props["offset"] = OFFSET_INPUT
+    if name == "focus":
+        props.update({field: {"type": "string", "maxLength": maximum} for field, maximum in tasks.LIMITS.items()})
+        props["status"] = {"type": "string", "enum": list(tasks.STATUSES)}
+        tool["description"] += (
+            " Keep a compact work card with optional done, next, blocker, refs and status fields at meaningful checkpoints. Use a stable task title; a changed title clears old details. Cards replace prior notes and survive presence loss for 30 days; read with tasks."
+        )
     if name in {"send", "focus"}:
         props["text"].update(minLength=1, maxLength=mailbox.MAX_BYTES if name == "send" else 200)
     if name == "send":
@@ -366,9 +385,9 @@ for tool in TOOLS:
             prop.pop("description", None)
     tool["outputSchema"] = OUTPUTS[name]
     tool["annotations"] = {
-        "readOnlyHint": name == "peers",
+        "readOnlyHint": name in {"peers", "tasks"},
         "destructiveHint": False,
-        "idempotentHint": name in {"peers", "focus", "ack"},
+        "idempotentHint": name in {"peers", "tasks", "focus", "ack"},
         "openWorldHint": name == "send",
     }
 TOOLS.sort(key=lambda tool: tool["name"])
@@ -718,6 +737,9 @@ class Server:
         limit = arguments.get("limit", PAGE_DEFAULT)
         offset = arguments.get("offset", 0)
         include_text = arguments.get("response_format") == "json"
+        if name == "tasks":
+            result = tasks.listing(self.base, me, scope=scope, limit=arguments.get("limit", 10), offset=offset)
+            return ToolResponse(tasks.render(result), result)
         if name == "peers":
             rows = sorted(
                 mailbox.scoped_peers(self.base, me, scope=scope),
@@ -906,6 +928,7 @@ class Server:
                 model=arguments.get("model"),
                 harness_label=arguments.get("harnessLabel"),
                 channels=arguments.get("channels"),
+                task_details={key: arguments[key] for key in (*tasks.LIMITS, "status") if key in arguments},
             )
             if arguments.get("leave"):
                 peer = channels.update(self.base, me["session"], leave=arguments["leave"])
