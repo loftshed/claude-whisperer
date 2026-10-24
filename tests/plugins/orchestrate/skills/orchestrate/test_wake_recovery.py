@@ -73,15 +73,32 @@ class WakeRecoveryTests(unittest.TestCase):
         self.assertEqual(self.at(3, FakeWake())[0]["outcome"], "delivered")
         self.assertIsNone(self.intent())
 
-    def test_a_busy_or_cancelled_recipient_is_not_retried_and_spends_no_attempt(self):
+    def test_a_busy_or_parked_recipient_is_not_retried_and_spends_no_attempt(self):
         self.send("hello")
         wake = FakeWake()
         peer_mailbox.annotate(self.base, "target", state="busy")
         self.assertEqual(self.at(3, wake)[0]["outcome"], "waiting")
-        peer_mailbox.annotate(self.base, "target", state="idle", lastStopReason="USER_CANCELED")
-        waiting = self.at(10, wake)[0]
-        self.assertIn("cancelled", waiting["reason"])
+        seconds = 10
+        for stop in ("USER_CANCELED", "MAX_INVOCATIONS", "ERROR"):
+            with self.subTest(stop=stop):
+                peer_mailbox.annotate(self.base, "target", state="idle", lastStopReason=stop)
+                waiting = self.at(seconds, wake)[0]
+                self.assertIn(stop, waiting["reason"])
+                seconds += 10
         self.assertEqual((wake.calls, self.intent()["attempts"]), ([], 0))
+
+    def test_wake_retry_does_not_override_a_parked_stop(self):
+        self.send("hello")
+        wake = FakeWake(NOT_SENT)
+        for seconds in range(3, 3 + 301 * wake_recovery.MAX_ATTEMPTS + 1, 301):
+            self.at(seconds, wake)
+        self.assertEqual(self.intent()["state"], "recovery-needed")
+        peer_mailbox.annotate(self.base, "target", lastStopReason="USER_CANCELED")
+        wake_recovery.reopen(self.base, ["target"])
+        calls = len(wake.calls)
+        soon = peer_mailbox.now() + dt.timedelta(seconds=5)  # reopen restarts the clock from the real now
+        self.assertEqual(wake_recovery.reconcile(self.base, moment=soon, wake=wake)[0]["outcome"], "waiting")
+        self.assertEqual(len(wake.calls), calls)
 
     def test_a_submitted_notice_that_started_nothing_is_resubmitted_after_its_window(self):
         sent = self.send("hello", first=SUBMITTED)

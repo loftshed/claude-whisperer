@@ -4,7 +4,9 @@ A send that asked to wake its recipient records one pending intent per recipient
 reconciles the intents every few seconds: it forgets mail the recipient has read, retries a wake only
 while the recipient is strictly idle, backs off between attempts, and past its limits marks the intent
 recovery-needed until `mailbox wake-retry`. Quiet mail never creates an intent. A retry never
-interrupts a turn, submits through an approval wait, or resumes a conversation its user cancelled.
+interrupts a turn, submits through an approval wait, or sets going a conversation whose last turn
+ended in a stop that forbids continuing (a user cancel, a run budget, an unclassified error); neither
+does `wake-retry`.
 """
 
 from __future__ import annotations
@@ -23,11 +25,12 @@ import peer_mailbox as mailbox
 BACKOFF = (2, 5, 15, 60, 300)
 MAX_ATTEMPTS = 6
 MAX_AGE = dt.timedelta(minutes=30)
-# A submitted notice that has not led the recipient to read its mail by then may have been lost.
+# A notice whose mail is still unread after this has unconfirmed delivery, so it may be submitted again.
 ACCEPT_WINDOW = dt.timedelta(seconds=20)
 RECONCILE_EVERY = 3.0
-# The recipient's user stopped its last turn; only that user's next prompt may set it going again.
-CANCELLED = {"USER_CANCELED"}
+# Stops after which automatic activation must wait for the recipient's user: a cancel, a run-budget
+# limit, or an error nobody has classified as transient. Only that user's next prompt clears them.
+PARKED = frozenset(mailbox.ANTIGRAVITY_NO_CONTINUE)
 MARKERS = ("claude-wake.json", "agy-wake.json")
 # Phases after which a notice may already be on its way: wait out the accept window before sending again.
 MAYBE_SENT = {"submitted", "unknown"}
@@ -79,16 +82,17 @@ def parse(value: Any) -> dt.datetime | None:
 
 
 def eligible(peer: dict[str, Any]) -> tuple[bool, str]:
-    """Whether a retry may go out now: strictly idle, and not stopped by its own user."""
-    if peer.get("lastStopReason") in CANCELLED:
-        return False, "its user cancelled the last turn; waiting for their next prompt"
+    """Whether a retry may go out now: strictly idle, and its last turn did not end in a parking stop."""
+    if (reason := peer.get("lastStopReason")) in PARKED:
+        return False, f"its last turn ended with {reason}; waiting for its user's next prompt"
     if peer.get("state") != "idle":
         return False, f"recipient is {peer.get('state') or 'in an unknown state'}"
     return True, ""
 
 
-def lift_lost_markers(base: Path, session: str, messages: list[str], moment: dt.datetime) -> None:
-    """Remove a notice marker for this mail once its accept window passed unread, so a retry can submit."""
+def lift_unconfirmed_markers(base: Path, session: str, messages: list[str], moment: dt.datetime) -> None:
+    """Remove a notice marker for this mail once its accept window passed with the mail unread (delivery
+    unconfirmed, not proven lost), so a retry can submit again."""
     directory = base / "wakes" / mailbox.session_key(session)
     for name in MARKERS:
         marker = mailbox.load(directory / name) or {}
@@ -142,7 +146,7 @@ def reconcile_one(
             intent.update(state="pending", nextAt=later(moment, BACKOFF[0]), lastReason=reason)
             mailbox.write(path, intent)
             return {"session": session, "outcome": "waiting", "reason": reason}
-        lift_lost_markers(base, session, messages, moment)
+        lift_unconfirmed_markers(base, session, messages, moment)
         result = wake(peer, messages[-1], base=base, retry=True)
         attempts = int(intent.get("attempts", 0)) + 1
         intent.update(attempts=attempts, lastStatus=result.get("status"), lastReason=result.get("reason"))
