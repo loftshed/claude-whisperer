@@ -826,6 +826,10 @@ def serve(base: Path, port: int = 0) -> None:
                 "persisted daemon endpoint is occupied; resolve the conflict without stopping its owner"
             ) from failure
         mailbox.write(daemon_base(base) / "state.json", server.info)
+        import wake_recovery
+
+        # Retries wakes that did not reach an idle recipient, for as long as the daemon serves.
+        threading.Thread(target=wake_recovery.run, args=(base, server.stopping), daemon=True).start()
         try:
             server.serve_forever(poll_interval=0.1)
         finally:

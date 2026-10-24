@@ -369,7 +369,7 @@ def claude_messaging(sessions_dir: Path, record: dict) -> tuple[str, str] | str:
     return canonical, peer_token
 
 
-def wake_claude(target: dict, message_id: str, *, base: Path | None = None) -> dict:
+def wake_claude(target: dict, message_id: str, *, base: Path | None = None, retry: bool = False) -> dict:
     import peer_mailbox as mailbox
     from mailbox_listener import request_wake
 
@@ -394,6 +394,9 @@ def wake_claude(target: dict, message_id: str, *, base: Path | None = None) -> d
                 status = record.get("status")
     if status in {"busy", "working", "active"}:
         return {"status": "queued", "reason": "busy; mailbox delivery at the next turn boundary"}
+    if retry and status == "waiting":
+        # Possibly an approval prompt; an automatic retry waits for plain idle instead of submitting through it.
+        return {"status": "queued", "reason": "waiting for input; a retry waits until the session is idle"}
     if status not in {"idle", "waiting"}:
         return {"status": "unavailable", "reason": f"Claude Code session is {status or 'unknown'}"}
     messaging = claude_messaging(sessions_dir, record)
@@ -436,7 +439,9 @@ def refused_before_admission(error: BaseException) -> bool:
     return isinstance(error, BEFORE_ADMISSION) or isinstance(getattr(error, "reason", None), BEFORE_ADMISSION)
 
 
-def wake(target: dict, message_id: str, *, base: Path | None = None) -> dict:
+def wake(target: dict, message_id: str, *, base: Path | None = None, retry: bool = False) -> dict:
+    """Try once to wake an idle recipient for unread mail. `retry` marks an automatic recovery attempt, which
+    holds back wherever a first attempt may still submit (a Claude session waiting for input)."""
     if target.get("harness") not in {"codex", "opencode", "claude", "gemini"}:
         return with_phase(
             {"status": "unsupported", "reason": "this harness has no mailbox wake adapter; message remains queued"}
@@ -452,6 +457,8 @@ def wake(target: dict, message_id: str, *, base: Path | None = None) -> dict:
             adapter = {"codex": wake_codex, "gemini": wake_gemini, "claude": wake_claude}.get(
                 target["harness"], wake_opencode
             )
+            if adapter is wake_claude:
+                return with_phase(wake_claude(target, message_id, base=base, retry=retry))
             return with_phase(adapter(target, message_id, base=base))
     except (OSError, ValueError, KeyError, TypeError, ControlError, subprocess.SubprocessError) as error:
         # Sending succeeded already. A missing/offline control endpoint must never lose the message.

@@ -1677,8 +1677,9 @@ def send(
                 result["wake"] = {
                     "status": "uncertain",
                     "phase": "unknown",
-                    "reason": "delivery recovered; previous activation outcome is unknown and is not retried",
+                    "reason": "delivery recovered; the earlier activation outcome is unknown, so recovery retries it",
                 }
+                remember_wake(base, target, message["id"], result["wake"])
             else:
                 entry["wakeAttempted"] = True
                 write(operation, entry)
@@ -1696,7 +1697,17 @@ def delivery_wake(base: Path, target: dict[str, Any], identifier: str, scope: st
     check_scope(scope)
     import mailbox_wake
 
-    return mailbox_wake.wake(target, identifier, base=base)
+    result = mailbox_wake.wake(target, identifier, base=base)
+    remember_wake(base, target, identifier, result)
+    return result
+
+
+def remember_wake(base: Path, target: dict[str, Any], identifier: str, result: dict[str, Any]) -> None:
+    """Keep a wake-requesting message's intent so the daemon can retry it; never fail the send over it."""
+    with contextlib.suppress(OSError, ValueError, MailboxError):
+        import wake_recovery
+
+        wake_recovery.record_intent(base, target, identifier, result)
 
 
 def valid_stamp(value: Any) -> bool:
@@ -2544,6 +2555,11 @@ def hook(
         effort=runtime_effort(harness, payload),
     )
     me = mark_delegated(base, me)
+    # How the last turn ended: wake recovery must not set a conversation going that its own user stopped.
+    if gemini and event == "Stop" and payload.get("terminationReason"):
+        me = annotate(base, session, lastStopReason=str(payload["terminationReason"])) or me
+    elif me.get("lastStopReason") and event in {"SessionStart", "UserPromptSubmit", "PreInvocation"}:
+        me = annotate(base, session, lastStopReason=None) or me
     cleared_notice = ""
     if event == "SessionStart" and payload.get("source") == "clear" and not me.get("delegatedRun"):
         cleared_notice = adopt_cleared(base, me)
@@ -2880,6 +2896,7 @@ def main(argv: list[str] | None = None) -> int:
         "name",
         "attach-wake-route",
         "wake-health",
+        "wake-retry",
     ):
         sub = commands.add_parser(name)
         if name == "name":
@@ -2893,10 +2910,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         sub.add_argument("--harness", choices=HARNESSES)
         sub.add_argument("--format", choices=("text", "json", "context"), default="text")
-        if name in {"peers", "send", "inbox", "wait", "history", "feedback-summary", "wake-health"}:
+        if name in {"peers", "send", "inbox", "wait", "history", "feedback-summary", "wake-health", "wake-retry"}:
             sub.add_argument(
                 "--scope", choices=SCOPES, default="project", help="cross-project requires explicit opt-in"
             )
+        if name == "wake-retry":
+            sub.add_argument("--to", help="only this peer; default every peer in scope")
         if name == "peers":
             sub.add_argument("--runs", action="store_true", help="include run-scoped worker/conductor sessions")
         if name == "hook":
@@ -2975,19 +2994,40 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "wake-health":
             # Read-only: whether each live peer can be woken while idle, without sending anything.
             import mailbox_wake
+            import wake_recovery
 
             me = caller(args, base) if session_arg(args) else workspace(os.getcwd())
-            output = [
-                {"name": peer["name"], "session": peer["session"], "harness": peer["harness"]}
-                | mailbox_wake.wake_health(peer, base=base)
-                for peer in scoped_peers(base, me, scope=args.scope)
-            ]
+            output = []
+            for peer in scoped_peers(base, me, scope=args.scope):
+                row = {"name": peer["name"], "session": peer["session"], "harness": peer["harness"]}
+                row |= mailbox_wake.wake_health(peer, base=base)
+                if pending := wake_recovery.summary(base, peer["session"]):
+                    row["pending"] = pending
+                output.append(row)
             if args.format != "json":
                 for row in output:
                     state = "wakeable" if row["wakeable"] else "not wakeable"
                     repair = f" (repair: {row['repair']})" if row.get("repair") else ""
-                    print(f"{row['name']}: {state} via {row['route']}: {row['reason']}{repair}")
+                    pending = row.get("pending")
+                    waiting = (
+                        f" [wake {pending['state']}: {pending['messages']} unread, {pending['attempts']} attempts]"
+                        if pending
+                        else ""
+                    )
+                    print(f"{row['name']}: {state} via {row['route']}: {row['reason']}{repair}{waiting}")
                 return 0
+        elif args.action == "wake-retry":
+            # Give intents that ran out of attempts a fresh bounded chance, and try once now.
+            import wake_recovery
+
+            me = caller(args, base) if session_arg(args) else workspace(os.getcwd())
+            if args.to:
+                sessions = [resolve(base, args.to, sender=me, scope=args.scope)["session"]]
+            else:
+                sessions = [peer["session"] for peer in scoped_peers(base, me, scope=args.scope)]
+            reopened = wake_recovery.reopen(base, sessions)
+            # Only the chosen recipients: a project-scoped retry never wakes anyone outside that scope.
+            output = {"reopened": reopened, "outcomes": wake_recovery.reconcile(base, sessions=sessions)}
         elif args.action == "peers":
             me = caller(args, base) if session_arg(args) else workspace(os.getcwd())
             caller_harness = args.harness or me.get("harness") or detect_harness()
