@@ -37,3 +37,7 @@ todoread
 multiedit
 orkest
 MRCR
+bunx
+gtimeout
+nohup
+PRIO

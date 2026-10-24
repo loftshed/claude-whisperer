@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { readFile, realpath } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, promisify } from "node:util";
@@ -30,6 +31,7 @@ import { roomsCommand } from "./rooms.mjs";
 import { cachedQuota, runTui } from "./stooges-tui.mjs";
 
 const HELP = `ork rooms --help
+ork gate [--heavy] [--label <text>] -- <command>   (also: ork gate status|install|uninstall)
 ork name [--model <model>] [--effort <level>] [--harness <harness>]
 ork routes [--archetype <name>] [--json] [--width 120]
 ork quota [--line|--json] [--refresh]
@@ -266,7 +268,22 @@ async function summaryCommand(argv, stdout) {
   return data;
 }
 
+/** Runs gate.py with this terminal, passing signals on and returning its exit code. */
+function gateCommand(argv) {
+  const child = spawn("python3", [path.join(scripts, "gate.py"), ...argv], { stdio: "inherit" });
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
+    process.on(signal, () => child.kill(signal));
+  return new Promise((resolve, reject) => {
+    child.on("error", reject);
+    child.on("exit", (code, signal) => resolve(code ?? 128 + (os.constants.signals[signal] ?? 0)));
+  });
+}
+
 export async function main(argv = process.argv.slice(2), { stdout = process.stdout } = {}) {
+  if (argv[0] === "gate") {
+    process.exitCode = await gateCommand(argv.slice(1));
+    return;
+  }
   if (argv[0] === "rooms") return roomsCommand(argv.slice(1), { stdout });
   if (argv[0] === "name") {
     // A readable session name for the current checkout: claude --name "$(ork name --model opus-5.5)".

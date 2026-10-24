@@ -127,6 +127,19 @@ node <checkout>/plugins/orchestrate/bin/ork.mjs stooges --attach-room <room-id>
 
 Details: [`skills/orchestrate/references/rooms.md`](skills/orchestrate/references/rooms.md). Full agent instructions: [`skills/orchestrate/SKILL.md`](skills/orchestrate/SKILL.md).
 
+### Heavy-run gate (`ork gate`)
+
+When several agents share one machine, `ork gate` keeps their test suites, builds and project-wide checks from running all at once. A focused run takes one of two slots. A `--heavy` run (whole suite, production build, project-wide typecheck or lint) waits for every slot, and waiters are told who holds the gate. Inside the gate, Vitest and Jest are capped at two workers, the command runs at nice 10, and a heavy or failed run's full output is saved to a log, so nobody reruns a suite to get back output that scrolled away.
+
+```sh
+ork gate --heavy -- yarn test                       # a whole suite, as the final check
+ork gate -- ./node_modules/.bin/vitest run src/a.test.ts
+ork gate status
+ork gate install                                    # PreToolUse hook for Claude Code, Codex and Antigravity
+```
+
+The hook refuses a heavy run started outside the gate and suggests the focused alternative. It leaves every other command to the harness's own permission checks. The gate runs only test, build, typecheck and lint commands, so allowing `ork gate` in a harness does not allow everything. Codex runs the new hook only after you trust it with `/hooks`. `AGENT_GATE_SLOTS` and `AGENT_GATE_DIR` override the slot count and lock directory (default `/tmp/agent-gate-<uid>`).
+
 ## Troubleshooting
 
 - **`HTTP mailbox is running old code; use mailbox daemon restart after upgrade`:** Restart the background loopback daemon after pulling changes:
