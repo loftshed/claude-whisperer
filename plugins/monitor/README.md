@@ -36,6 +36,34 @@ Providers are queried in parallel. Results are cached in `~/.cache/monitor/snaps
 
 The default Claude profile must run with `CLAUDE_CONFIG_DIR` **unset**: Claude Code derives its keychain entry from whether the variable is set, so pointing it at `~/.claude` explicitly finds no login. Leave `configDir` out for the default profile.
 
+## Observe reset patterns
+
+For passive history collection on macOS, run:
+
+```sh
+node plugins/monitor/macos/install-observer.mjs
+```
+
+This installs a separate login agent, `local.monitor.observer`, which checks the existing Monitor cache once a minute. It does not restart the menu bar app, query providers, spend tokens or redeem resets. Keep Monitor running so its cache receives fresh readings. When the computer sleeps or Monitor stops refreshing, the recorder cannot fill that gap.
+
+Daily JSONL files in `~/.local/share/monitor-observations/` keep at most **500 records total**, expiring records after **14 days**. A fresh reading is saved at most once every **12 hours per account**, plus notable changes:
+
+- A daily-or-longer allowance rises by at least 5 percentage points or drops by at least 25 points between readings.
+- Its reported reset time moves by more than 30 minutes, appears or disappears.
+- The plan, quota windows or available banked-reset count changes.
+- Refresh status changes from success to failure or back. Repeated failures are not logged again.
+
+Routine usage changes and ordinary short-window rollovers do not add records. Each event includes the immediately preceding reading for comparison. The latest reading is overwritten in a small state file rather than appended to history. Checkpoints require a fresh provider reading; stale cache data is not logged again. No reset cause or permanent weekly schedule is inferred. No prompts, credentials, provider error text or conversation contents are copied.
+
+`status.json` shows the last recorder check and the age of each account's reading. Files are private to the current user. `observationId` supports deduplication if a crash repeats a row. The installed script lives outside the checkout, so switching branches does not change the recorder.
+
+On other platforms, schedule `node plugins/monitor/bin/observe.mjs` once a minute with one scheduler. It also supports `--cache-dir` and `--output-dir` for isolated analysis or testing. To stop the macOS recorder while retaining its data:
+
+```sh
+launchctl bootout "gui/$(id -u)/local.monitor.observer"
+rm ~/Library/LaunchAgents/local.monitor.observer.plist
+```
+
 ## Ranking
 
 Percentages are relative to each account's own allowance; 1% of one plan is not 1% of another. The ranking asks a question that is comparable across accounts: **how much of this allowance is lost at reset unless spent?**
