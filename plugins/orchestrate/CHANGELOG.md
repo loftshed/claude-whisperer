@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.32.0
+
+- feat(orchestrate): add a machine-wide gate for heavy test, build and lint runs (#26)
+
 ## 0.31.2
 
 - fix(orchestrate): judge sessions of a shared process by their own activity (#25)

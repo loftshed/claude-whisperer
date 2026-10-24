@@ -2,7 +2,7 @@
 name: orchestrate
 description: "Delegate bounded implementation or read-only consultation across provider boundaries using local Codex, Antigravity, Claude Code, or OpenCode. Validate model and effort, check live quota, preserve context, record usage and evidence, recover bounded corrections, and audit results. Use for explicitly requested external-agent work or cross-platform handoffs, for example 'ask GPT-5.6 Sol', 'have Gemini check this', 'try it with GLM', or one focused question to a stronger model ('get Opus's opinion on this', 'ask GPT whether X is safe') through `consult`. Always prefer the host harness's built-in tools for messaging or spawning agents within the same harness (GPT in Codex, Gemini in Gemini/Antigravity, Claude in Claude Code). Do not trigger for ordinary coding or same-harness collaboration."
 metadata:
-  version: 0.31.2
+  version: 0.32.0
   requirements: Python 3.11+, POSIX file locking, git, and at least one installed/authenticated executor CLI (`codex`, `agy`, `claude`, or `opencode`).
 ---
 
