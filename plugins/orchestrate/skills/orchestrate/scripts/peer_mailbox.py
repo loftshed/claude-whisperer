@@ -1186,14 +1186,21 @@ def persist_agy_control(base: Path, session: str, pid: int | None) -> None:
 
     address = os.environ.get("ANTIGRAVITY_LS_ADDRESS")
     token = os.environ.get("ANTIGRAVITY_CSRF_TOKEN")
-    active = os.environ.get("ANTIGRAVITY_CONVERSATION_ID")
-    if not address or not token or (active and active != session):
+    # Only a shell that names this very conversation may record its endpoint: an unset id proves nothing.
+    if not address or not token or os.environ.get("ANTIGRAVITY_CONVERSATION_ID") != session:
         return
     if not re.fullmatch(mailbox_wake.LOOPBACK_ADDRESS, address):
         return  # the token must never be sent off this machine
     path = base / "wakes" / session_key(session) / "agy-control.json"
     write(path, {"lsAddress": address, "csrfToken": token, "pid": pid, "updatedAt": stamp()})
     path.chmod(0o600)
+
+
+def check_attach_shell(session: str | None, harness: str | None) -> None:
+    """Refuse an Antigravity attachment from a shell that does not belong to that conversation, before the
+    command registers the session, so a rejected attempt leaves no record behind."""
+    if harness == "gemini" and (not session or os.environ.get("ANTIGRAVITY_CONVERSATION_ID") != session):
+        raise MailboxError("this shell does not belong to that Antigravity conversation; nothing was recorded")
 
 
 def attach_wake_route(base: Path, me: dict[str, Any]) -> dict[str, Any]:
@@ -3006,6 +3013,8 @@ def main(argv: list[str] | None = None) -> int:
                 for peer in rows
             ]
         else:
+            if args.action == "attach-wake-route":
+                check_attach_shell(session_arg(args), args.harness or detect_harness())  # before registering anyone
             me = caller(args, base)
             if args.action == "feedback":
                 output = feedback_module().submit(

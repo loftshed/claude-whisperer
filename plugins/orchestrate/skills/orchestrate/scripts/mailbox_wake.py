@@ -19,6 +19,8 @@ TURN_END_POLL_SEC = 0.05
 # An earlier notice for still-unread mail covers a new wake for this long; after that it may have been lost.
 MARKER_TTL = 120
 CODEX_CONTROL_SOCKET = "app-server-control/app-server-control.sock"
+# Failures to connect at all: nothing can have reached the recipient's queue.
+BEFORE_ADMISSION = (ConnectionRefusedError, FileNotFoundError)
 
 
 def _peer_is_idle(base: Path | None, target: dict) -> bool:
@@ -62,9 +64,11 @@ def recent_marker(marker: Path, base: Path, target: dict) -> bool:
 
 
 def codex_home(target: dict) -> Path:
-    """The recipient's own Codex home: a profile's daemon hosts that profile's threads, not the sender's."""
+    """The recipient's own Codex home: a profile's daemon hosts that profile's threads, not the sender's.
+    A recorded home is used even when it is gone, so a broken recipient route fails instead of quietly
+    reaching the sender's profile; only a peer that recorded none falls back to this process's home."""
     home = target.get("accountHome")
-    if isinstance(home, str) and home and Path(home).expanduser().is_dir():
+    if isinstance(home, str) and home:
         return Path(home).expanduser()
     return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
 
@@ -404,6 +408,9 @@ def wake_claude(target: dict, message_id: str, *, base: Path | None = None) -> d
     mailbox.write(marker, {"id": message_id, "requestedAt": mailbox.stamp()})
     try:
         claude_uds_send(canonical, peer_token, target["session"], notification(message_id))
+    except BEFORE_ADMISSION:
+        marker.unlink(missing_ok=True)
+        return {"status": "unavailable", "reason": "Claude Code messaging socket refused the connection"}
     except Exception:
         marker.unlink(missing_ok=True)
         raise
@@ -419,8 +426,14 @@ def unread(base: Path, target: dict, message_id: str) -> bool:
 def with_phase(result: dict) -> dict:
     """What a wake result proves. `submitted`: a native queue, socket or listener took a notice, which is not
     proof the recipient read anything. `not-sent`: nothing went out; the mail waits for the recipient's next
-    turn. Only the message's readAt shows delivery."""
-    return {**result, "phase": "submitted" if result.get("status") == "scheduled" else "not-sent"}
+    turn. `unknown`: a transport failed after it may have submitted. Only the message's readAt shows delivery."""
+    phase = result.get("phase") or ("submitted" if result.get("status") == "scheduled" else "not-sent")
+    return {**result, "phase": phase}
+
+
+def refused_before_admission(error: BaseException) -> bool:
+    """A connection that was never made cannot have submitted anything; any other failure might have."""
+    return isinstance(error, BEFORE_ADMISSION) or isinstance(getattr(error, "reason", None), BEFORE_ADMISSION)
 
 
 def wake(target: dict, message_id: str, *, base: Path | None = None) -> dict:
@@ -440,10 +453,14 @@ def wake(target: dict, message_id: str, *, base: Path | None = None) -> dict:
                 target["harness"], wake_opencode
             )
             return with_phase(adapter(target, message_id, base=base))
-    except (OSError, ValueError, KeyError, TypeError, ControlError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, ControlError, subprocess.SubprocessError) as error:
         # Sending succeeded already. A missing/offline control endpoint must never lose the message.
         return with_phase(
-            {"status": "unavailable", "reason": "local harness control unavailable; message remains queued"}
+            {
+                "status": "unavailable",
+                "reason": "local harness control unavailable; message remains queued",
+                "phase": "not-sent" if refused_before_admission(error) else "unknown",
+            }
         )
 
 
