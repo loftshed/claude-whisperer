@@ -383,7 +383,7 @@ python3 <skill-directory>/scripts/run_agent.py mailbox wait --session MY_ID --re
 
 Omit model/host declarations unless verified from your current runtime. `--text`, `--message`, and
 `--body` are interchangeable for send/ask. Call yourself and every peer by the full `name`
-(`person-model-effort-repo-hex`) when talking to the user or another agent, never the first name alone
+(`martian-model-effort-repo-hex`) when talking to the user or another agent, never the nickname alone
 or capitalized. Keep `session` as the preferred routing key; old names still work.
 `displayName` remains the purpose alone for compatibility. Repo, branch and checkout remain separate.
 

@@ -89,10 +89,10 @@ class MailboxTests(unittest.TestCase):
         self.addCleanup(process.kill)
         return process.pid
 
-    def test_names_are_a_person_the_repo_the_model_and_the_effort(self):
-        # person-model-effort-repo-hex, leaving out what is not known yet; the hex is the session's last byte.
-        self.assertRegex(self.claude["name"], r"^[a-z]+-example-app-11$")
-        self.assertRegex(self.codex["name"], r"^[a-z]+-example-app-22$")
+    def test_names_are_a_martian_the_repo_the_model_and_the_effort(self):
+        # martian-model-effort-repo-hex; colliding seeds step past names already in use.
+        self.assertEqual(self.claude["name"], "snoobix-example-app-11")
+        self.assertEqual(self.codex["name"], "snorfle-example-app-22")
         self.assertNotEqual(self.claude["person"], self.codex["person"])
         self.assertEqual(self.claude["name"], f"{self.claude['person']}-example-app-11")
         self.assertEqual(sorted(peer["harness"] for peer in MAILBOX.peers(self.base)), ["claude", "codex"])
@@ -132,12 +132,13 @@ class MailboxTests(unittest.TestCase):
         ):
             self.assertEqual(MAILBOX.model_slug(model), slug, model)
         self.assertEqual(
-            MAILBOX.readable_name("ada", "My Repo", "gemini-3.8-flash-high", "high"),
-            "ada-gemini-3.8-flash-high-my-repo",
+            MAILBOX.readable_name("blipzor", "My Repo", "gemini-3.8-flash-high", "high"),
+            "blipzor-gemini-3.8-flash-high-my-repo",
         )
-        self.assertEqual(MAILBOX.readable_name("ada", "orkest", None, None), "ada-orkest")
+        self.assertEqual(MAILBOX.readable_name("blipzor", "orkest", None, None), "blipzor-orkest")
         self.assertEqual(
-            MAILBOX.readable_name("ada", "orkest", "claude-opus-5-5", "xhigh", "76"), "ada-opus-5.5-xhigh-orkest-76"
+            MAILBOX.readable_name("blipzor", "orkest", "claude-opus-5-5", "xhigh", "76"),
+            "blipzor-opus-5.5-xhigh-orkest-76",
         )
         # Claude Code's own derived name lends its hex suffix, so orkest-76 reads as ...-orkest-76.
         session = "0f5e7c2a-1b3d-4e6f-8a9b-c0d1e2f3a4b5"
@@ -145,12 +146,12 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(MAILBOX.session_tag(session, "my-chosen-name", "user"), "b5")
         self.assertEqual(MAILBOX.session_tag(session), "b5")
         self.assertRegex(MAILBOX.session_tag("fixture-reader"), r"^[0-9a-f]{2}$")
-        names = MAILBOX.person_names()
-        self.assertGreaterEqual(len(names), len(MAILBOX.FALLBACK_PERSON_NAMES))
-        first = MAILBOX.pick_person("seed", set())
-        self.assertNotEqual(MAILBOX.pick_person("seed", {first}), first)
+        self.assertEqual(MAILBOX.pick_martian("seed", set()), "quonk")
+        self.assertEqual(MAILBOX.pick_martian("seed", {"quonk"}), "skronk")
+        # The session suffix still distinguishes agents when every Martian name is occupied.
+        self.assertEqual(MAILBOX.pick_martian("seed", set(MAILBOX.MARTIAN_NAMES)), "quonk")
 
-    def test_a_name_chosen_at_launch_is_kept(self):
+    def test_a_martian_name_chosen_at_launch_is_kept(self):
         sessions_dir = Path(self.temporary.name) / "claude-config" / "sessions"
         sessions_dir.mkdir(parents=True)
         (sessions_dir / f"{os.getpid()}.json").write_text(
@@ -158,7 +159,7 @@ class MailboxTests(unittest.TestCase):
                 {
                     "sessionId": "claude-named-session",
                     "pid": os.getpid(),
-                    "name": "ada-opus-5.5-high-example-app-3f",
+                    "name": "blipzor-opus-5.5-high-example-app-3f",
                     "nameSource": "user",
                 }
             ),
@@ -166,8 +167,37 @@ class MailboxTests(unittest.TestCase):
         )
         with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(sessions_dir.parent)}):
             peer = self.peer("claude-named-session", "claude", str(self.repository))
-        self.assertEqual(peer["name"], "ada-opus-5.5-high-example-app-3f")
-        self.assertNotIn("person", peer)
+        self.assertEqual(peer["name"], "blipzor-opus-5.5-high-example-app-3f")
+        self.assertEqual(peer["person"], "blipzor")
+
+    def test_human_names_migrate_without_losing_mail_or_old_addresses(self):
+        MAILBOX.annotate(self.base, self.claude["session"], person="ada", name="ada-example-app-11")
+        sent = MAILBOX.send(self.base, sender=self.codex, to="ada-example-app-11", text="Keep this request")
+        migrated = MAILBOX.register(
+            self.base, session=self.claude["session"], harness="claude", cwd=str(self.repository)
+        )
+        self.assertEqual(migrated["name"], "snoobix-example-app-11")
+        for address in ("ada-example-app-11", "ada-example-app", "snoobix-example-app-11"):
+            self.assertEqual(MAILBOX.resolve(self.base, address, sender=self.codex)["session"], "claude-session-1111")
+        self.assertEqual(
+            [(mail["id"], mail["text"]) for mail in MAILBOX.incoming(self.base, migrated["session"])],
+            [(sent["id"], "Keep this request")],
+        )
+        again = MAILBOX.register(self.base, session=self.claude["session"], harness="claude", cwd=str(self.repository))
+        self.assertEqual(again["name"], "snoobix-example-app-11")
+        self.assertEqual(again["aliases"], migrated["aliases"])
+
+    def test_human_native_name_stays_routable_after_martian_display_rename(self):
+        with mock.patch.object(
+            MAILBOX, "claude_session", return_value=("ada-opus-5.5-high-example-app-3f", None, "user")
+        ):
+            peer = self.peer("claude-named-session", "claude", str(self.repository))
+        self.assertEqual(peer["name"], "womblek-example-app-62")
+        self.assertEqual(MAILBOX.native_route(peer, "claude")["nativeAddress"], "ada-opus-5.5-high-example-app-3f")
+        self.assertEqual(
+            MAILBOX.resolve(self.base, "ada-opus-5.5-high-example-app-3f", sender=self.codex)["session"],
+            "claude-named-session",
+        )
 
     def test_runtime_effort_comes_from_the_hook_or_the_claude_process(self):
         self.assertEqual(MAILBOX.runtime_effort("codex", {"reasoning_effort": "max"}), "max")
@@ -194,7 +224,7 @@ class MailboxTests(unittest.TestCase):
         banner = MAILBOX.describe_colleagues([refreshed], self.codex)
         self.assertIn("- " + original + " · Designer · translation parity · model unknown · Claude Code [id: ", banner)
         # Agents are told to call each other by the whole name, with a real one as the example.
-        self.assertIn(f"never shorten it to the first name or capitalize it (for example `{original}`)", banner)
+        self.assertIn(f"never shorten it to the nickname or capitalize it (for example `{original}`)", banner)
         MAILBOX.set_focus(self.base, self.claude["session"], "Mock server · rebase fixes")
         MAILBOX.set_focus(self.base, self.codex["session"], "Mock server · rebase fixes")
         MAILBOX.send(self.base, sender=self.codex, to=original, text="alias still works")
@@ -1130,9 +1160,8 @@ class MailboxTests(unittest.TestCase):
         repo = self.git_checkout("cli-here")
         self.hook("codex-cli-1", "codex", repo, "SessionStart")
         result = mailbox_cli(self.base, "peers", "--session", "fresh", "--harness", "opencode", cwd=repo)
-        first = result.stdout.splitlines()[0]
-        self.assertIn("codex-cli-1"[:8], first)
-        self.assertIn("same repository", first)
+        peer_line = next(line for line in result.stdout.splitlines() if "[id: codex-cl]" in line)
+        self.assertIn("same repository", peer_line)
 
     def test_cli_peers_outside_git_keeps_the_hooked_project(self):
         repo = self.git_checkout("was-here")
