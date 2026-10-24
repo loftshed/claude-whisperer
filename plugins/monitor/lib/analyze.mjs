@@ -3,10 +3,9 @@ import { formatClock, formatDuration, HOUR } from "./time.mjs";
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const EXHAUSTED_PCT = 0.5;
 
-/** A window whose reset time has passed since it was read is full again; its next reset is unknown. */
+/** Keep the last measured allowance until the provider confirms a refill. */
 export function effectiveWindow(w, now = Date.now()) {
-  if (w.resetsAt && w.resetsAt <= now)
-    return { ...w, usedPct: 0, remainingPct: 100, resetsAt: null, resetSinceFetch: true };
+  if (w.resetsAt && w.resetsAt <= now) return { ...w, resetsAt: null, resetAwaitingRefresh: true };
   return w;
 }
 
@@ -74,6 +73,7 @@ const rate = (pctPerHour) =>
 
 function laneAdvice(lane, now) {
   if (lane.status === "error") return `no data: ${lane.error}`;
+  if (lane.resetAwaitingRefresh) return "rollover due; refresh to confirm remaining quota";
   if (lane.status === "blocked") {
     return lane.blockedUntil
       ? `out until ${formatClock(lane.blockedUntil, now)} (in ${formatDuration(lane.blockedUntil - now)})`
@@ -159,7 +159,10 @@ export function buildLanes(accounts, now = Date.now()) {
       const weeklyRemainingPct =
         long.length > 0 ? Math.min(...long.map((w) => w.remainingPct)) : availableNowPct;
       const shortWindow = ws.find((w) => (w.windowMins ?? Infinity) < 1440) ?? null;
-      const stale = account.ok === false || (account.fetchedAt && now - account.fetchedAt > HOUR);
+      const stale =
+        account.ok === false ||
+        ws.some((w) => w.resetAwaitingRefresh) ||
+        (account.fetchedAt && now - account.fetchedAt > HOUR);
       const credits = exhausted.length > 0 ? usableCredits(account, pool) : null;
       let status = "available";
       if (credits) status = "credits";
@@ -200,6 +203,7 @@ export function buildLanes(accounts, now = Date.now()) {
         burnPctPerHour,
         lowRoom: isLowRoom,
         stale: Boolean(stale),
+        resetAwaitingRefresh: ws.some((w) => w.resetAwaitingRefresh),
         score,
       };
       lane.advice = laneAdvice(lane, now);

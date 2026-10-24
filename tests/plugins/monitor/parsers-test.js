@@ -168,13 +168,15 @@ test("buildLanes ranks expiring pools first, then roomy ones, then nearly empty,
   expect(fable.redundant, "Fable row adds nothing while the all-models limit binds").toBe(true);
 });
 
-test("a window whose reset has passed counts as full again", () => {
+test("a passed reset keeps the measured allowance until the provider confirms a refill", () => {
   const later = Date.parse("2026-09-26T01:30:00Z");
   const work = buildLanes(sampleAccounts(), later).find(
     (l) => l.accountId === "claude-work" && l.poolId === "all",
   );
-  expect(work.status).toBe("available");
-  expect(work.availableNowPct).toBe(100);
+  expect(work.status).toBe("blocked");
+  expect(work.availableNowPct).toBe(0);
+  expect(work.stale).toBe(true);
+  expect(work.advice).toBe("rollover due; refresh to confirm remaining quota");
 });
 
 test("headline skips per-model sub-limits and shows each independent pool", () => {
@@ -418,17 +420,19 @@ test("ChatGPT switches from weekly quota to remaining credits after exhaustion",
   expect(renderLine([{ ...account, ok: false }], NOW)).toBe("CX 62,261.91 cr 5d!");
 });
 
-test("ChatGPT keeps percentages while quota remains and resumes them after the weekly reset", () => {
+test("ChatGPT waits for a measured refill before leaving credits", () => {
   expect(renderLine([creditAccount({ usedPercent: 48 })], NOW)).toBe("CX 52 5d");
   // The same threshold as the ranking: under half a percent left is used up, so the pill shows credits.
   expect(jsonView([creditAccount({ usedPercent: 99.4 })], NOW).accounts[0].headline.text).toBe("0");
   expect(jsonView([creditAccount({ usedPercent: 99.8 })], NOW).accounts[0].headline.unit).toBe(
     "credits",
   );
-  expect(renderLine([creditAccount()], 1_790_779_510_001)).toBe("CX 100");
-  // Back on the included week: the balance leaves the pill but stays in the detailed report.
+  expect(renderLine([creditAccount()], 1_790_779_510_001)).toBe("CX 62,261.91 cr");
+  // A clock crossing alone does not establish that included quota is available.
   const back = jsonView([creditAccount()], 1_790_779_510_001).accounts[0];
-  expect(back.pills[0].credits).toBeNull();
+  expect(back.pills[0].credits.text).toBe("62,261.91 cr");
+  expect(back.windows[0].resetAwaitingRefresh).toBe(true);
+  expect(renderLine([creditAccount({ usedPercent: 0 })], NOW)).toBe("CX 100 5d");
   expect(back.credits.text).toBe("62,261.91 cr");
   expect(renderReport([creditAccount({ usedPercent: 48 })], { now: NOW })).toContain(
     "credit balance         62,261.91 cr left",

@@ -9,6 +9,7 @@ import {
   pills,
   sections,
 } from "./analyze.mjs";
+import { resetAnnouncements, resetDetails } from "./resets.mjs";
 import { formatClock, formatDuration } from "./time.mjs";
 import { SNAPSHOT_SCHEMA, VERSION } from "./version.mjs";
 
@@ -57,7 +58,7 @@ function bar(pct, width) {
 function resetText(w, blocker, now, c) {
   if (blocker)
     return c("dim", `unusable until the ${durationLabel(blocker.windowMins)} limit resets`);
-  if (w.resetSinceFetch) return c("dim", "reset since last check");
+  if (w.resetAwaitingRefresh) return c("dim", "rollover due; awaiting provider refresh");
   if (!w.resetsAt) return c("dim", "not started");
   return `${c("dim", "resets")} ${formatClock(w.resetsAt, now)} ${c("dim", `(in ${formatDuration(w.resetsAt - now)})`)}`;
 }
@@ -111,6 +112,13 @@ export function renderReport(
       out.push(
         `   ${pad("credit balance", 22)} ${c(LEVEL_COLOR[credits.level], credits.text)} left`,
       );
+    for (const detail of resetDetails(account, now)) out.push(`   ${c("dim", detail)}`);
+    for (const notice of resetAnnouncements(account, now)) {
+      out.push(
+        `   Announced: ${notice.title} · ${formatClock(Date.parse(notice.at), now)} (eligibility unverified; not used for pacing)`,
+      );
+      out.push(`   ${notice.url}`);
+    }
     const notes = account.notes ?? [];
     for (const note of notes) out.push(`   ${c("dim", note)}`);
     out.push("");
@@ -231,10 +239,26 @@ export function jsonView(accounts, now = Date.now()) {
           remainingPct: w.remainingPct,
           resetsAt: iso(w.resetsAt),
           resetsInMinutes: minutesUntil(w.resetsAt, now),
-          resetSinceFetch: Boolean(w.resetSinceFetch),
+          resetSinceFetch: false,
+          resetAwaitingRefresh: Boolean(w.resetAwaitingRefresh),
           exhausted: w.remainingPct <= 0.5,
           blockedBy: blocked.has(w.id) ? durationLabel(blocked.get(w.id).windowMins) : null,
         })))(blockedWindows(a, now)),
+      resetCredits: a.resetCredits
+        ? {
+            ...a.resetCredits,
+            credits:
+              a.resetCredits.credits?.map((c) => ({ ...c, expiresAt: iso(c.expiresAt) })) ?? null,
+          }
+        : null,
+      resetHistory: (a.resetHistory ?? []).map((e) => ({
+        ...e,
+        observedAt: iso(e.observedAt),
+        previousResetsAt: iso(e.previousResetsAt),
+        resetsAt: iso(e.resetsAt),
+      })),
+      resetDetails: resetDetails(a, now),
+      resetAnnouncements: resetAnnouncements(a, now),
       notes: a.notes ?? [],
     })),
     lanes: buildLanes(accounts, now).map((l) => ({
@@ -259,6 +283,7 @@ export function jsonView(accounts, now = Date.now()) {
       subPoolOf: l.subPoolOf ?? null,
       redundant: Boolean(l.redundant),
       stale: l.stale,
+      resetAwaitingRefresh: Boolean(l.resetAwaitingRefresh),
       score: Math.round(l.score * 10) / 10,
     })),
   };

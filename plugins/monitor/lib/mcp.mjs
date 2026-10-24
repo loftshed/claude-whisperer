@@ -5,6 +5,7 @@ import { getAccounts } from "./store.mjs";
 import { VERSION } from "./version.mjs";
 
 const INSTRUCTIONS = `Reports remaining subscription quota on this machine's AI accounts (Claude, Codex/ChatGPT, Antigravity/Gemini) so work can be routed where capacity would otherwise go unused.
+Reset history and banked reset expiry are separate from the current weekly rollover. Announcement notes have unverified eligibility and never change spending deadlines. A passed cached reset needs a provider refresh before a refill can be confirmed.
 Percentages are relative to each account's own allowance and are not comparable in absolute tokens across providers.
 surplusPts = weekly % remaining minus what even use until reset would leave; positive means under-used capacity that is lost at reset unless spent.
 Pools marked expiring are near their weekly rollover with capacity left; that remainder is lost at the rollover, so prefer them (and larger tasks) until it is used. Pools under 10% usable now can only take small tasks.
@@ -84,11 +85,18 @@ function compactView(view) {
       ok: a.ok,
       error: a.error,
       ageMinutes: a.ageMinutes,
+      ...(a.resetCredits && { resetCredits: a.resetCredits }),
+      ...(a.resetDetails.length > 0 && { resetDetails: a.resetDetails }),
+      ...(a.resetAnnouncements.length > 0 && {
+        resetAnnouncements: a.resetAnnouncements,
+        announcementPolicy: "Eligibility unverified; never used for pacing",
+      }),
       ...(a.credits && { credits: { text: a.credits.text, unlimited: a.credits.unlimited } }),
       windows: a.windows.map((w) => ({
         label: w.label,
         remainingPct: Math.round(w.remainingPct),
         resetsAt: w.resetsAt,
+        ...(w.resetAwaitingRefresh && { resetAwaitingRefresh: true }),
         ...(w.exhausted && { exhausted: true }),
         ...(w.blockedBy && { blockedBy: w.blockedBy }),
       })),

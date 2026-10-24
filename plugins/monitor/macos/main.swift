@@ -714,8 +714,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 var reset = "  not started"
                 if let blockedBy {
                     reset = "  unusable until the \(blockedBy) limit resets"
-                } else if (window["resetSinceFetch"] as? Bool) == true {
-                    reset = "  reset since last check"
+                } else if (window["resetAwaitingRefresh"] as? Bool) == true {
+                    reset = "  rollover due; awaiting provider refresh"
                 } else if let r = window["resetsAt"] as? String, let date = AppDelegate.iso.date(from: r) {
                     reset = "  resets \(clock(date)) (\(relative(date)))"
                 }
@@ -726,6 +726,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let credits = account["credits"] as? [String: Any], let balance = credits["text"] as? String {
                 let reading = CreditReading(text: balance, level: credits["level"] as? String ?? "out")
                 rows.append(infoItem(text("  Credit balance        " + reading.coinText + " left", mono, color(for: reading.level))))
+            }
+            for detail in account["resetDetails"] as? [String] ?? [] {
+                rows.append(infoItem(text("  " + detail, mono, .secondaryLabelColor)))
+            }
+            for notice in account["resetAnnouncements"] as? [[String: Any]] ?? [] {
+                guard let title = notice["title"] as? String,
+                      let at = notice["at"] as? String, let date = AppDelegate.iso.date(from: at),
+                      let source = notice["url"] as? String else { continue }
+                let item = NSMenuItem(title: "  Announced: \(title) · \(clock(date)) · open source", action: #selector(openResetSource(_:)), keyEquivalent: "")
+                item.attributedTitle = text(item.title, mono, .labelColor)
+                item.target = self
+                item.representedObject = source
+                item.toolTip = "Eligibility unverified; not used for pacing. " + source
+                rows.append(item)
+                rows.append(infoItem(text("  Eligibility unverified; not used for pacing", mono, .secondaryLabelColor)))
             }
             addSection("account:\(account["id"] as? String ?? label)", heading, summary: windowSummary(account), children: rows)
         }
@@ -833,6 +848,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             lastError = "could not open Terminal: \(error.localizedDescription)"
             rebuildMenu()
         }
+    }
+
+    @objc private func openResetSource(_ sender: NSMenuItem) {
+        guard let source = sender.representedObject as? String,
+              let url = URL(string: source), url.scheme == "https" else { return }
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func openConfig() {
