@@ -87,6 +87,28 @@ class WakeRecoveryTests(unittest.TestCase):
                 seconds += 10
         self.assertEqual((wake.calls, self.intent()["attempts"]), ([], 0))
 
+    def test_wake_retry_for_one_peer_never_attempts_another(self):
+        store = Path(self.temporary.name) / "cli"
+        base = store / "mailbox-v1"
+        sender = peer_mailbox.register(base, session="sender", harness="codex", cwd=str(SCRIPTS))
+        for session in ("target", "bystander"):
+            peer_mailbox.register(
+                base, session=session, harness="claude", cwd=str(SCRIPTS), pid=os.getpid(), state="idle"
+            )
+            with patch.object(mailbox_wake, "wake", return_value=dict(NOT_SENT)):
+                peer_mailbox.send(base, sender=sender, to=session, text="hi", wake=True)
+            path = wake_recovery.intent_path(base, session)
+            peer_mailbox.write(path, {**peer_mailbox.load(path), "nextAt": "2000-01-01T00:00:00Z"})  # both due
+        wake = FakeWake()
+        with (
+            patch.dict("os.environ", {"AGENT_EXECUTOR_HOME": str(store)}),
+            patch.object(mailbox_wake, "wake", wake),
+        ):
+            code = peer_mailbox.main(["wake-retry", "--to", "target", "--session", "sender", "--harness", "codex"])
+        self.assertEqual(code, 0)
+        self.assertEqual([call[0] for call in wake.calls], ["target"])
+        self.assertEqual(peer_mailbox.load(wake_recovery.intent_path(base, "bystander"))["attempts"], 0)
+
     def test_wake_retry_does_not_override_a_parked_stop(self):
         self.send("hello")
         wake = FakeWake(NOT_SENT)

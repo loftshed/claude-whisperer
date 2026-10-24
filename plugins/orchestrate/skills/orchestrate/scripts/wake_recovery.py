@@ -160,13 +160,21 @@ def reconcile_one(
 
 
 def reconcile(
-    base: Path, *, moment: dt.datetime | None = None, wake: Callable[..., dict[str, Any]] | None = None
+    base: Path,
+    *,
+    moment: dt.datetime | None = None,
+    wake: Callable[..., dict[str, Any]] | None = None,
+    sessions: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """One pass over every pending intent; returns what happened, for logs and tests."""
+    """One pass over every pending intent, or only these recipients' (chosen before anything is sent);
+    returns what happened, for logs and tests."""
     moment = moment or mailbox.now()
     wake = wake or mailbox_wake.wake
+    only = None if sessions is None else {mailbox.session_key(session) for session in sessions}
     outcomes = []
     for path in sorted(base.glob("wakes/*/pending.json")):
+        if only is not None and path.parent.name not in only:
+            continue
         try:
             outcome = reconcile_one(base, path, moment, wake)
         except (OSError, ValueError, mailbox.MailboxError) as error:

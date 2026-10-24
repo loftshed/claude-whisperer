@@ -3026,8 +3026,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 sessions = [peer["session"] for peer in scoped_peers(base, me, scope=args.scope)]
             reopened = wake_recovery.reopen(base, sessions)
-            outcomes = [outcome for outcome in wake_recovery.reconcile(base) if outcome["session"] in sessions]
-            output = {"reopened": reopened, "outcomes": outcomes}
+            # Only the chosen recipients: a project-scoped retry never wakes anyone outside that scope.
+            output = {"reopened": reopened, "outcomes": wake_recovery.reconcile(base, sessions=sessions)}
         elif args.action == "peers":
             me = caller(args, base) if session_arg(args) else workspace(os.getcwd())
             caller_harness = args.harness or me.get("harness") or detect_harness()
