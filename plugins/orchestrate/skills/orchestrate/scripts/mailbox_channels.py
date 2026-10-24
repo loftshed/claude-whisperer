@@ -14,9 +14,11 @@ harness and account: no native messaging tool has channels.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +113,7 @@ def post(
         raise mailbox.MailboxError(f"message is over {mailbox.MAX_BYTES // 1024} KiB; send a path to a file instead")
     if reply_to is not None and not re.fullmatch(mailbox.MESSAGE_ID, reply_to):
         raise mailbox.MailboxError(f"invalid replyTo id: {reply_to!r}")
+    reply_to = mailbox.thread_id(base, sender["session"], reply_to)
     fingerprint = {"channel": channel, "text": text, "replyTo": reply_to, "wake": bool(wake)}
     operation = None
     if idempotency_key is not None:
@@ -119,43 +122,38 @@ def post(
         digest = hashlib.sha256(idempotency_key.encode()).hexdigest()
         operation = base / "channel-ops" / mailbox.session_key(sender["session"]) / f"{digest}.json"
     with mailbox.locked(operation) if operation else _unlocked():
-        entry = mailbox.load(operation) if operation else None
-        if entry:
+        entry = None
+        if operation and operation.exists():
+            entry = mailbox.load(operation)
+            if entry is None:
+                raise mailbox.MailboxError("channel post journal is unreadable; inspect storage before retrying")
+            if entry.get("expired") or expired(entry):
+                raise mailbox.MailboxError(
+                    "idempotencyKey replay window expired after seven days; do not retry the old post"
+                )
             if entry.get("fingerprint") != fingerprint:
                 raise mailbox.MailboxError("that idempotencyKey was used for a different post; use a new key")
-        else:
-            moment = mailbox.stamp()
-            recipients = [{"session": p["session"], "name": p["name"]} for p in audience(base, sender, channel)]
+        if not entry:
             entry = {
                 "postId": mailbox.message_id(),
                 "fingerprint": fingerprint,
-                "recipients": recipients,
-                "acceptedAt": moment,
+                "sender": snapshot(sender),
+                "recipients": [{"session": p["session"], "name": p["name"]} for p in audience(base, sender, channel)],
+                "acceptedAt": mailbox.stamp(),
             }
-            mailbox.write(
-                post_path(base, channel, entry["postId"]),
-                {
-                    "schema": POST_SCHEMA,
-                    "postId": entry["postId"],
-                    "channel": channel,
-                    "from": mailbox.sender_address(sender),
-                    # Frozen with the post: a later change of directory never changes who `worktree` meant.
-                    "checkout": sender.get("checkout") or sender.get("cwd"),
-                    "text": text,
-                    "replyTo": reply_to,
-                    "wake": bool(wake),
-                    "sentAt": moment,
-                    "recipients": [r["name"] for r in recipients],
-                },
-            )
             if operation:
-                mailbox.write(operation, entry)
+                mailbox.write(operation, entry)  # persisted before anything is published
+        # A replay completes the post as it was accepted, in its original sender's context, from wherever it runs.
+        publisher = entry.get("sender") or snapshot(sender)
+        canonical = post_path(base, channel, entry["postId"])
+        if not canonical.exists():
+            mailbox.write(canonical, canonical_post(entry, publisher))
         outcomes = []
         for recipient in entry["recipients"]:
             try:
                 sent = mailbox.send(
                     base,
-                    sender=sender,
+                    sender=publisher,
                     to=recipient["session"],
                     text=text,
                     reply_to=reply_to,
@@ -176,6 +174,77 @@ def post(
         "delivered": sum("id" in o for o in outcomes),
         "recipients": outcomes,
     }
+
+
+SENDER_FIELDS = ("session", "name", "harness", "cwd", "checkout", "branch", "repo", "remotes", "accountHome")
+
+
+def snapshot(sender: dict[str, Any]) -> dict[str, Any]:
+    """The sender context a post was accepted in, kept for its replays."""
+    return {key: sender[key] for key in SENDER_FIELDS if key in sender}
+
+
+def expired(entry: dict[str, Any]) -> bool:
+    try:
+        return mailbox.now() - mailbox.parse_stamp(entry["acceptedAt"]) > mailbox.MAX_AGE
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return True
+
+
+def canonical_post(entry: dict[str, Any], publisher: dict[str, Any]) -> dict[str, Any]:
+    """The post as kept for history, built from its accepted operation."""
+    accepted = entry["fingerprint"]
+    return {
+        "schema": POST_SCHEMA,
+        "postId": entry["postId"],
+        "channel": accepted["channel"],
+        "from": mailbox.sender_address(publisher),
+        # Frozen with the post: a later change of directory never changes who `worktree` meant.
+        "checkout": publisher.get("checkout") or publisher.get("cwd"),
+        "text": accepted["text"],
+        "replyTo": accepted["replyTo"],
+        "wake": accepted["wake"],
+        "sentAt": entry["acceptedAt"],
+        "recipients": [recipient["name"] for recipient in entry["recipients"]],
+    }
+
+
+EXPIRED_SCHEMA = "agent-executor.channel-operation.expired.v1"
+
+
+def prune_operations(base: Path) -> None:
+    """Retire post operations past mail retention. A live sender keeps a body-free tombstone, so an old key
+    is refused instead of posting again; the tombstone goes when its sender does."""
+    for operation in (base / "channel-ops").glob("*/*.json"):
+        with mailbox.locked(operation):
+            entry = mailbox.load(operation)
+            if entry is None:
+                with contextlib.suppress(OSError):
+                    if time.time() - operation.stat().st_mtime > mailbox.MAX_AGE.total_seconds():
+                        operation.unlink()
+                continue
+            tombstone = entry.get("schema") == EXPIRED_SCHEMA
+            if not tombstone and not expired(entry):
+                continue
+            session = entry.get("session") if tombstone else (entry.get("sender") or {}).get("session")
+            peer = (
+                mailbox.load(mailbox.peer_path(base, session))
+                if isinstance(session, str) and re.fullmatch(mailbox.SESSION_ID, session)
+                else None
+            )
+            if not (mailbox.valid_peer(peer) and mailbox.is_live(peer)):
+                operation.unlink(missing_ok=True)
+            elif not tombstone:
+                mailbox.write(
+                    operation,
+                    {
+                        "schema": EXPIRED_SCHEMA,
+                        "expired": True,
+                        "session": session,
+                        "postId": entry.get("postId"),
+                        "expiredAt": mailbox.stamp(),
+                    },
+                )
 
 
 class _unlocked:
@@ -238,7 +307,8 @@ def overview(base: Path, me: dict[str, Any]) -> list[dict[str, Any]]:
 
 def split(me: dict[str, Any], others: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Channel-mates (sharing a channel; or, for a channel-less session, the other channel-less ones), and how
-    many sessions each other channel has. Only the mates matter for roster notices."""
+    many sessions each other channel has ("" counts the channel-less ones). Only the mates matter for roster
+    notices."""
     mine = set(memberships(me))
     mates, elsewhere = [], {}
     for peer in others:
@@ -246,7 +316,7 @@ def split(me: dict[str, Any], others: list[dict[str, Any]]) -> tuple[list[dict[s
         if (mine and theirs & mine) or (not mine and not theirs):
             mates.append(peer)
             continue
-        for channel in sorted(theirs) or ["(no channel)"]:
+        for channel in sorted(theirs) or [""]:
             elsewhere[channel] = elsewhere.get(channel, 0) + 1
     return mates, elsewhere
 
@@ -273,7 +343,8 @@ def join_hint(me: dict[str, Any], others: list[dict[str, Any]]) -> str:
     listed = ", ".join(f"{channel} ({count})" for channel, count in sorted(counts.items()))
     return (
         f"Task channels in this project: {listed}. Posts to a channel reach only its members; join the one for "
-        "your task with `mailbox join <channel>` (or the peer mailbox `channels` tool) so the others stay quiet."
+        "your task with the peer mailbox `focus` tool (`channels=[...]`) or `mailbox join <channel>`, so the others "
+        "stay quiet."
     )
 
 

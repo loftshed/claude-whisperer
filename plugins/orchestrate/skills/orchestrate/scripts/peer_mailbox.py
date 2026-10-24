@@ -1009,9 +1009,13 @@ def describe_colleagues(rows: list[dict[str, Any]], me: dict[str, Any], elsewher
     """The roster: these sessions in full, and other teams (`elsewhere`, sessions per channel) as counts."""
     import mailbox_channels
 
-    others = ", ".join(f"{count} in {name}" for name, count in sorted((elsewhere or {}).items()))
+    others = ", ".join(
+        f"{count} in {name}" if name else f"{count} without a channel"
+        for name, count in sorted((elsewhere or {}).items(), key=lambda item: (not item[0], item[0]))
+    )
     teams = (
-        f"Other teams also work in this project ({others}); they are not listed, and `mailbox channels` shows them."
+        f"Other sessions also work in this project ({others}); they are not listed here. The peer mailbox "
+        "`peers` tool lists everyone with their channels."
         if others
         else ""
     )
@@ -1573,6 +1577,7 @@ def send(
         raise MailboxError(f"message is over {MAX_BYTES // 1024} KiB; send a path to a file instead")
     if reply_to is not None and not re.fullmatch(MESSAGE_ID, reply_to):
         raise MailboxError(f"invalid replyTo id: {reply_to!r}")
+    reply_to = thread_id(base, sender["session"], reply_to)
     if idempotency_key is not None and (
         not isinstance(idempotency_key, str) or not re.fullmatch(CLIENT_ID, idempotency_key)
     ):
@@ -1925,6 +1930,20 @@ def take(
     return taken
 
 
+def thread_id(base: Path, session: str, reply_to: str | None) -> str | None:
+    """A reply to a channel post threads on its postId, whichever member's copy it names, so the poster's
+    wait(replyTo=postId) and channel history agree with it."""
+    if reply_to is None or not re.fullmatch(MESSAGE_ID, reply_to):
+        return reply_to
+    for path in sorted((base / "inbox").glob(f"*/{reply_to}.json")):
+        message = load(path)
+        if not valid_message(message) or not isinstance(message.get("postId"), str):
+            continue
+        if session in {message["from"].get("session"), message["to"].get("session")}:
+            return message["postId"]
+    return reply_to
+
+
 def reply_target_status(base: Path, session: str, reply_to: str) -> dict[str, Any] | None:
     """Recipient liveness and read status for a sent message ID when a reply wait times out."""
     peer = load(peer_path(base, session))
@@ -1982,7 +2001,7 @@ def wait(
     until = time.monotonic() + timeout
     peer = load(peer_path(base, session))
     run_peer = peer if is_run_peer(peer) else None
-    question_ids = {reply_to} if reply_to else set()
+    question_ids = {reply_to, thread_id(base, session, reply_to)} if reply_to else set()
     if run_peer and reply_to:
         question = find_run_question(base, run_peer["run"], reply_to, sender=session)
         if not question:
@@ -2068,9 +2087,8 @@ def prune(base: Path) -> dict[str, int]:
     for path in [
         *(base / "aliases").glob("*.json"),
         *(base / "delegations").glob("*.json"),
-        # Channel posts and fan-out operations follow mail retention; history shows where they stop.
+        # Channel posts follow mail retention; history shows where they stop.
         *(base / "channels").glob("*/*.json"),
-        *(base / "channel-ops").glob("*/*.json"),
     ]:
         with contextlib.suppress(OSError):
             if time.time() - path.stat().st_mtime > MAX_AGE.total_seconds():
@@ -2091,6 +2109,9 @@ def prune(base: Path) -> dict[str, int]:
             path.unlink(missing_ok=True)
             removed["messages"] += 1
     prune_send_journals(base)
+    import mailbox_channels
+
+    mailbox_channels.prune_operations(base)
     return removed
 
 
@@ -2110,7 +2131,7 @@ def render(message: dict[str, Any], recipient: str | None = None) -> str:
     if message.get("replyTo"):
         attributes += f' reply-to="{escape(message["replyTo"])}"'
     if message.get("channel"):
-        attributes += f' channel="{escape(message["channel"])}"'
+        attributes += f' channel="{escape(message["channel"])}" post="{escape(message.get("postId"))}"'
     # A peer cannot close the wrapper early and pose as the harness or the user.
     body = re.sub(r"</?\s*peer-message", lambda match: match.group(0).replace("<", "&lt;"), message["text"])
     return f"<peer-message {attributes}>\n{body}\n</peer-message>"

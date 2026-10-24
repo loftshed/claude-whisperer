@@ -310,13 +310,16 @@ session's channels.
   and only such a post, or a direct message, may keep a turn going at Stop; quiet posts wait for the
   member's next turn.
 - **Delivery.** A post freezes its recipients when accepted and reaches each as an ordinary message
-  marked with `channel`, so inbox, wait, ack and wake work as usual. With an idempotency key (CLI
-  `--id`), a replay finishes missed deliveries without reaching later joiners or delivering twice.
+  marked with `channel` and `postId`, so inbox, wait, ack and wake work as usual. With an idempotency
+  key (CLI `--id`), a replay finishes the post as accepted: same recipients and sender context, even
+  after the sender moves, with no later joiners and no second delivery. A new post needs a new key;
+  after seven days an old key is refused.
 - **Native-first exemption.** Channel posts go through this mailbox to every member, including
   sessions of the sender's own harness and account: no native messaging tool has channels. Direct
   messages keep the native-first rule.
 - **Replies.** `replyTo` names the message answered; the destination is still explicit: the channel
-  for the group, `to` for the poster alone.
+  for the group, `to` for the poster alone. A reply to any member's copy of a post is threaded on its
+  `postId`, which the poster waits on (`wait(replyTo=postId)`) and history shows.
 - **Roster.** Hooks list channel-mates in full and other teams as counts, and announce changes only
   among channel-mates. At session start a channel-less agent is told which channels exist.
 - **Not private.** Anyone in the project may read a channel's history on request; it is never pushed to

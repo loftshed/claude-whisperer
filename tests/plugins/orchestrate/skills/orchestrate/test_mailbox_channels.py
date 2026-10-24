@@ -101,6 +101,86 @@ class ChannelTests(unittest.TestCase):
         with self.assertRaises(peer_mailbox.MailboxError):
             self.post(sender, "graph", "something else", idempotency_key="schema-v2")
 
+    def test_a_replay_after_the_sender_moves_finishes_in_the_accepted_context(self):
+        sender = self.peer("sender", channels=["graph"])
+        self.peer("first", channels=["graph"])
+        self.peer("second", channels=["graph"])
+        real_send = peer_mailbox.send
+
+        def second_down(base, **options):
+            if options["to"] == "second":
+                raise peer_mailbox.MailboxError("disk hiccup")
+            return real_send(base, **options)
+
+        with patch.object(peer_mailbox, "send", side_effect=second_down):
+            first = self.post(sender, "graph", "edges ready", idempotency_key="edges")
+        moved = self.peer("sender", cwd=self.elsewhere)
+        again = self.post(moved, "graph", "edges ready", idempotency_key="edges")
+        self.assertEqual(again["postId"], first["postId"])
+        self.assertEqual([r.get("error") for r in again["recipients"]], [None, None])
+        self.assertEqual(self.inbox("first"), ["edges ready"])
+        (copy,) = peer_mailbox.incoming(self.base, "second")
+        self.assertEqual(copy["from"]["cwd"], sender["cwd"])
+        kept = peer_mailbox.load(mailbox_channels.post_path(self.base, "graph", first["postId"]))
+        self.assertEqual(kept["checkout"], sender.get("checkout") or sender["cwd"])
+        self.assertNotEqual(moved["cwd"], sender["cwd"])
+
+    def test_a_post_accepted_but_not_yet_published_is_recovered(self):
+        sender = self.peer("sender", channels=["graph"])
+        self.peer("member", channels=["graph"])
+        real_write = peer_mailbox.write
+
+        def crash_on_publish(path, value):
+            if "channels" in Path(path).parts:
+                raise OSError("power cut")
+            return real_write(path, value)
+
+        with patch.object(peer_mailbox, "write", side_effect=crash_on_publish), self.assertRaises(OSError):
+            self.post(sender, "graph", "layout v3", idempotency_key="layout")
+        self.assertEqual(self.inbox("member"), [])
+        result = self.post(sender, "graph", "layout v3", idempotency_key="layout")
+        self.assertEqual(result["delivered"], 1)
+        (kept,) = mailbox_channels.history(self.base, sender, "graph")["posts"]
+        self.assertEqual((kept["postId"], kept["text"]), (result["postId"], "layout v3"))
+
+    def test_an_unreadable_or_expired_key_is_refused(self):
+        sender = self.peer("sender", channels=["graph"])
+        self.peer("member", channels=["graph"])
+        self.post(sender, "graph", "old news", idempotency_key="old")
+        (operation,) = (self.base / "channel-ops").glob("*/*.json")
+        entry = peer_mailbox.load(operation)
+        operation.write_text("{not json")
+        with self.assertRaisesRegex(peer_mailbox.MailboxError, "unreadable"):
+            self.post(sender, "graph", "old news", idempotency_key="old")
+        entry["acceptedAt"] = peer_mailbox.stamp(peer_mailbox.now() - peer_mailbox.MAX_AGE * 2)
+        peer_mailbox.write(operation, entry)
+        with self.assertRaisesRegex(peer_mailbox.MailboxError, "expired"):
+            self.post(sender, "graph", "old news", idempotency_key="old")
+        peer_mailbox.prune(self.base)
+        tombstone = peer_mailbox.load(operation)
+        self.assertEqual(tombstone["schema"], mailbox_channels.EXPIRED_SCHEMA)
+        self.assertNotIn("fingerprint", tombstone)
+        with self.assertRaisesRegex(peer_mailbox.MailboxError, "expired"):
+            self.post(sender, "graph", "old news", idempotency_key="old")
+        peer_mailbox.unregister(self.base, "sender")
+        peer_mailbox.prune(self.base)
+        self.assertFalse(operation.exists())
+
+    def test_replies_to_any_copy_thread_on_the_post(self):
+        sender = self.peer("sender", channels=["graph"])
+        member = self.peer("member", channels=["graph"])
+        posted = self.post(sender, "graph", "which layout?")
+        (copy,) = peer_mailbox.incoming(self.base, "member")
+        self.assertIn(f'post="{posted["postId"]}"', peer_mailbox.render(copy))
+        peer_mailbox.send(self.base, sender=member, to="sender", text="force-directed", reply_to=copy["id"])
+        for handle in (posted["postId"], posted["recipients"][0]["id"]):
+            with self.subTest(handle=handle):
+                found = peer_mailbox.wait(self.base, "sender", timeout=0.5, reply_to=handle, mark=False)
+                self.assertEqual([m["replyTo"] for m in found["messages"]], [posted["postId"]])
+        self.post(member, "graph", "agreed: force-directed", reply_to=copy["id"])
+        replies = [p for p in mailbox_channels.history(self.base, sender, "graph")["posts"] if p["replyTo"]]
+        self.assertEqual([p["replyTo"] for p in replies], [posted["postId"]])
+
     def test_posts_are_quiet_unless_a_wake_is_asked_for(self):
         sender = self.peer("sender", channels=["graph"])
         self.peer("member", channels=["graph"])

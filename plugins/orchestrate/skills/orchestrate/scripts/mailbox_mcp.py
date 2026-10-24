@@ -254,6 +254,8 @@ MESSAGE_OUTPUT = object_schema(
         "harness": {"type": "string"},
         "sentAt": {"type": "string"},
         "replyTo": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "channel": {"type": "string"},
+        "postId": {"type": "string"},
         "text": {
             "type": "string",
         },
@@ -516,6 +518,7 @@ def mail_response(
             "harness": m["from"].get("harness", "unknown"),
             "sentAt": m["sentAt"],
             "replyTo": m.get("replyTo"),
+            **({"channel": m["channel"], "postId": m["postId"]} if m.get("channel") else {}),
             **({"text": m["text"]} if include_text else {}),
         }
         for m in found

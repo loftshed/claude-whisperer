@@ -102,6 +102,8 @@ class ContractTests(unittest.TestCase):
         )
         self.assertEqual([m["text"] for m in MAILBOX.incoming(self.base, "fixture-reader")], ["edges ready"])
         self.assertEqual(MAILBOX.incoming(self.base, "fixture-other"), [])
+        (row,) = self.tool("inbox")["result"]["structuredContent"]["messages"]
+        self.assertEqual((row["channel"], row["postId"]), ("graph", posted["structuredContent"]["postId"]))
         both = self.tool("send", {"channel": "graph", "to": "fixture-reader", "text": "x"}, session="fixture-sender")
         self.assertTrue(both["result"]["isError"])
         rows = self.tool("peers")["result"]["structuredContent"]["peers"]
