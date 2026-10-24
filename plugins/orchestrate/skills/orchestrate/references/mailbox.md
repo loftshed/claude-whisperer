@@ -91,16 +91,16 @@ not a reply; accepted delivery is not evidence of receipt or consideration.
 
 The normal server is `scripts/mailbox_daemon.py`. `scripts/mailbox_mcp.py` remains a stdio fallback; the CLI is `run_agent.py mailbox …`.
 
-| Tool       | Does                                                                                                             |
-| ---------- | ---------------------------------------------------------------------------------------------------------------- |
-| `register` | Hookless HTTP callers register their absolute `cwd`, `harness`, optional native `pid`; returns a `session`.      |
-| `peers`    | Live sessions in this project: name, harness, state (`idle`, `busy`, `waiting`), cwd. Dead ones are pruned.      |
-| `send`     | `to`, `text` (≤ 32 KiB), `replyTo?`; HTTP requires a stable `idempotencyKey` for retries.                        |
-| `inbox`    | Unread messages, oldest first. HTTP keeps them unread until `ack`; stdio/CLI mark returned mail read by default. |
-| `wait`     | Blocks up to `timeoutSeconds` (max 600) for a message, or for the reply to `replyTo`.                            |
-| `ack`      | Marks message ids read.                                                                                          |
-| `focus`    | One line on what this session is working on, shown to agents in the same project.                                |
-| `feedback` | Record a communication problem, your intent and what you needed instead. Writes locally; sends no message.       |
+| Tool       | Does                                                                                                                              |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `register` | Hookless HTTP callers register their absolute `cwd`, `harness`, optional native `pid`; returns a `session`.                       |
+| `peers`    | Live sessions in this project: name, harness, state (`idle`, `busy`, `waiting`), cwd, channels. Dead ones are pruned.             |
+| `send`     | `to` or `channel`, `text` (≤ 32 KiB), `replyTo?`; HTTP requires a stable `idempotencyKey` for retries.                            |
+| `inbox`    | Unread messages, oldest first. HTTP keeps them unread until `ack`; stdio/CLI mark returned mail read by default.                  |
+| `wait`     | Blocks up to `timeoutSeconds` (max 600) for a message, or for the reply to `replyTo`.                                             |
+| `ack`      | Marks message ids read.                                                                                                           |
+| `focus`    | One line on what this session is working on, shown to agents in the same project; `channels`/`leave` join or leave task channels. |
+| `feedback` | Record a communication problem, your intent and what you needed instead. Writes locally; sends no message.                        |
 
 ### MCP protocol and bounded responses
 
@@ -281,6 +281,49 @@ default and puts same-repository sessions first. Agents set their own line with 
 (CLI: `run_agent.py mailbox focus --text '...'`) and agree on a
 split before editing files another session is working on. A session launched by the runner is listed as a delegated run worker and gets
 no such notice itself: its conductor coordinates for it. When the last colleague leaves, the next prompt says so.
+
+## Task channels
+
+When separate teams share a project (say, agents fetching records and agents building a graph from
+them), each joins the channel of its task and posts there, so the other team is not interrupted.
+
+```sh
+python3 <skill-directory>/scripts/run_agent.py mailbox join graph            # or focus --channel graph
+python3 <skill-directory>/scripts/run_agent.py mailbox send --channel graph --text 'Edge list v2 is ready'
+python3 <skill-directory>/scripts/run_agent.py mailbox channels               # channels, members, yours
+python3 <skill-directory>/scripts/run_agent.py mailbox history --channel graph # catch up, newest first
+python3 <skill-directory>/scripts/run_agent.py mailbox leave graph
+```
+
+MCP: `focus(text, channels=[...], leave=[...])`, `send(channel=..., text=...)`; `peers` shows each
+session's channels.
+
+- **Audience.** Every send names exactly one destination: `to` (one peer) or `channel`. A task
+  channel reaches its live members; `all` reaches everyone in the project, worktrees and clones
+  included; `worktree` reaches everyone in the sender's checkout. A session in no channel hears `all`,
+  `worktree` and direct messages, never a task channel.
+- **Membership** changes only when asked: `join`/`leave`, `focus --channel` (which adds, never removes),
+  or `AGENT_MAILBOX_CHANNELS=retrieval,graph` set by whoever launches a session, read at its first
+  registration only. Focus text never changes it. Membership ends with the session and survives
+  `/clear`.
+- **Quiet by default.** A channel post never wakes anyone unless sent with `wake: true` (CLI `--wake`),
+  and only such a post, or a direct message, may keep a turn going at Stop; quiet posts wait for the
+  member's next turn.
+- **Delivery.** A post freezes its recipients when accepted and reaches each as an ordinary message
+  marked with `channel` and `postId`, so inbox, wait, ack and wake work as usual. With an idempotency
+  key (CLI `--id`), a replay finishes the post as accepted: same recipients and sender context, even
+  after the sender moves, with no later joiners and no second delivery. A new post needs a new key;
+  after seven days an old key is refused.
+- **Native-first exemption.** Channel posts go through this mailbox to every member, including
+  sessions of the sender's own harness and account: no native messaging tool has channels. Direct
+  messages keep the native-first rule.
+- **Replies.** `replyTo` names the message answered; the destination is still explicit: the channel
+  for the group, `to` for the poster alone. A reply to any member's copy of a post is threaded on its
+  `postId`, which the poster waits on (`wait(replyTo=postId)`) and history shows.
+- **Roster.** Hooks list channel-mates in full and other teams as counts, and announce changes only
+  among channel-mates. At session start a channel-less agent is told which channels exist.
+- **Not private.** Anyone in the project may read a channel's history on request; it is never pushed to
+  non-members. History follows mail retention, and `oldestKept` shows where it stops.
 
 ## Communication feedback
 

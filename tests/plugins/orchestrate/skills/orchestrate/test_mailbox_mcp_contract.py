@@ -91,6 +91,26 @@ class ContractTests(unittest.TestCase):
     def send_fixture(self, text, reply_to=None):
         return MAILBOX.send(self.base, sender=self.sender, to=self.reader["name"], text=text, reply_to=reply_to)
 
+    def test_channels_join_through_focus_and_post_through_send(self):
+        joined = self.tool("focus", {"text": "Graph build", "channels": ["graph"]})["result"]
+        self.assertEqual(joined["structuredContent"]["channels"], ["graph"])
+        MAILBOX.register(self.base, session="fixture-other", harness="codex", cwd=os.getcwd(), pid=os.getpid())
+        posted = self.tool("send", {"channel": "graph", "text": "edges ready"}, session="fixture-sender")["result"]
+        self.assertFalse(posted.get("isError"), posted)
+        self.assertEqual(
+            (posted["structuredContent"]["channel"], posted["structuredContent"]["delivered"]), ("graph", 1)
+        )
+        self.assertEqual([m["text"] for m in MAILBOX.incoming(self.base, "fixture-reader")], ["edges ready"])
+        self.assertEqual(MAILBOX.incoming(self.base, "fixture-other"), [])
+        (row,) = self.tool("inbox")["result"]["structuredContent"]["messages"]
+        self.assertEqual((row["channel"], row["postId"]), ("graph", posted["structuredContent"]["postId"]))
+        both = self.tool("send", {"channel": "graph", "to": "fixture-reader", "text": "x"}, session="fixture-sender")
+        self.assertTrue(both["result"]["isError"])
+        rows = self.tool("peers")["result"]["structuredContent"]["peers"]
+        self.assertEqual(next(p for p in rows if p["session"] == "fixture-reader")["channels"], "graph")
+        left = self.tool("focus", {"text": "Graph build", "leave": ["graph"]})["result"]["structuredContent"]
+        self.assertNotIn("channels", left)
+
     def test_registration_focus_and_peer_display_names_preserve_old_clients(self):
         args = {
             "cwd": os.getcwd(),

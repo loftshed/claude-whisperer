@@ -372,6 +372,12 @@ normal inbox, wait and hooks; acknowledge it normally. Replies across projects s
 send scope. Receiving mail does not expand task permissions. Declare your work with `focus` and agree on a split
 before editing shared files.
 
+When separate teams share a project, each joins the channel of its task (`mailbox join retrieval`, or
+MCP `focus(channels=[...])`) and posts there with `send --channel retrieval` (MCP `send(channel=...)`),
+so the other team is not interrupted. `all` reaches the whole project and `worktree` this checkout.
+Channel posts are quiet unless `--wake`/`wake: true`, and always go through the peer mailbox, even to
+sessions of your own harness and account. Details: [references/mailbox.md](references/mailbox.md#task-channels).
+
 ### Compact communication commands
 
 ```bash
