@@ -29,6 +29,8 @@ RECONCILE_EVERY = 3.0
 # The recipient's user stopped its last turn; only that user's next prompt may set it going again.
 CANCELLED = {"USER_CANCELED"}
 MARKERS = ("claude-wake.json", "agy-wake.json")
+# Phases after which a notice may already be on its way: wait out the accept window before sending again.
+MAYBE_SENT = {"submitted", "unknown"}
 
 
 def intent_path(base: Path, session: str) -> Path:
@@ -48,7 +50,7 @@ def record_intent(base: Path, target: dict[str, Any], message_id: str, result: d
     with mailbox.locked(path):
         intent = mailbox.load(path) or {}
         messages = [m for m in intent.get("messages", []) if isinstance(m, str) and m != message_id]
-        submitted = result.get("phase") == "submitted"
+        submitted = result.get("phase") in MAYBE_SENT
         fresh = {
             "session": target["session"],
             # A new request gets its own bounded chance, even after an earlier intent ran out.
@@ -144,7 +146,7 @@ def reconcile_one(
         result = wake(peer, messages[-1], base=base, retry=True)
         attempts = int(intent.get("attempts", 0)) + 1
         intent.update(attempts=attempts, lastStatus=result.get("status"), lastReason=result.get("reason"))
-        if result.get("phase") == "submitted":
+        if result.get("phase") in MAYBE_SENT:
             intent.update(state="submitted", submittedAt=mailbox.stamp(moment), submittedFor=messages[-1])
             intent.pop("nextAt", None)
         else:

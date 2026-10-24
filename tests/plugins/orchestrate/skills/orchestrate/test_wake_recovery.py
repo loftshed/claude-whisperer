@@ -19,6 +19,7 @@ import wake_recovery  # noqa: E402
 
 NOT_SENT = {"status": "unavailable", "reason": "offline", "phase": "not-sent"}
 SUBMITTED = {"status": "scheduled", "reason": "taken", "phase": "submitted"}
+UNKNOWN = {"status": "unavailable", "reason": "timed out after connecting", "phase": "unknown"}
 
 
 class FakeWake:
@@ -92,6 +93,16 @@ class WakeRecoveryTests(unittest.TestCase):
         self.at(25, wake)
         self.assertEqual(wake.calls, [("target", sent["id"], True)])
         self.assertFalse(marker.exists())  # lifted, so the adapter really submits again
+
+    def test_an_attempt_that_may_have_submitted_waits_out_the_window_like_a_submission(self):
+        sent = self.send("hello", first=UNKNOWN)
+        self.assertEqual(self.intent()["state"], "submitted")
+        wake = FakeWake(UNKNOWN)
+        self.assertEqual(self.at(3, wake), [])  # no quick resend that could duplicate a delivered notice
+        self.at(25, wake)
+        self.assertEqual(wake.calls, [("target", sent["id"], True)])
+        self.assertEqual(self.intent()["state"], "submitted")
+        self.assertEqual(self.at(30, wake), [])
 
     def test_limits_mark_recovery_needed_until_wake_retry_reopens(self):
         self.send("hello")
