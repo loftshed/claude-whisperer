@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.33.0
+
+- feat(orchestrate): give agents Martian names (#28)
+- feat(orchestrate): add a shared run ledger and monorepo/many-file checks to ork gate (#27)
+
 ## 0.32.0
 
 - feat(orchestrate): add a machine-wide gate for heavy test, build and lint runs (#26)
